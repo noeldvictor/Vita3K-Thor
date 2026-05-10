@@ -91,10 +91,11 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - VitaCheat `.psv` files can be detected by title ID from repo/user cheat roots such as `cheats/<TITLEID>.psv`, `cheats/db/<TITLEID>.psv`, shared `cheats/`, or `ux0/vitacheat/db/`.
 - Only commit third-party cheat files when their license/source permits redistribution. Otherwise commit importer/conversion tooling and user instructions, not the database itself.
 - Games with detected cheat files show a `C` badge in the app list.
-- Runtime cheat support is fail-closed and currently applies only enabled `_V1` VitaCheat static writes: `$0000`, `$0100`, `$0200`, plus simple `$B200` main-module segment-relative base selectors. Unsupported pointer, condition, block, and button-code formats are skipped and logged.
+- Runtime cheat support is fail-closed and currently applies only enabled `_V1` VitaCheat writes: `$0000`, `$0100`, `$0200`, ARM/code writes `$A000`, `$A100`, `$A200`, level-1 pointer writes ending in `$3300`, plus simple `$B200` main-module segment-relative base selectors. Unsupported multi-level pointer, condition, block, and button-code formats are skipped and logged.
 - `tools/convert_vitacheat.py` converts VitaCheat `.psv` files into JSON metadata for auditing and future UI work. The emulator runtime still reads `.psv` directly.
-- Runtime shortcuts reserved for Thor testing: `Select + R1` toggles 200% fast-forward, `Select + right-stick down` requests save state, and `Select + right-stick up` requests load state.
-- Save-state/load-state shortcuts reserve per-game slot 0 under shared `states/<TITLEID>/`, but serialization is still a placeholder until CPU, memory, kernel thread, GPU/display, IO, and audio state capture is implemented and validated together.
+- Runtime shortcuts reserved for Thor testing: `Select + R1` toggles configured fast-forward speed, `Select + right-stick down` requests save state, and `Select + right-stick up` requests load state.
+- `fast-forward-speed-percent` defaults to 200 and is clamped from 101 to 1000 when toggled.
+- Save-state/load-state shortcuts provide an experimental same-session per-game slot 0 quickstate: pause guest threads, snapshot CPU contexts plus allocated guest memory pages, and restore them while the same app session is still running. It writes `states/<TITLEID>/slot0.same-session.txt` as a marker only; durable disk `.thorstate` serialization still needs kernel object, GPU/display, IO, and audio state capture before it can be considered reliable.
 
 ## ADB Thor Testing
 

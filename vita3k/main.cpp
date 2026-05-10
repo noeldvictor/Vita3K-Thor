@@ -86,12 +86,21 @@
 
 namespace {
 
+enum class RuntimeCheatWriteKind {
+    Direct,
+    PointerLevel1,
+};
+
 struct RuntimeCheatWrite {
+    RuntimeCheatWriteKind kind = RuntimeCheatWriteKind::Direct;
     Address address = 0;
     uint32_t value = 0;
     uint8_t width = 0;
     int relative_segment = -1;
+    uint32_t pointer_offset = 0;
+    uint32_t final_offset = 0;
     uint32_t line = 0;
+    bool code_patch = false;
     bool warned_invalid = false;
 };
 
@@ -106,6 +115,17 @@ struct RuntimeCheats {
     fs::path source;
     std::array<Address, MODULE_INFO_NUM_SEGMENTS> segment_bases{};
     std::vector<RuntimeCheat> cheats;
+    uint32_t enabled_write_count = 0;
+    uint32_t code_patch_write_count = 0;
+    uint32_t pointer_write_count = 0;
+};
+
+struct PendingPointerWrite {
+    Address base_address = 0;
+    uint32_t first_offset = 0;
+    uint8_t width = 0;
+    int relative_segment = -1;
+    uint32_t line = 0;
 };
 
 static std::string trim_copy(std::string value) {
@@ -149,7 +169,7 @@ static std::vector<std::string> split_fields(const std::string &line) {
     return fields;
 }
 
-static bool vita_cheat_write_width(const uint32_t code_type, uint8_t &width) {
+static bool vita_cheat_static_write_width(const uint32_t code_type, uint8_t &width) {
     switch (code_type) {
     case 0x0000:
         width = 1;
@@ -163,6 +183,45 @@ static bool vita_cheat_write_width(const uint32_t code_type, uint8_t &width) {
     default:
         return false;
     }
+}
+
+static bool vita_cheat_arm_write_width(const uint32_t code_type, uint8_t &width) {
+    switch (code_type) {
+    case 0xA000:
+        width = 1;
+        return true;
+    case 0xA100:
+        width = 2;
+        return true;
+    case 0xA200:
+        width = 4;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool vita_cheat_pointer_header(const uint32_t code_type, uint8_t &width, uint8_t &level) {
+    if ((code_type & 0xF000) != 0x3000)
+        return false;
+
+    const uint8_t width_type = static_cast<uint8_t>((code_type >> 8) & 0xF);
+    switch (width_type) {
+    case 0:
+        width = 1;
+        break;
+    case 1:
+        width = 2;
+        break;
+    case 2:
+        width = 4;
+        break;
+    default:
+        return false;
+    }
+
+    level = static_cast<uint8_t>(code_type & 0xFF);
+    return level > 0;
 }
 
 static std::optional<fs::path> find_vitacheat_file(const EmuEnvState &emuenv) {
@@ -224,9 +283,24 @@ static RuntimeCheats load_runtime_cheats(const EmuEnvState &emuenv, const int32_
     }
 
     RuntimeCheat *current = nullptr;
+    std::optional<PendingPointerWrite> pending_pointer;
     int current_relative_segment = -1;
     uint32_t line_number = 0;
     uint32_t unsupported_lines = 0;
+
+    const auto mark_unsupported = [&]() {
+        if (current)
+            current->unsupported_lines++;
+        unsupported_lines++;
+    };
+
+    const auto clear_pending_pointer_as_unsupported = [&]() {
+        if (!pending_pointer.has_value())
+            return;
+
+        mark_unsupported();
+        pending_pointer.reset();
+    };
 
     std::string line;
     while (std::getline(file, line)) {
@@ -236,6 +310,7 @@ static RuntimeCheats load_runtime_cheats(const EmuEnvState &emuenv, const int32_
             continue;
 
         if (line.starts_with("_V0") || line.starts_with("_V1")) {
+            clear_pending_pointer_as_unsupported();
             auto name = trim_copy(line.substr(3));
             if (name.empty())
                 name = fmt::format("Cheat {}", runtime.cheats.size() + 1);
@@ -256,8 +331,8 @@ static RuntimeCheats load_runtime_cheats(const EmuEnvState &emuenv, const int32_
 
         const auto fields = split_fields(line);
         if (fields.size() < 3) {
-            current->unsupported_lines++;
-            unsupported_lines++;
+            clear_pending_pointer_as_unsupported();
+            mark_unsupported();
             continue;
         }
 
@@ -265,39 +340,71 @@ static RuntimeCheats load_runtime_cheats(const EmuEnvState &emuenv, const int32_
         const auto address = parse_hex_word(fields[1]);
         const auto value = parse_hex_word(fields[2]);
         if (!code_type.has_value() || !address.has_value() || !value.has_value()) {
-            current->unsupported_lines++;
-            unsupported_lines++;
+            clear_pending_pointer_as_unsupported();
+            mark_unsupported();
             continue;
+        }
+
+        if (pending_pointer.has_value()) {
+            if (*code_type == 0x3300) {
+                current->writes.push_back({ RuntimeCheatWriteKind::PointerLevel1, pending_pointer->base_address, *value, pending_pointer->width, pending_pointer->relative_segment, pending_pointer->first_offset, *address, pending_pointer->line });
+                pending_pointer.reset();
+                continue;
+            }
+
+            clear_pending_pointer_as_unsupported();
         }
 
         if (*code_type == 0xB200) {
             if ((*address < MODULE_INFO_NUM_SEGMENTS) && (*value == 0)) {
                 current_relative_segment = static_cast<int>(*address);
             } else {
-                current->unsupported_lines++;
-                unsupported_lines++;
+                mark_unsupported();
             }
             continue;
         }
 
         uint8_t width = 0;
-        if (!vita_cheat_write_width(*code_type, width)) {
-            current->unsupported_lines++;
-            unsupported_lines++;
+        uint8_t pointer_level = 0;
+        if (vita_cheat_static_write_width(*code_type, width)) {
+            current->writes.push_back({ RuntimeCheatWriteKind::Direct, *address, *value, width, current_relative_segment, 0, 0, line_number, false });
             continue;
         }
 
-        current->writes.push_back({ *address, *value, width, current_relative_segment, line_number });
+        if (vita_cheat_arm_write_width(*code_type, width)) {
+            current->writes.push_back({ RuntimeCheatWriteKind::Direct, *address, *value, width, current_relative_segment, 0, 0, line_number, true });
+            continue;
+        }
+
+        if (vita_cheat_pointer_header(*code_type, width, pointer_level)) {
+            if (pointer_level == 1) {
+                pending_pointer = PendingPointerWrite{ *address, *value, width, current_relative_segment, line_number };
+            } else {
+                mark_unsupported();
+            }
+            continue;
+        }
+
+        mark_unsupported();
     }
 
-    uint32_t enabled_writes = 0;
+    clear_pending_pointer_as_unsupported();
+
     for (const auto &cheat : runtime.cheats) {
-        if (cheat.enabled)
-            enabled_writes += static_cast<uint32_t>(cheat.writes.size());
+        if (!cheat.enabled)
+            continue;
+
+        runtime.enabled_write_count += static_cast<uint32_t>(cheat.writes.size());
+        for (const auto &write : cheat.writes) {
+            if (write.kind == RuntimeCheatWriteKind::PointerLevel1)
+                runtime.pointer_write_count++;
+            if (write.code_patch)
+                runtime.code_patch_write_count++;
+        }
     }
 
-    LOG_INFO("Loaded VitaCheat file {} for {} with {} enabled static writes; {} unsupported lines skipped",
-        *source, emuenv.io.title_id, enabled_writes, unsupported_lines);
+    LOG_INFO("Loaded VitaCheat file {} for {} with {} enabled writes ({} ARM/code patches, {} level-1 pointer writes); {} unsupported lines skipped",
+        *source, emuenv.io.title_id, runtime.enabled_write_count, runtime.code_patch_write_count, runtime.pointer_write_count, unsupported_lines);
     return runtime;
 }
 
@@ -308,22 +415,61 @@ static bool valid_cheat_range(const MemState &mem, const Address address, const 
     return is_valid_addr_range(mem, address, address + width);
 }
 
+static std::optional<Address> add_address_offset(const Address address, const uint32_t offset) {
+    if (address > (std::numeric_limits<Address>::max() - offset))
+        return std::nullopt;
+
+    return address + offset;
+}
+
+static std::optional<Address> resolve_direct_cheat_address(const MemState &mem, const RuntimeCheats &runtime, const Address address, const uint8_t width, const int relative_segment) {
+    if (valid_cheat_range(mem, address, width))
+        return address;
+
+    if ((relative_segment < 0) || (static_cast<size_t>(relative_segment) >= runtime.segment_bases.size()))
+        return std::nullopt;
+
+    const Address base = runtime.segment_bases[relative_segment];
+    if (base == 0)
+        return std::nullopt;
+
+    const auto relative_address = add_address_offset(base, address);
+    if (!relative_address.has_value())
+        return std::nullopt;
+
+    if (!valid_cheat_range(mem, *relative_address, width))
+        return std::nullopt;
+
+    return *relative_address;
+}
+
 static std::optional<Address> resolve_cheat_address(const MemState &mem, const RuntimeCheats &runtime, const RuntimeCheatWrite &write) {
-    if (valid_cheat_range(mem, write.address, write.width))
-        return write.address;
+    if (write.kind == RuntimeCheatWriteKind::Direct)
+        return resolve_direct_cheat_address(mem, runtime, write.address, write.width, write.relative_segment);
 
-    if ((write.relative_segment < 0) || (static_cast<size_t>(write.relative_segment) >= runtime.segment_bases.size()))
+    const auto pointer_address = resolve_direct_cheat_address(mem, runtime, write.address, 4, write.relative_segment);
+    if (!pointer_address.has_value())
         return std::nullopt;
 
-    const Address base = runtime.segment_bases[write.relative_segment];
-    if ((base == 0) || (write.address > (std::numeric_limits<Address>::max() - base)))
+    const auto base_pointer = *Ptr<uint32_t>(*pointer_address).get(mem);
+    const auto with_first_offset = add_address_offset(base_pointer, write.pointer_offset);
+    if (!with_first_offset.has_value())
         return std::nullopt;
 
-    const Address relative_address = base + write.address;
-    if (!valid_cheat_range(mem, relative_address, write.width))
+    const auto final_address = add_address_offset(*with_first_offset, write.final_offset);
+    if (!final_address.has_value() || !valid_cheat_range(mem, *final_address, write.width))
         return std::nullopt;
 
-    return relative_address;
+    return *final_address;
+}
+
+static uint32_t normalized_cheat_value(const RuntimeCheatWrite &write) {
+    if (write.width == 1)
+        return write.value & 0xFF;
+    if (write.width == 2)
+        return write.value & 0xFFFF;
+
+    return write.value;
 }
 
 static void apply_runtime_cheats(EmuEnvState &emuenv, RuntimeCheats &runtime) {
@@ -344,15 +490,34 @@ static void apply_runtime_cheats(EmuEnvState &emuenv, RuntimeCheats &runtime) {
                 continue;
             }
 
-            uint32_t value = write.value;
-            if (write.width == 1)
-                value &= 0xFF;
-            else if (write.width == 2)
-                value &= 0xFFFF;
+            const uint32_t value = normalized_cheat_value(write);
+            auto *target = Ptr<uint8_t>(*address).get(emuenv.mem);
+            if (std::memcmp(target, &value, write.width) == 0)
+                continue;
 
-            std::memcpy(Ptr<uint8_t>(*address).get(emuenv.mem), &value, write.width);
+            std::memcpy(target, &value, write.width);
+            if (write.code_patch)
+                emuenv.kernel.invalidate_jit_cache(*address, write.width);
         }
     }
+}
+
+static void draw_runtime_status_overlay(const EmuEnvState &emuenv, const RuntimeCheats &runtime_cheats) {
+    const uint32_t speed_percent = emuenv.display.speed_percent.load();
+    if ((speed_percent <= 100) && (runtime_cheats.enabled_write_count == 0))
+        return;
+
+    std::string status;
+    if (speed_percent > 100)
+        status = fmt::format("FF {}%", speed_percent);
+    if (runtime_cheats.enabled_write_count > 0) {
+        if (!status.empty())
+            status += "  |  ";
+        status += fmt::format("Cheats {}", runtime_cheats.enabled_write_count);
+    }
+
+    const auto pos = ImVec2(emuenv.logical_viewport_pos.x + 16.f, emuenv.logical_viewport_pos.y + 16.f);
+    ImGui::GetForegroundDrawList()->AddText(pos, IM_COL32(255, 230, 128, 235), status.c_str());
 }
 
 } // namespace
@@ -894,6 +1059,7 @@ int main(int argc, char *argv[]) {
         if (!emuenv.kernel.is_threads_paused())
             gui::draw_common_dialog(gui, emuenv);
         gui::draw_vita_area(gui, emuenv);
+        draw_runtime_status_overlay(emuenv, runtime_cheats);
 
         if (emuenv.cfg.performance_overlay && !emuenv.kernel.is_threads_paused() && (emuenv.common_dialog.status != SCE_COMMON_DIALOG_STATUS_RUNNING)) {
             ImGui::PushFont(gui.vita_font[emuenv.current_font_level]);

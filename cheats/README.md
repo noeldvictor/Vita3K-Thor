@@ -21,9 +21,11 @@ Runtime cheat support is intentionally fail-closed. Vita3K Thor currently applie
 - `$0000 address value` for 8-bit writes
 - `$0100 address value` for 16-bit writes
 - `$0200 address value` for 32-bit writes
+- `$A000 address value`, `$A100 address value`, and `$A200 address value` for ARM/code writes with JIT cache invalidation when bytes change
+- Level-1 pointer writes such as `$3201 pointer offset` followed by `$3300 final_offset value`
 - `$B200 00000000 00000000` through `$B200 00000003 00000000` to make later writes relative to a main-module segment
 
-Unsupported VitaCheat code types, malformed lines, pointer chains, conditions, block writes, and database-specific extensions are skipped and logged. Disabled `_V0` sections are detected but not applied.
+Unsupported VitaCheat code types, malformed lines, multi-level pointer chains, conditions, block writes, and database-specific extensions are skipped and logged. Disabled `_V0` sections are detected but not applied.
 
 Cheat application is controlled by `cheats-enabled` in the emulator config.
 
@@ -47,5 +49,5 @@ The emulator runtime still reads `.psv` files directly for now; the JSON output 
 ## Current Gaps
 
 - Cheat toggles are not exposed in the in-game UI yet; `_V1` means enabled and `_V0` means off.
-- Pointer, condition, increment/decrement, copy/fill, and button-conditional code types need per-game validation before enabling.
+- Multi-level pointer, condition, increment/decrement, copy/fill, and button-conditional code types need per-game validation before enabling.
 - Do not commit public cheat databases unless their license/source clearly allows redistribution here.

@@ -78,6 +78,7 @@ inline std::vector<std::string> default_virtual_cartridge_dirs() {
     code(bool, "apps-list-grid", false, apps_list_grid)                                                 \
     code(bool, "scan-virtual-cartridges", true, scan_virtual_cartridges)                                \
     code(bool, "cheats-enabled", true, cheats_enabled)                                                  \
+    code(int, "fast-forward-speed-percent", 200, fast_forward_speed_percent)                            \
     code(bool, "display-system-apps", true, display_system_apps)                                        \
     code(bool, "stretch_the_display_area", false, stretch_the_display_area)                             \
     code(bool, "fullscreen_hd_res_pixel_perfect", false, fullscreen_hd_res_pixel_perfect)               \

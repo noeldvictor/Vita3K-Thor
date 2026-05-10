@@ -21,6 +21,12 @@ WRITE_TYPES = {
     0x0200: ("u32", 4),
 }
 
+ARM_WRITE_TYPES = {
+    0xA000: ("arm_u8", 1),
+    0xA100: ("arm_u16", 2),
+    0xA200: ("arm_u32", 4),
+}
+
 
 def parse_hex(token: str) -> int | None:
     token = token.strip()
@@ -42,6 +48,13 @@ def parse_file(path: Path, title_override: str | None = None) -> dict[str, Any]:
     cheats: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     relative_segment: int | None = None
+    pending_pointer: dict[str, Any] | None = None
+
+    def unsupported(line_number: int, line: str, reason: str) -> None:
+        nonlocal pending_pointer
+        if current is not None:
+            current["unsupported"].append({"line": line_number, "text": line, "reason": reason})
+        pending_pointer = None
 
     for line_number, raw_line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
         line = raw_line.strip()
@@ -61,6 +74,8 @@ def parse_file(path: Path, title_override: str | None = None) -> dict[str, Any]:
             continue
 
         if line.startswith("_V0") or line.startswith("_V1"):
+            if pending_pointer is not None:
+                unsupported(pending_pointer["line"], pending_pointer["text"], "unterminated pointer write")
             name = line[3:].strip() or f"Cheat {len(cheats) + 1}"
             current = {
                 "name": name,
@@ -86,26 +101,72 @@ def parse_file(path: Path, title_override: str | None = None) -> dict[str, Any]:
 
         fields = line.split()
         if len(fields) < 3:
-            current["unsupported"].append({"line": line_number, "text": line, "reason": "expected code, address, and value"})
+            unsupported(line_number, line, "expected code, address, and value")
             continue
 
         code_type = parse_hex(fields[0])
         address = parse_hex(fields[1])
         value = parse_hex(fields[2])
         if code_type is None or address is None or value is None:
-            current["unsupported"].append({"line": line_number, "text": line, "reason": "invalid hex token"})
+            unsupported(line_number, line, "invalid hex token")
             continue
+
+        if pending_pointer is not None:
+            if code_type == 0x3300:
+                current["writes"].append(
+                    {
+                        "line": pending_pointer["line"],
+                        "type": pending_pointer["type"],
+                        "width": pending_pointer["width"],
+                        "pointer_base": pending_pointer["pointer_base"],
+                        "pointer_offset": pending_pointer["pointer_offset"],
+                        "final_offset": f"0x{address:08X}",
+                        "value": f"0x{value:08X}",
+                        "relative_segment": pending_pointer["relative_segment"],
+                    }
+                )
+                pending_pointer = None
+                continue
+
+            unsupported(pending_pointer["line"], pending_pointer["text"], "unterminated pointer write")
 
         if code_type == 0xB200:
             if address in range(4) and value == 0:
                 relative_segment = address
             else:
-                current["unsupported"].append({"line": line_number, "text": line, "reason": "unsupported base selector"})
+                unsupported(line_number, line, "unsupported base selector")
             continue
 
         write_type = WRITE_TYPES.get(code_type)
+        arm_write_type = ARM_WRITE_TYPES.get(code_type)
+        pointer_prefix = code_type & 0xF000
+        pointer_width_type = (code_type >> 8) & 0xF
+        pointer_level = code_type & 0xFF
+
+        if write_type is None and arm_write_type is not None:
+            write_type = arm_write_type
+            code_patch = True
+        else:
+            code_patch = False
+
+        if write_type is None and pointer_prefix == 0x3000 and pointer_width_type in range(3):
+            if pointer_level == 1:
+                value_type, width = WRITE_TYPES[pointer_width_type << 8]
+                pending_pointer = {
+                    "line": line_number,
+                    "text": line,
+                    "type": f"ptr1_{value_type}",
+                    "width": width,
+                    "pointer_base": f"0x{address:08X}",
+                    "pointer_offset": f"0x{value:08X}",
+                    "relative_segment": relative_segment,
+                }
+            else:
+                unsupported(line_number, line, "only level-1 pointer writes are converted")
+            continue
+
         if write_type is None:
-            current["unsupported"].append({"line": line_number, "text": line, "reason": "unsupported VitaCheat code type"})
+            unsupported(line_number, line, "unsupported VitaCheat code type")
             continue
 
         value_type, width = write_type
@@ -117,8 +178,12 @@ def parse_file(path: Path, title_override: str | None = None) -> dict[str, Any]:
                 "address": f"0x{address:08X}",
                 "value": f"0x{value:08X}",
                 "relative_segment": relative_segment,
+                "code_patch": code_patch,
             }
         )
+
+    if pending_pointer is not None:
+        unsupported(pending_pointer["line"], pending_pointer["text"], "unterminated pointer write")
 
     return {
         "schema": "vita3k-thor.cheats.v1",
@@ -127,7 +192,7 @@ def parse_file(path: Path, title_override: str | None = None) -> dict[str, Any]:
         "game": game_name,
         "notes": [
             "Converted from VitaCheat format for offline single-player use.",
-            "Only static u8/u16/u32 writes and simple $B200 module-relative selectors are converted.",
+            "Static u8/u16/u32 writes, ARM/code writes, level-1 pointer writes, and simple $B200 module-relative selectors are converted.",
             "Unsupported lines are preserved for review but are not applied by Vita3K Thor.",
         ],
         "cheats": cheats,

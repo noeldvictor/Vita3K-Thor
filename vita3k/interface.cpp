@@ -23,6 +23,7 @@
 #include <audio/state.h>
 #include <bgm_player/functions.h>
 #include <config/state.h>
+#include <cpu/functions.h>
 #include <ctime>
 #include <ctrl/functions.h>
 #include <ctrl/state.h>
@@ -34,6 +35,7 @@
 #include <io/functions.h>
 #include <io/vfs.h>
 #include <kernel/state.h>
+#include <mem/ptr.h>
 #include <packages/functions.h>
 #include <packages/license.h>
 #include <packages/pkg.h>
@@ -45,13 +47,22 @@
 #include <motion/event_handler.h>
 #include <string>
 #include <touch/functions.h>
+#include <util/fs.h>
 #include <util/log.h>
 #include <util/string_utils.h>
 #include <util/vector_utils.h>
 
 #include <gui/imgui_impl_sdl.h>
 
+#include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <limits>
+#include <map>
+#include <mutex>
 #include <regex>
+#include <thread>
+#include <vector>
 
 #include <cstdlib>
 
@@ -766,25 +777,204 @@ static void show_runtime_toast(const std::string &message) {
     LOG_INFO("{}", message);
 }
 
+namespace {
+
+constexpr uint32_t QUICKSTATE_PAGE_SIZE = 4096;
+
+struct QuickStateMemoryPage {
+    Address address = 0;
+    std::vector<uint8_t> bytes;
+};
+
+struct QuickStateSlot {
+    bool valid = false;
+    std::string title_id;
+    std::string title;
+    std::map<SceUID, CPUContext> thread_contexts;
+    std::vector<QuickStateMemoryPage> memory_pages;
+    uint64_t byte_count = 0;
+};
+
+static QuickStateSlot quick_state_slot0;
+
+static bool memory_page_is_allocated(const MemState &mem, const uint32_t page) {
+    const uint32_t word = mem.allocator.words[page >> 5];
+    return (word & (1U << (page & 31))) == 0;
+}
+
+static bool valid_quick_state_page(const MemState &mem, const Address address, const uint32_t size) {
+    if (address > (std::numeric_limits<Address>::max() - size))
+        return false;
+
+    return is_valid_addr_range(mem, address, address + size);
+}
+
+static bool wait_for_guest_threads_paused(KernelState &kernel) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(750);
+    while (std::chrono::steady_clock::now() < deadline) {
+        bool all_paused = true;
+        {
+            const std::lock_guard<std::mutex> kernel_lock(kernel.mutex);
+            for (const auto &[_, thread] : kernel.threads) {
+                const std::lock_guard<std::mutex> thread_lock(thread->mutex);
+                if (thread->status == ThreadStatus::run) {
+                    all_paused = false;
+                    break;
+                }
+            }
+        }
+
+        if (all_paused)
+            return true;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    return false;
+}
+
+static bool capture_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
+    if (emuenv.io.title_id.empty())
+        return false;
+
+    const bool already_paused = emuenv.kernel.is_threads_paused();
+    if (!already_paused) {
+        emuenv.kernel.pause_threads();
+        if (!wait_for_guest_threads_paused(emuenv.kernel)) {
+            emuenv.kernel.resume_threads();
+            return false;
+        }
+    }
+
+    QuickStateSlot captured;
+    captured.valid = true;
+    captured.title_id = emuenv.io.title_id;
+    captured.title = emuenv.current_app_title;
+
+    {
+        const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
+        for (const auto &[thread_id, thread] : emuenv.kernel.threads) {
+            if (thread->cpu)
+                captured.thread_contexts[thread_id] = save_context(*thread->cpu);
+        }
+    }
+
+    const auto page_count = static_cast<uint32_t>(emuenv.mem.allocator.max_offset);
+    captured.memory_pages.reserve(page_count / 8);
+    for (uint32_t page = 1; page < page_count; page++) {
+        if (!memory_page_is_allocated(emuenv.mem, page))
+            continue;
+
+        const Address address = page * QUICKSTATE_PAGE_SIZE;
+        if (!valid_quick_state_page(emuenv.mem, address, QUICKSTATE_PAGE_SIZE))
+            continue;
+
+        QuickStateMemoryPage snapshot_page;
+        snapshot_page.address = address;
+        snapshot_page.bytes.resize(QUICKSTATE_PAGE_SIZE);
+        std::memcpy(snapshot_page.bytes.data(), Ptr<uint8_t>(address).get(emuenv.mem), QUICKSTATE_PAGE_SIZE);
+        captured.byte_count += snapshot_page.bytes.size();
+        captured.memory_pages.push_back(std::move(snapshot_page));
+    }
+
+    slot = std::move(captured);
+    if (!already_paused)
+        emuenv.kernel.resume_threads();
+
+    return true;
+}
+
+static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
+    if (!slot.valid || (slot.title_id != emuenv.io.title_id))
+        return false;
+
+    const bool already_paused = emuenv.kernel.is_threads_paused();
+    if (!already_paused) {
+        emuenv.kernel.pause_threads();
+        if (!wait_for_guest_threads_paused(emuenv.kernel)) {
+            emuenv.kernel.resume_threads();
+            return false;
+        }
+    }
+
+    for (const auto &page : slot.memory_pages) {
+        if (!valid_quick_state_page(emuenv.mem, page.address, static_cast<uint32_t>(page.bytes.size()))) {
+            if (!already_paused)
+                emuenv.kernel.resume_threads();
+            return false;
+        }
+    }
+
+    for (const auto &page : slot.memory_pages)
+        std::memcpy(Ptr<uint8_t>(page.address).get(emuenv.mem), page.bytes.data(), page.bytes.size());
+
+    {
+        const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
+        for (const auto &[thread_id, context] : slot.thread_contexts) {
+            const auto thread = emuenv.kernel.threads.find(thread_id);
+            if ((thread == emuenv.kernel.threads.end()) || !thread->second->cpu) {
+                if (!already_paused)
+                    emuenv.kernel.resume_threads();
+                return false;
+            }
+
+            load_context(*thread->second->cpu, context);
+        }
+    }
+
+    emuenv.kernel.invalidate_jit_cache(0, std::numeric_limits<Address>::max());
+    if (!already_paused)
+        emuenv.kernel.resume_threads();
+
+    return true;
+}
+
+static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    const fs::path state_dir = emuenv.shared_path / "states" / slot.title_id;
+    fs::create_directories(state_dir);
+    fs::ofstream marker(state_dir / "slot0.same-session.txt");
+    marker << "Vita3K Thor same-session quickstate\n";
+    marker << "Title ID: " << slot.title_id << "\n";
+    marker << "Title: " << slot.title << "\n";
+    marker << "Guest memory bytes: " << slot.byte_count << "\n";
+    marker << "Thread contexts: " << slot.thread_contexts.size() << "\n";
+    marker << "Note: this is not a durable disk save state yet.\n";
+}
+
+} // namespace
+
 static void toggle_fast_forward(EmuEnvState &emuenv) {
     const bool enable = emuenv.display.speed_percent.load() == 100;
-    emuenv.display.speed_percent.store(enable ? 200 : 100);
-    show_runtime_toast(enable ? "Fast forward 200%" : "Fast forward off");
+    const uint32_t configured_speed = static_cast<uint32_t>(std::clamp(emuenv.cfg.fast_forward_speed_percent, 101, 1000));
+    emuenv.display.speed_percent.store(enable ? configured_speed : 100);
+    show_runtime_toast(enable ? fmt::format("Fast forward {}%", configured_speed) : "Fast forward off");
 }
 
 static void request_save_state(EmuEnvState &emuenv) {
     const auto title_id = emuenv.io.title_id.empty() ? std::string("unknown-title") : emuenv.io.title_id;
     const fs::path state_dir = emuenv.shared_path / "states" / title_id;
     fs::create_directories(state_dir);
-    LOG_INFO("Save-state slot 0 requested for {} at {}", title_id, state_dir / "slot0.state");
-    show_runtime_toast(fmt::format("Save state slot 0 reserved for {}; backend not implemented yet.", title_id));
+    if (capture_quick_state(emuenv, quick_state_slot0)) {
+        write_quick_state_marker(emuenv, quick_state_slot0);
+        LOG_INFO("Captured same-session quickstate slot 0 for {} at {} ({} bytes, {} threads)",
+            title_id, state_dir / "slot0.same-session.txt", quick_state_slot0.byte_count, quick_state_slot0.thread_contexts.size());
+        show_runtime_toast(fmt::format("Saved same-session state slot 0 for {}", title_id));
+    } else {
+        LOG_WARN("Failed to capture same-session quickstate slot 0 for {}", title_id);
+        show_runtime_toast(fmt::format("Could not save state slot 0 for {}", title_id));
+    }
 }
 
 static void request_load_state(EmuEnvState &emuenv) {
     const auto title_id = emuenv.io.title_id.empty() ? std::string("unknown-title") : emuenv.io.title_id;
     const fs::path state_dir = emuenv.shared_path / "states" / title_id;
-    LOG_INFO("Load-state slot 0 requested for {} at {}", title_id, state_dir / "slot0.state");
-    show_runtime_toast(fmt::format("Load state slot 0 reserved for {}; backend not implemented yet.", title_id));
+    if (restore_quick_state(emuenv, quick_state_slot0)) {
+        LOG_INFO("Restored same-session quickstate slot 0 for {} from {}", title_id, state_dir / "slot0.same-session.txt");
+        show_runtime_toast(fmt::format("Loaded same-session state slot 0 for {}", title_id));
+    } else {
+        LOG_WARN("Failed to restore same-session quickstate slot 0 for {}", title_id);
+        show_runtime_toast(fmt::format("No compatible same-session state slot 0 for {}", title_id));
+    }
 }
 
 static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &event) {
