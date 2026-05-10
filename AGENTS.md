@@ -21,7 +21,7 @@ These notes are for work in Vita3K Thor Experiment, a personal Android-focused V
 ## Android And Thor Focus
 
 - Primary target is AYN Thor Base/Pro/Max: Snapdragon 8 Gen 2, Adreno 740, active cooling, LPDDR5X, and UFS4 storage.
-- Thor Lite is a different Snapdragon 865 / Adreno 650 target and should not silently drive defaults.
+- Ignore Thor Lite for defaults and optimization decisions unless the user explicitly asks for Lite work. Thor Lite is a different Snapdragon 865 / Adreno 650 target.
 - Prefer Android `arm64-v8a` test paths. Desktop build support should not be broken, but desktop packaging is not this fork's main purpose.
 - The Android app label and package id should remain unchanged unless the user explicitly asks to split installs.
 
@@ -46,6 +46,15 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 
 - If local Android SDK, NDK, Java, vcpkg, or signing setup is missing, do not claim an APK was built.
 - For C++ changes, run the lightest practical checks first, such as `git diff --check` and a targeted configure/build when the local toolchain is available.
+
+## ADB Thor Testing
+
+- When an APK is built and an AYN Thor is connected, push/install it to the Thor with ADB for real-device testing.
+- Start with `adb devices` and verify the connected device is the user's AYN Thor before installing.
+- Prefer non-destructive installs such as `adb install -r path\to\apk`. Do not uninstall the existing app or clear Vita3K data unless the user explicitly accepts data loss.
+- For debug/reldebug APKs, expect the `.debug` package slot unless the build config says otherwise.
+- After installing, launch through ADB or the device UI, then capture proof with screenshots, `logcat`, selected driver, renderer settings, and any game/title ID tested.
+- Save durable test notes in `reports/YYYYMMDD_HHMMSS.md`; keep bulky raw logs out of git unless the user asks to commit them.
 
 ## Reporting Thor Results
 
