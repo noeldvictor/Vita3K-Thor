@@ -1204,7 +1204,7 @@ EXPORT(int, sceKernelGetProcessId) {
 
 EXPORT(uint64_t, sceKernelGetSystemTimeWide) {
     TRACY_FUNC(sceKernelGetSystemTimeWide);
-    return get_current_time();
+    return emuenv.kernel.get_process_time();
 }
 
 EXPORT(SceInt32, sceKernelGetThreadCpuAffinityMask, SceUID thid) {
@@ -1244,7 +1244,7 @@ EXPORT(uint64_t, sceKernelGetTimerTimeWide, SceUID timer_handle) {
     if (!timer_info)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_TIMER_ID);
 
-    return get_current_time() - timer_info->time;
+    return emuenv.kernel.get_process_time() - timer_info->time;
 }
 
 EXPORT(SceInt32, sceKernelNotifyCallback, SceUID callbackId, SceInt32 notifyArg) {
@@ -1367,8 +1367,8 @@ EXPORT(int, sceKernelSetTimerTimeWide, SceUID timer_handle, SceUInt64 time) {
     if (!timer_info)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_TIMER_ID);
 
-    auto oldTime = timer_info->time;
-    timer_info->time = time;
+    auto oldTime = emuenv.kernel.get_process_time() - timer_info->time;
+    timer_info->time = emuenv.kernel.get_process_time() - time;
 
     return oldTime;
 }

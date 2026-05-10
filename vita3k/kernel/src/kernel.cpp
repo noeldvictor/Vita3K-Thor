@@ -31,6 +31,8 @@
 
 #include <SDL3/SDL_mutex.h>
 
+#include <algorithm>
+
 int CorenumAllocator::new_corenum() {
     const std::lock_guard<std::mutex> guard(lock);
 
@@ -83,14 +85,41 @@ KernelState::KernelState()
     : debugger(*this) {
 }
 
+static uint64_t speeded_process_time_locked(const KernelState &kernel, const uint64_t host_process_time) {
+    const uint64_t speed_percent = std::max<uint32_t>(kernel.speed_percent.load(), 1);
+    const uint64_t host_delta = host_process_time - kernel.speed_anchor_host_process_us;
+    return kernel.speed_anchor_guest_process_us + ((host_delta * speed_percent) / 100);
+}
+
 bool KernelState::init(MemState &mem, const CallImportFunc &call_import, bool cpu_opt) {
     corenum_allocator.set_max_core_count(MAX_CORE_COUNT);
-    start_tick = rtc_get_ticks(rtc_base_ticks());
     base_tick = { rtc_base_ticks() };
+    start_tick = rtc_get_ticks(base_tick.tick);
+    speed_anchor_host_process_us = 0;
+    speed_anchor_guest_process_us = 0;
+    speed_percent.store(100);
     cpu_protocol = std::make_unique<CPUProtocol>(*this, mem, call_import);
     this->cpu_opt = cpu_opt;
 
     return true;
+}
+
+uint64_t KernelState::get_process_time() const {
+    const std::lock_guard<std::mutex> guard(speed_mutex);
+    const uint64_t host_process_time = rtc_get_ticks(base_tick.tick) - start_tick;
+    return speeded_process_time_locked(*this, host_process_time);
+}
+
+uint64_t KernelState::get_guest_tick() const {
+    return start_tick + get_process_time();
+}
+
+void KernelState::set_speed_percent(const uint32_t new_speed_percent) {
+    const std::lock_guard<std::mutex> guard(speed_mutex);
+    const uint64_t host_process_time = rtc_get_ticks(base_tick.tick) - start_tick;
+    speed_anchor_guest_process_us = speeded_process_time_locked(*this, host_process_time);
+    speed_anchor_host_process_us = host_process_time;
+    speed_percent.store(std::max<uint32_t>(new_speed_percent, 1));
 }
 
 void KernelState::load_process_param(MemState &mem, Ptr<uint32_t> ptr) {

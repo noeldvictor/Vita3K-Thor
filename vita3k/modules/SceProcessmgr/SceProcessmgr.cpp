@@ -80,7 +80,7 @@ EXPORT(int, _sceKernelExitProcessForUser) {
 EXPORT(int, _sceKernelGetTimer5Reg, Ptr<uint64_t> *timer) {
     TRACY_FUNC(_sceKernelGetTimer5Reg, timer);
     *timer = alloc<uint64_t>(emuenv.mem, "timer5reg");
-    *(*timer).get(emuenv.mem) = rtc_get_ticks(emuenv.kernel.base_tick.tick);
+    *(*timer).get(emuenv.mem) = emuenv.kernel.get_guest_tick();
     return SCE_KERNEL_OK;
 }
 
@@ -182,12 +182,12 @@ EXPORT(int, sceKernelIsGameBudget) {
 
 EXPORT(VitaTime, sceKernelLibcClock) {
     TRACY_FUNC(sceKernelLibcClock);
-    return static_cast<VitaTime>(rtc_get_ticks(emuenv.kernel.base_tick.tick) - emuenv.kernel.start_tick);
+    return static_cast<VitaTime>(emuenv.kernel.get_process_time());
 }
 
 EXPORT(int, sceKernelLibcGettimeofday, VitaTimeval *timeAddr, VitaTimezone *tzAddr) {
     TRACY_FUNC(sceKernelLibcGettimeofday, timeAddr, tzAddr);
-    const auto ticks = rtc_get_ticks(emuenv.kernel.base_tick.tick) - RTC_OFFSET;
+    const auto ticks = emuenv.kernel.get_guest_tick() - RTC_OFFSET;
     if (timeAddr != nullptr) {
         timeAddr->tv_sec = static_cast<std::uint32_t>(ticks / VITA_CLOCKS_PER_SEC);
         timeAddr->tv_usec = ticks % VITA_CLOCKS_PER_SEC;
@@ -258,7 +258,7 @@ EXPORT(int, sceKernelLibcMktime, VitaTM *date, VitaTime *time, uint64_t *param_3
 
 EXPORT(VitaTime, sceKernelLibcTime, VitaTime *time) {
     TRACY_FUNC(sceKernelLibcTime, time);
-    const auto secs = (rtc_get_ticks(emuenv.kernel.base_tick.tick) - RTC_OFFSET) / VITA_CLOCKS_PER_SEC;
+    const auto secs = (emuenv.kernel.get_guest_tick() - RTC_OFFSET) / VITA_CLOCKS_PER_SEC;
 
     if (time) {
         *time = static_cast<VitaTime>(secs);

@@ -142,6 +142,9 @@ struct KernelState {
     SceRtcTick base_tick;
     Ptr<SceProcessParam> process_param;
     std::atomic<uint32_t> speed_percent{ 100 };
+    mutable std::mutex speed_mutex;
+    uint64_t speed_anchor_host_process_us = 0;
+    uint64_t speed_anchor_guest_process_us = 0;
 
     Debugger debugger;
 
@@ -154,6 +157,9 @@ struct KernelState {
     }
 
     bool init(MemState &mem, const CallImportFunc &call_import, bool cpu_opt);
+    uint64_t get_guest_tick() const;
+    uint64_t get_process_time() const;
+    void set_speed_percent(uint32_t new_speed_percent);
     void load_process_param(MemState &mem, Ptr<uint32_t> ptr);
     ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point = Ptr<const void>(0));
     ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option);

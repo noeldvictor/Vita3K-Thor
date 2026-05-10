@@ -526,7 +526,7 @@ SceInt32 timer_start(KernelState &kernel, const char *export_name, SceUID thread
 
     const std::lock_guard<std::mutex> guard(timer->mutex);
     timer->is_started = true;
-    timer->time = get_current_time();
+    timer->time = kernel.get_process_time();
 
     if (timer->event_interval != 0)
         timer_schedule_event(kernel, timer);
@@ -542,7 +542,7 @@ SceInt32 timer_stop(KernelState &kernel, const char *export_name, SceUID thread_
     const std::lock_guard<std::mutex> timer_lock(timer->mutex);
     bool was_stopped = !timer->is_started;
     timer->is_started = false;
-    timer->time = get_current_time();
+    timer->time = kernel.get_process_time();
     timer->next_event = std::numeric_limits<uint64_t>::max();
 
     return static_cast<int>(was_stopped);

@@ -1384,19 +1384,19 @@ EXPORT(int, sceKernelGetPMUSERENR) {
 EXPORT(int, sceKernelGetProcessTime, SceUInt64 *time) {
     TRACY_FUNC(sceKernelGetProcessTime, time);
     if (time) {
-        *time = rtc_get_ticks(emuenv.kernel.base_tick.tick) - emuenv.kernel.start_tick;
+        *time = emuenv.kernel.get_process_time();
     }
     return 0;
 }
 
 EXPORT(SceUInt32, sceKernelGetProcessTimeLow) {
     TRACY_FUNC(sceKernelGetProcessTimeLow);
-    return static_cast<SceUInt32>(rtc_get_ticks(emuenv.kernel.base_tick.tick) - emuenv.kernel.start_tick);
+    return static_cast<SceUInt32>(emuenv.kernel.get_process_time());
 }
 
 EXPORT(SceUInt64, sceKernelGetProcessTimeWide) {
     TRACY_FUNC(sceKernelGetProcessTimeWide);
-    return rtc_get_ticks(emuenv.kernel.base_tick.tick) - emuenv.kernel.start_tick;
+    return emuenv.kernel.get_process_time();
 }
 
 EXPORT(int, sceKernelGetRWLockInfo, SceUID rwlockId, SceKernelRWLockInfo *info) {
@@ -1517,7 +1517,7 @@ EXPORT(int, sceKernelGetTimerTime, SceUID timer_handle, SceKernelSysClock *time)
     if (!timer_info)
         return SCE_KERNEL_ERROR_UNKNOWN_TIMER_ID;
 
-    *time = get_current_time() - timer_info->time;
+    *time = emuenv.kernel.get_process_time() - timer_info->time;
 
     return 0;
 }

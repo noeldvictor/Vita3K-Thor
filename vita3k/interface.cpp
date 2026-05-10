@@ -979,7 +979,7 @@ void runtime_toggle_fast_forward(EmuEnvState &emuenv) {
     const uint32_t configured_speed = static_cast<uint32_t>(std::clamp(emuenv.cfg.fast_forward_speed_percent, 101, 1000));
     const uint32_t speed_percent = enable ? configured_speed : 100;
     emuenv.display.speed_percent.store(speed_percent);
-    emuenv.kernel.speed_percent.store(speed_percent);
+    emuenv.kernel.set_speed_percent(speed_percent);
     {
         const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
         for (auto &[_, timer] : emuenv.kernel.timers) {

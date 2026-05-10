@@ -68,7 +68,7 @@ int ThreadState::init(const char *name, Ptr<const void> entry_point, int init_pr
     }
     this->affinity_mask = affinity_mask;
     this->stack_size = stack_size;
-    start_tick = rtc_get_ticks(kernel.base_tick.tick);
+    start_tick = kernel.get_guest_tick();
     last_vblank_waited = 0;
 
     cpu = init_cpu(kernel.cpu_opt, id, static_cast<std::size_t>(core_num), mem, kernel.cpu_protocol.get());
