@@ -64,6 +64,13 @@ constexpr bool log_file_stat = false;
 
 namespace vfs {
 
+static fs::path get_app_file_path(const IOState &io, const fs::path &pref_path, const fs::path &vfs_file_path) {
+    if (!io.app0_host_path.empty())
+        return (io.app0_host_path / vfs_file_path).generic_path();
+
+    return (pref_path / "ux0/app" / io.app_path / vfs_file_path).generic_path();
+}
+
 bool read_file(const VitaIoDevice device, FileBuffer &buf, const fs::path &pref_path, const fs::path &vfs_file_path) {
     const auto host_file_path = device::construct_emulated_path(device, vfs_file_path, pref_path).generic_path();
     return fs_utils::read_data(host_file_path, buf);
@@ -71,6 +78,10 @@ bool read_file(const VitaIoDevice device, FileBuffer &buf, const fs::path &pref_
 
 bool read_app_file(FileBuffer &buf, const fs::path &pref_path, const std::string &app_path, const fs::path &vfs_file_path) {
     return read_file(VitaIoDevice::ux0, buf, pref_path, fs::path("app") / app_path / vfs_file_path);
+}
+
+bool read_current_app_file(FileBuffer &buf, const IOState &io, const fs::path &pref_path, const fs::path &vfs_file_path) {
+    return fs_utils::read_data(get_app_file_path(io, pref_path, vfs_file_path), buf);
 }
 
 SceSize get_directory_used_size(const VitaIoDevice device, const std::string &vfs_path, const fs::path &pref_path) {
@@ -190,6 +201,28 @@ fs::path find_in_cache(IOState &io, const std::string &system_path) {
     }
 }
 
+static bool is_current_app_path(const IOState &io, const VitaIoDevice device, const fs::path &translated_path) {
+    if (io.app0_host_path.empty() || device != VitaIoDevice::ux0)
+        return false;
+
+    const auto translated = translated_path.generic_path().string();
+    const auto app0 = fs::path(io.device_paths.app0).generic_path().string();
+    return translated == app0 || translated.starts_with(app0 + "/");
+}
+
+static fs::path construct_io_path(const IOState &io, const VitaIoDevice device, const fs::path &translated_path, const fs::path &pref_path) {
+    if (is_current_app_path(io, device, translated_path)) {
+        const auto translated = translated_path.generic_path().string();
+        const auto app0 = fs::path(io.device_paths.app0).generic_path().string();
+        if (translated == app0)
+            return io.app0_host_path.generic_path();
+
+        return (io.app0_host_path / translated.substr(app0.size() + 1)).generic_path();
+    }
+
+    return device::construct_emulated_path(device, translated_path, pref_path, io.redirect_stdio);
+}
+
 std::string translate_path(const char *path, VitaIoDevice &device, const IOState::DevicePaths &device_paths) {
     auto relative_path = device::remove_duplicate_device(path, device);
 
@@ -277,7 +310,7 @@ fs::path expand_path(IOState &io, const char *path, const fs::path &pref_path) {
     auto device = device::get_device(path);
 
     const auto translated_path = translate_path(path, device, io.device_paths);
-    return device::construct_emulated_path(device, translated_path, pref_path, io.redirect_stdio).string();
+    return construct_io_path(io, device, translated_path, pref_path).string();
 }
 
 SceUID open_file(IOState &io, const char *path, const int flags, const fs::path &pref_path, const char *export_name) {
@@ -310,7 +343,12 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
 
-    auto system_path = device::construct_emulated_path(device, translated_path, pref_path, io.redirect_stdio);
+    if (is_current_app_path(io, device, translated_path) && can_write(flags)) {
+        LOG_ERROR("Cannot open read-only cartridge path for writing: {}", path);
+        return IO_ERROR(SCE_ERROR_ERRNO_EOPNOTSUPP);
+    }
+
+    auto system_path = construct_io_path(io, device, translated_path, pref_path);
     if (fs::is_directory(system_path)) {
         LOG_ERROR("Cannot open directory: {}", system_path);
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
@@ -494,7 +532,7 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &p
         }
 
         const auto translated_path = translate_path(file, device, io.device_paths);
-        file_path = device::construct_emulated_path(device, translated_path, pref_path, io.redirect_stdio);
+        file_path = construct_io_path(io, device, translated_path, pref_path);
 
         if (!fs::exists(file_path)) {
             if (io.case_isens_find_enabled) {
@@ -611,7 +649,12 @@ int remove_file(IOState &io, const char *file, const fs::path &pref_path, const 
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
 
-    const auto emulated_path = device::construct_emulated_path(device, translated_path, pref_path, io.redirect_stdio);
+    if (is_current_app_path(io, device, translated_path)) {
+        LOG_ERROR("Cannot remove file from read-only cartridge path: {}", file);
+        return IO_ERROR(SCE_ERROR_ERRNO_EOPNOTSUPP);
+    }
+
+    const auto emulated_path = construct_io_path(io, device, translated_path, pref_path);
     if (!fs::exists(emulated_path) || fs::is_directory(emulated_path)) {
         LOG_ERROR("File does not exist at path: {} (target path: {})", emulated_path, file);
     }
@@ -649,13 +692,18 @@ int rename(IOState &io, const char *old_name, const char *new_name, const fs::pa
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
 
-    const auto emulated_old_path = device::construct_emulated_path(device, translated_old_path, pref_path, io.redirect_stdio);
+    if (is_current_app_path(io, device, translated_old_path)) {
+        LOG_ERROR("Cannot rename file from read-only cartridge path: {}", old_name);
+        return IO_ERROR(SCE_ERROR_ERRNO_EOPNOTSUPP);
+    }
+
+    const auto emulated_old_path = construct_io_path(io, device, translated_old_path, pref_path);
     if (!fs::exists(emulated_old_path)) {
         LOG_ERROR("File does not exist at path: {} (target path: {})", emulated_old_path, old_name);
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
 
-    const auto emulated_new_path = device::construct_emulated_path(device, translated_new_path, pref_path, io.redirect_stdio);
+    const auto emulated_new_path = construct_io_path(io, device, translated_new_path, pref_path);
 
     LOG_TRACE_IF(log_file_op, "{}: Renaming file {} to {} ({} to {})", export_name, old_name, new_name, emulated_old_path, emulated_new_path);
 
@@ -676,7 +724,7 @@ SceUID open_dir(IOState &io, const char *path, const fs::path &pref_path, const 
     auto device_for_icase = device;
     const auto translated_path = translate_path(path, device, io.device_paths);
 
-    auto dir_path = device::construct_emulated_path(device, translated_path, pref_path, io.redirect_stdio) / "";
+    auto dir_path = construct_io_path(io, device, translated_path, pref_path) / "";
     if (!fs::exists(dir_path)) {
         if (io.case_isens_find_enabled) {
             // Attempt a case-insensitive file search.
@@ -797,7 +845,12 @@ int create_dir(IOState &io, const char *dir, int mode, const fs::path &pref_path
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
 
-    const auto emulated_path = device::construct_emulated_path(device, translated_path, pref_path, io.redirect_stdio);
+    if (is_current_app_path(io, device, translated_path)) {
+        LOG_ERROR("Cannot create directory in read-only cartridge path: {}", dir);
+        return IO_ERROR(SCE_ERROR_ERRNO_EOPNOTSUPP);
+    }
+
+    const auto emulated_path = construct_io_path(io, device, translated_path, pref_path);
     if (recursive)
         return fs::create_directories(emulated_path);
     if (fs::exists(emulated_path))
@@ -846,7 +899,12 @@ int remove_dir(IOState &io, const char *dir, const fs::path &pref_path, const ch
 
     LOG_TRACE_IF(log_file_op, "{}: Removing dir {} ({})", export_name, dir, device::construct_normalized_path(device, translated_path));
 
-    if (!fs::remove_all(device::construct_emulated_path(device, translated_path, pref_path, io.redirect_stdio))) {
+    if (is_current_app_path(io, device, translated_path)) {
+        LOG_ERROR("Cannot remove directory from read-only cartridge path: {}", dir);
+        return IO_ERROR(SCE_ERROR_ERRNO_EOPNOTSUPP);
+    }
+
+    if (!fs::remove_all(construct_io_path(io, device, translated_path, pref_path))) {
         LOG_ERROR("Cannot remove dir: {} ({})", dir, device::construct_normalized_path(device, translated_path));
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }

@@ -72,9 +72,11 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 
 ## Playing Without Install
 
-- Current Vita3K behavior does not support true direct play from an external `.vpk`, `.zip`, or game folder without staging/installing into Vita3K storage first.
-- The `content-path` command-line path is an install-and-run convenience path for `.vpk`/`.zip` archives or content folders.
+- Vita3K Thor now has an experimental cartridge launch path for archives: use `--cartridge <path-to-vpk-or-zip>` to mount game content as a read-only virtual game card for the session instead of adding it to the installed app library.
+- The first implementation extracts the chosen archive into app-local `ux0/cart/<TITLEID>` and redirects `app0:` there. Treat this as a virtual cartridge cache, not a permanent install.
+- Normal `content-path` without `--cartridge` remains the upstream install-and-run convenience path for `.vpk`/`.zip` archives or content folders.
 - The `--installed-path` / `-r` path runs an already-installed app path from Vita3K storage. A future no-install-like UX would need a new staging, cache, or mount feature and must not bypass ownership or license expectations.
+- Cartridge mode should stay read-only from the emulated app side. Do not let games create, delete, or rename files under the virtual card path.
 
 ## ADB Thor Testing
 

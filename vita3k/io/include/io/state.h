@@ -110,6 +110,7 @@ struct IOState {
     std::string savedata;
     std::string title_id;
     std::string app_path;
+    fs::path app0_host_path;
 
     std::string user_id;
     std::string user_name;

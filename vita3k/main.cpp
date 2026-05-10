@@ -357,6 +357,16 @@ int main(int argc, char *argv[]) {
         const auto is_directory = fs::is_directory(*cfg.content_path);
 
         const auto content_is_app = [&]() {
+            if (cfg.cartridge_mode) {
+                const ContentInfo content = mount_archive_as_cartridge(emuenv, *cfg.content_path);
+                if (content.state) {
+                    emuenv.app_info.app_title_id = content.title_id;
+                    return true;
+                }
+
+                return false;
+            }
+
             std::vector<ContentInfo> contents_info = install_archive(emuenv, gui_ptr, *cfg.content_path);
             const auto content_index = std::find_if(contents_info.begin(), contents_info.end(), [&](const ContentInfo &c) {
                 return c.category == "gd";

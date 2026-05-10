@@ -209,10 +209,22 @@ SceUID load_module(EmuEnvState &emuenv, const std::string &module_path) {
     LOG_INFO("Loading module \"{}\"", module_path);
     vfs::FileBuffer module_buffer;
     bool res;
-    VitaIoDevice device = device::get_device(module_path);
+    const VitaIoDevice requested_device = device::get_device(module_path);
+    VitaIoDevice device = requested_device;
     auto device_for_icase = device;
     fs::path translated_module_path = translate_path(module_path.c_str(), device, emuenv.io.device_paths);
-    auto system_path = device::construct_emulated_path(device, translated_module_path, emuenv.pref_path, emuenv.io.redirect_stdio);
+    const auto current_app_relative_path = [&]() -> fs::path {
+        const auto app0 = fs::path(emuenv.io.device_paths.app0).generic_path().string();
+        const auto translated = translated_module_path.generic_path().string();
+        if (translated == app0)
+            return {};
+        if (translated.starts_with(app0 + "/"))
+            return translated.substr(app0.size() + 1);
+        return translated_module_path;
+    };
+    auto system_path = (requested_device == VitaIoDevice::app0 && !emuenv.io.app0_host_path.empty())
+        ? (emuenv.io.app0_host_path / current_app_relative_path()).generic_path()
+        : device::construct_emulated_path(device, translated_module_path, emuenv.pref_path, emuenv.io.redirect_stdio);
 
     if (emuenv.io.case_isens_find_enabled && !fs::exists(system_path)) {
         // Attempt a case-insensitive file search.
@@ -235,8 +247,8 @@ SceUID load_module(EmuEnvState &emuenv, const std::string &module_path) {
         }
     }
 
-    if (device == VitaIoDevice::app0)
-        res = vfs::read_app_file(module_buffer, emuenv.pref_path, emuenv.io.app_path, translated_module_path);
+    if (requested_device == VitaIoDevice::app0)
+        res = vfs::read_current_app_file(module_buffer, emuenv.io, emuenv.pref_path, current_app_relative_path());
     else
         res = vfs::read_file(device, module_buffer, emuenv.pref_path, translated_module_path);
     if (!res) {

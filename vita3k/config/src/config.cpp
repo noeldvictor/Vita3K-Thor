@@ -90,6 +90,7 @@ static void check_members(Config &self, const Config &rhs) {
     self.console = rhs.console;
     self.app_args = rhs.app_args;
     self.load_app_list = rhs.load_app_list;
+    self.cartridge_mode = rhs.cartridge_mode;
     self.self_path = rhs.self_path;
 }
 
@@ -254,6 +255,8 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths)
     input->add_option("--app-args,-Z", command_line.app_args, "Argument for app, use ', ' to separate arguments.")
         ->default_str("")->group("Input");
     input->add_option("--load-app-list,-a", command_line.load_app_list, "Starts the emulator with load app list.")
+       ->default_val(false)->group("Input");
+    input->add_flag("--cartridge", command_line.cartridge_mode, "Mount content-path as a virtual read-only game card instead of installing it to the app library.")
        ->default_val(false)->group("Input");
     input->add_option("--self,-S", command_line.self_path, "Path to the self to run inside Title ID")
         ->default_str("eboot.bin")->group("Input");
