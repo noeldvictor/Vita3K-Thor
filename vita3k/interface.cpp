@@ -770,13 +770,6 @@ static void take_screenshot(EmuEnvState &emuenv) {
     }
 }
 
-static void show_runtime_toast(const std::string &message) {
-#ifdef __ANDROID__
-    SDL_ShowAndroidToast(message.c_str(), 0, -1, 0, 0);
-#endif
-    LOG_INFO("{}", message);
-}
-
 namespace {
 
 constexpr uint32_t QUICKSTATE_PAGE_SIZE = 4096;
@@ -947,7 +940,7 @@ static void toggle_fast_forward(EmuEnvState &emuenv) {
     const bool enable = emuenv.display.speed_percent.load() == 100;
     const uint32_t configured_speed = static_cast<uint32_t>(std::clamp(emuenv.cfg.fast_forward_speed_percent, 101, 1000));
     emuenv.display.speed_percent.store(enable ? configured_speed : 100);
-    show_runtime_toast(enable ? fmt::format("Fast forward {}%", configured_speed) : "Fast forward off");
+    LOG_INFO("Fast forward {}", enable ? fmt::format("{}%", configured_speed) : "off");
 }
 
 static void request_save_state(EmuEnvState &emuenv) {
@@ -958,10 +951,8 @@ static void request_save_state(EmuEnvState &emuenv) {
         write_quick_state_marker(emuenv, quick_state_slot0);
         LOG_INFO("Captured same-session quickstate slot 0 for {} at {} ({} bytes, {} threads)",
             title_id, state_dir / "slot0.same-session.txt", quick_state_slot0.byte_count, quick_state_slot0.thread_contexts.size());
-        show_runtime_toast(fmt::format("Saved same-session state slot 0 for {}", title_id));
     } else {
         LOG_WARN("Failed to capture same-session quickstate slot 0 for {}", title_id);
-        show_runtime_toast(fmt::format("Could not save state slot 0 for {}", title_id));
     }
 }
 
@@ -970,10 +961,8 @@ static void request_load_state(EmuEnvState &emuenv) {
     const fs::path state_dir = emuenv.shared_path / "states" / title_id;
     if (restore_quick_state(emuenv, quick_state_slot0)) {
         LOG_INFO("Restored same-session quickstate slot 0 for {} from {}", title_id, state_dir / "slot0.same-session.txt");
-        show_runtime_toast(fmt::format("Loaded same-session state slot 0 for {}", title_id));
     } else {
         LOG_WARN("Failed to restore same-session quickstate slot 0 for {}", title_id);
-        show_runtime_toast(fmt::format("No compatible same-session state slot 0 for {}", title_id));
     }
 }
 

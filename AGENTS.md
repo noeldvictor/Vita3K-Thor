@@ -95,6 +95,7 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - `tools/convert_vitacheat.py` converts VitaCheat `.psv` files into JSON metadata for auditing and future UI work. The emulator runtime still reads `.psv` directly.
 - Runtime shortcuts reserved for Thor testing: `Select + R1` toggles configured fast-forward speed, `Select + right-stick down` requests save state, and `Select + right-stick up` requests load state.
 - `fast-forward-speed-percent` defaults to 200 and is clamped from 101 to 1000 when toggled.
+- Do not use Android toast popups for fast-forward, save-state, or load-state feedback. Prefer OSD/overlay state and logs so gameplay is not interrupted.
 - Save-state/load-state shortcuts provide an experimental same-session per-game slot 0 quickstate: pause guest threads, snapshot CPU contexts plus allocated guest memory pages, and restore them while the same app session is still running. It writes `states/<TITLEID>/slot0.same-session.txt` as a marker only; durable disk `.thorstate` serialization still needs kernel object, GPU/display, IO, and audio state capture before it can be considered reliable.
 
 ## ADB Thor Testing
