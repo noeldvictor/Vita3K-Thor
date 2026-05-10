@@ -37,6 +37,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Locale;
 
 import org.libsdl.app.SDLActivity;
@@ -95,6 +96,7 @@ public class Emulator extends SDLActivity
         if(args == null)
             args = new String[]{};
 
+        Log.i(TAG, "Native arguments: " + Arrays.toString(args));
         return args;
     }
 

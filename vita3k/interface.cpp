@@ -60,7 +60,9 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <regex>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -92,6 +94,58 @@ static size_t write_to_buffer(void *pOpaque, mz_uint64 file_ofs, const void *pBu
 
 static const char *miniz_get_error(const ZipPtr &zip) {
     return mz_zip_get_error_string(mz_zip_get_last_error(zip.get()));
+}
+
+static bool is_safe_archive_relative_path(const fs::path &entry_path);
+
+static std::string normalize_archive_member_name(std::string path) {
+    string_utils::replace(path, "\\", "/");
+
+    while (!path.empty() && path.front() == '/')
+        path.erase(path.begin());
+    while (path.starts_with("./"))
+        path.erase(0, 2);
+    while (!path.empty() && path.back() == '/')
+        path.pop_back();
+
+    return path;
+}
+
+static bool archive_root_is_safe(const std::string &root) {
+    return root.empty() || is_safe_archive_relative_path(fs_utils::utf8_to_path(root));
+}
+
+static std::optional<std::string> find_archive_file_case_insensitive(const ZipPtr &zip, const std::string &path) {
+    const auto normalized_path = string_utils::tolower(normalize_archive_member_name(path));
+    const mz_uint num_files = mz_zip_reader_get_num_files(zip.get());
+
+    for (mz_uint i = 0; i < num_files; i++) {
+        mz_zip_archive_file_stat file_stat;
+        if (!mz_zip_reader_file_stat(zip.get(), i, &file_stat))
+            continue;
+
+        if (mz_zip_reader_is_file_a_directory(zip.get(), i))
+            continue;
+
+        const auto normalized_member = string_utils::tolower(normalize_archive_member_name(file_stat.m_filename));
+        if (normalized_member == normalized_path)
+            return std::string(file_stat.m_filename);
+    }
+
+    return std::nullopt;
+}
+
+static bool extract_archive_file_to_buffer(const ZipPtr &zip, const std::string &path, vfs::FileBuffer &buffer) {
+    const auto archive_name = find_archive_file_case_insensitive(zip, path);
+    if (!archive_name)
+        return false;
+
+    buffer.clear();
+    return mz_zip_reader_extract_file_to_callback(zip.get(), archive_name->c_str(), &write_to_buffer, &buffer, 0);
+}
+
+static bool archive_file_exists_case_insensitive(const ZipPtr &zip, const std::string &path) {
+    return find_archive_file_case_insensitive(zip, path).has_value();
 }
 
 static void set_theme_name(EmuEnvState &emuenv, vfs::FileBuffer &buf) {
@@ -153,10 +207,10 @@ static bool install_archive_content(EmuEnvState &emuenv, GuiState *gui, const Zi
     std::string theme_path = "theme.xml";
     vfs::FileBuffer buffer, theme;
 
-    const auto is_theme = mz_zip_reader_extract_file_to_callback(zip.get(), (content_path + theme_path).c_str(), &write_to_buffer, &theme, 0);
+    const auto is_theme = extract_archive_file_to_buffer(zip, content_path + theme_path, theme);
 
     auto output_path{ emuenv.pref_path / "ux0" };
-    if (mz_zip_reader_extract_file_to_callback(zip.get(), (content_path + sfo_path).c_str(), &write_to_buffer, &buffer, 0)) {
+    if (extract_archive_file_to_buffer(zip, content_path + sfo_path, buffer)) {
         sfo::get_param_info(emuenv.app_info, buffer, emuenv.cfg.sys_lang);
         if (!set_content_path(emuenv, is_theme, output_path))
             return false;
@@ -204,6 +258,8 @@ static bool install_archive_content(EmuEnvState &emuenv, GuiState *gui, const Zi
             progress_callback({ {}, {}, { file_progress * 0.7f + decrypt_progress * 0.3f } });
     };
 
+    const auto normalized_content_root = string_utils::tolower(normalize_archive_member_name(content_path));
+    const auto content_root_prefix = normalized_content_root.empty() ? std::string{} : normalized_content_root + "/";
     mz_uint num_files = mz_zip_reader_get_num_files(zip.get());
     for (mz_uint i = 0; i < num_files; i++) {
         mz_zip_archive_file_stat file_stat;
@@ -211,11 +267,13 @@ static bool install_archive_content(EmuEnvState &emuenv, GuiState *gui, const Zi
             continue;
         }
         const std::string m_filename = file_stat.m_filename;
-        if (m_filename.find(content_path) != std::string::npos) {
+        const std::string normalized_filename = normalize_archive_member_name(m_filename);
+        const std::string normalized_filename_lower = string_utils::tolower(normalized_filename);
+        if (content_root_prefix.empty() || normalized_filename_lower.starts_with(content_root_prefix)) {
             file_progress = static_cast<float>(i) / num_files * 100.0f;
             update_progress();
 
-            std::string replace_filename = m_filename.substr(content_path.size());
+            std::string replace_filename = content_root_prefix.empty() ? normalized_filename : normalized_filename.substr(content_root_prefix.size());
             const fs::path file_output = (output_path / fs_utils::utf8_to_path(replace_filename)).generic_path();
             if (mz_zip_reader_is_file_a_directory(zip.get(), i)) {
                 fs::create_directories(file_output);
@@ -276,6 +334,8 @@ static bool extract_archive_content_to_path(const ZipPtr &zip, const std::string
             progress_callback({ {}, {}, file_progress });
     };
 
+    const auto normalized_content_root = string_utils::tolower(normalize_archive_member_name(content_path));
+    const auto content_root_prefix = normalized_content_root.empty() ? std::string{} : normalized_content_root + "/";
     mz_uint num_files = mz_zip_reader_get_num_files(zip.get());
     for (mz_uint i = 0; i < num_files; i++) {
         mz_zip_archive_file_stat file_stat;
@@ -283,13 +343,15 @@ static bool extract_archive_content_to_path(const ZipPtr &zip, const std::string
             continue;
 
         const std::string filename = file_stat.m_filename;
-        if (!filename.starts_with(content_path))
+        const std::string normalized_filename = normalize_archive_member_name(filename);
+        const std::string normalized_filename_lower = string_utils::tolower(normalized_filename);
+        if (!content_root_prefix.empty() && !normalized_filename_lower.starts_with(content_root_prefix))
             continue;
 
         file_progress = static_cast<float>(i) / num_files * 100.0f;
         update_progress();
 
-        const fs::path relative_path = fs_utils::utf8_to_path(filename.substr(content_path.size()));
+        const fs::path relative_path = fs_utils::utf8_to_path(content_root_prefix.empty() ? normalized_filename : normalized_filename.substr(content_root_prefix.size()));
         if (!is_safe_archive_relative_path(relative_path)) {
             LOG_WARN("Skipping unsafe cartridge archive entry {}", filename);
             continue;
@@ -315,7 +377,7 @@ static bool extract_archive_content_to_path(const ZipPtr &zip, const std::string
 
 static bool mount_archive_content_as_cartridge(EmuEnvState &emuenv, const ZipPtr &zip, const fs::path &archive_path, const std::string &content_path, const std::function<void(ArchiveContents)> &progress_callback) {
     vfs::FileBuffer param_sfo;
-    if (!mz_zip_reader_extract_file_to_callback(zip.get(), (content_path + "sce_sys/param.sfo").c_str(), &write_to_buffer, &param_sfo, 0)) {
+    if (!extract_archive_file_to_buffer(zip, content_path + "sce_sys/param.sfo", param_sfo)) {
         LOG_ERROR("Cartridge archive content has no sce_sys/param.sfo: {}", content_path);
         return false;
     }
@@ -331,7 +393,7 @@ static bool mount_archive_content_as_cartridge(EmuEnvState &emuenv, const ZipPtr
         return false;
     }
 
-    if (!vfs::mount_current_app_archive(emuenv.io, archive_path, content_path))
+    if (!vfs::mount_current_app_archive(emuenv.io, archive_path, content_path, emuenv.app_info.app_title_id))
         return false;
 
     if (progress_callback)
@@ -346,31 +408,92 @@ static bool mount_archive_content_as_cartridge(EmuEnvState &emuenv, const ZipPtr
 
 static std::vector<std::string> get_archive_contents_path(const ZipPtr &zip) {
     mz_uint num_files = mz_zip_reader_get_num_files(zip.get());
-    std::vector<std::string> content_path;
-    std::string sfo_path = "sce_sys/param.sfo";
-    std::string theme_path = "theme.xml";
+    std::map<std::string, int> candidate_scores;
+    constexpr std::string_view sfo_path = "sce_sys/param.sfo";
+    constexpr std::string_view theme_path = "theme.xml";
+    constexpr std::string_view eboot_path = "eboot.bin";
+
+    const auto add_candidate = [&](std::string root, int score, const std::string &source) {
+        root = normalize_archive_member_name(std::move(root));
+        if (!root.empty())
+            root += "/";
+        if (!archive_root_is_safe(root)) {
+            LOG_WARN("Skipping unsafe archive content root {} from {}", root, source);
+            return;
+        }
+
+        candidate_scores[root] += score;
+        LOG_INFO("Archive introspection candidate root '{}' score_delta={} source={}", root, score, source);
+    };
 
     for (mz_uint i = 0; i < num_files; i++) {
         mz_zip_archive_file_stat file_stat;
         if (!mz_zip_reader_file_stat(zip.get(), i, &file_stat))
             continue;
 
-        std::string m_filename = std::string(file_stat.m_filename);
-        if (m_filename.find("sce_module/steroid.suprx") != std::string::npos) {
+        const std::string m_filename = std::string(file_stat.m_filename);
+        const std::string normalized_filename = normalize_archive_member_name(m_filename);
+        const std::string normalized_lower = string_utils::tolower(normalized_filename);
+        if (normalized_lower.find("sce_module/steroid.suprx") != std::string::npos) {
             LOG_CRITICAL("A Vitamin dump was detected, aborting installation...");
 #ifdef __ANDROID__
             SDL_ShowAndroidToast("Vitamin dumps are not supported!", 1, -1, 0, 0);
 #endif
-            content_path.clear();
-            break;
+            candidate_scores.clear();
+            return {};
         }
 
-        const auto is_content = (m_filename.find(sfo_path) != std::string::npos) || (m_filename.find(theme_path) != std::string::npos);
-        if (is_content) {
-            const auto content_type = (m_filename.find(sfo_path) != std::string::npos) ? sfo_path : theme_path;
-            m_filename.erase(m_filename.find(content_type));
-            vector_utils::push_if_not_exists(content_path, m_filename);
+        const auto sfo_pos = normalized_lower.rfind(sfo_path);
+        if (sfo_pos != std::string::npos && sfo_pos + sfo_path.size() == normalized_lower.size()) {
+            auto root = normalized_filename.substr(0, sfo_pos);
+            if (root.ends_with("/"))
+                root.pop_back();
+            add_candidate(root, 100, normalized_filename);
         }
+
+        const auto theme_pos = normalized_lower.rfind(theme_path);
+        if (theme_pos != std::string::npos && theme_pos + theme_path.size() == normalized_lower.size()) {
+            auto root = normalized_filename.substr(0, theme_pos);
+            if (root.ends_with("/"))
+                root.pop_back();
+            add_candidate(root, 20, normalized_filename);
+        }
+
+        const auto eboot_pos = normalized_lower.rfind(eboot_path);
+        if (eboot_pos != std::string::npos && eboot_pos + eboot_path.size() == normalized_lower.size()) {
+            auto root = normalized_filename.substr(0, eboot_pos);
+            if (root.ends_with("/"))
+                root.pop_back();
+            add_candidate(root, 50, normalized_filename);
+        }
+    }
+
+    std::vector<std::pair<std::string, int>> candidates;
+    candidates.reserve(candidate_scores.size());
+    for (auto &[root, score] : candidate_scores) {
+        const auto lower_root = string_utils::tolower(root);
+        if (archive_file_exists_case_insensitive(zip, root + "eboot.bin"))
+            score += 75;
+        if (std::regex_search(lower_root, std::regex("(^|/)(pcsa|pcsb|pcsc|pcsd|pcse|pcsf|pcsg|pcsh)[0-9]{5}/?$")))
+            score += 25;
+        if (lower_root.find("/app/") != std::string::npos || lower_root.starts_with("app/") || lower_root.find("/ux0/app/") != std::string::npos)
+            score += 15;
+        if (lower_root.find("/patch/") != std::string::npos || lower_root.starts_with("patch/") || lower_root.find("/repatch/") != std::string::npos || lower_root.starts_with("repatch/"))
+            score -= 40;
+        candidates.emplace_back(root, score);
+    }
+
+    std::stable_sort(candidates.begin(), candidates.end(), [](const auto &lhs, const auto &rhs) {
+        if (lhs.second != rhs.second)
+            return lhs.second > rhs.second;
+        return lhs.first.size() < rhs.first.size();
+    });
+
+    std::vector<std::string> content_path;
+    content_path.reserve(candidates.size());
+    for (const auto &[root, score] : candidates) {
+        LOG_INFO("Archive introspection selected root '{}' score={}", root, score);
+        content_path.push_back(root);
     }
 
     return content_path;

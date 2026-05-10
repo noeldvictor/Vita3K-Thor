@@ -235,7 +235,9 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths)
 
     // Declare all options
     CLI::App app{ "Vita3K Command Line Interface" }; // "--help,-h" is automatically generated
+#ifdef _WIN32
     app.allow_windows_style_options();
+#endif
     app.allow_extras();
     app.enabled_by_default();
     app.get_formatter()->column_width(38);

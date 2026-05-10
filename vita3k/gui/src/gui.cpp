@@ -47,12 +47,15 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cctype>
 #include <cstdio>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace gui {
@@ -71,6 +74,129 @@ static size_t write_archive_to_buffer(void *pOpaque, mz_uint64 file_ofs, const v
 
 static bool is_game_card_category(const std::string &category) {
     return category.find("gd") != std::string::npos || category.find("gc") != std::string::npos;
+}
+
+static std::string normalize_archive_member_name(std::string path) {
+    string_utils::replace(path, "\\", "/");
+
+    while (!path.empty() && path.front() == '/')
+        path.erase(path.begin());
+    while (path.starts_with("./"))
+        path.erase(0, 2);
+    while (!path.empty() && path.back() == '/')
+        path.pop_back();
+
+    return path;
+}
+
+static std::optional<std::string> find_archive_file_case_insensitive(mz_zip_archive &zip, const std::string &path) {
+    const auto normalized_path = string_utils::tolower(normalize_archive_member_name(path));
+    const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
+
+    for (mz_uint i = 0; i < num_files; i++) {
+        mz_zip_archive_file_stat file_stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &file_stat) || mz_zip_reader_is_file_a_directory(&zip, i))
+            continue;
+
+        if (string_utils::tolower(normalize_archive_member_name(file_stat.m_filename)) == normalized_path)
+            return std::string(file_stat.m_filename);
+    }
+
+    return std::nullopt;
+}
+
+static bool archive_file_exists_case_insensitive(mz_zip_archive &zip, const std::string &path) {
+    return find_archive_file_case_insensitive(zip, path).has_value();
+}
+
+static bool extract_archive_file_to_buffer(mz_zip_archive &zip, const std::string &path, vfs::FileBuffer &buffer) {
+    const auto archive_name = find_archive_file_case_insensitive(zip, path);
+    if (!archive_name)
+        return false;
+
+    buffer.clear();
+    return mz_zip_reader_extract_file_to_callback(&zip, archive_name->c_str(), &write_archive_to_buffer, &buffer, 0);
+}
+
+static bool archive_root_title_id_like(const std::string &root) {
+    auto normalized_root = normalize_archive_member_name(root);
+    const auto slash = normalized_root.find_last_of('/');
+    const auto title_id = string_utils::tolower(slash == std::string::npos ? normalized_root : normalized_root.substr(slash + 1));
+    if (title_id.size() != 9 || !title_id.starts_with("pcs"))
+        return false;
+
+    for (size_t i = 4; i < title_id.size(); i++) {
+        if (!std::isdigit(static_cast<unsigned char>(title_id[i])))
+            return false;
+    }
+
+    return title_id[3] >= 'a' && title_id[3] <= 'h';
+}
+
+static std::vector<std::string> get_archive_content_roots_for_scan(mz_zip_archive &zip) {
+    std::map<std::string, int> candidate_scores;
+    constexpr std::string_view sfo_path = "sce_sys/param.sfo";
+    constexpr std::string_view eboot_path = "eboot.bin";
+    const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
+
+    const auto add_candidate = [&](std::string root, const int score) {
+        root = normalize_archive_member_name(std::move(root));
+        if (!root.empty())
+            root += "/";
+        candidate_scores[root] += score;
+    };
+
+    for (mz_uint i = 0; i < num_files; i++) {
+        mz_zip_archive_file_stat file_stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &file_stat))
+            continue;
+
+        const std::string normalized_filename = normalize_archive_member_name(file_stat.m_filename);
+        const std::string normalized_lower = string_utils::tolower(normalized_filename);
+        const auto sfo_pos = normalized_lower.rfind(sfo_path);
+        if (sfo_pos != std::string::npos && sfo_pos + sfo_path.size() == normalized_lower.size()) {
+            auto root = normalized_filename.substr(0, sfo_pos);
+            if (root.ends_with("/"))
+                root.pop_back();
+            add_candidate(root, 100);
+        }
+
+        const auto eboot_pos = normalized_lower.rfind(eboot_path);
+        if (eboot_pos != std::string::npos && eboot_pos + eboot_path.size() == normalized_lower.size()) {
+            auto root = normalized_filename.substr(0, eboot_pos);
+            if (root.ends_with("/"))
+                root.pop_back();
+            add_candidate(root, 50);
+        }
+    }
+
+    std::vector<std::pair<std::string, int>> candidates;
+    candidates.reserve(candidate_scores.size());
+    for (auto &[root, score] : candidate_scores) {
+        const auto lower_root = string_utils::tolower(root);
+        if (archive_file_exists_case_insensitive(zip, root + "eboot.bin"))
+            score += 75;
+        if (archive_root_title_id_like(root))
+            score += 25;
+        if (lower_root.find("/app/") != std::string::npos || lower_root.starts_with("app/") || lower_root.find("/ux0/app/") != std::string::npos)
+            score += 15;
+        if (lower_root.find("/patch/") != std::string::npos || lower_root.starts_with("patch/") || lower_root.find("/repatch/") != std::string::npos || lower_root.starts_with("repatch/"))
+            score -= 40;
+        candidates.emplace_back(root, score);
+    }
+
+    std::stable_sort(candidates.begin(), candidates.end(), [](const auto &lhs, const auto &rhs) {
+        if (lhs.second != rhs.second)
+            return lhs.second > rhs.second;
+        return lhs.first.size() < rhs.first.size();
+    });
+
+    std::vector<std::string> roots;
+    roots.reserve(candidates.size());
+    for (const auto &candidate : candidates)
+        roots.push_back(candidate.first);
+
+    return roots;
 }
 
 static bool has_cheats_for_title(const EmuEnvState &emuenv, const std::string &title_id) {
@@ -134,28 +260,20 @@ static std::optional<App> app_from_cartridge_archive(EmuEnvState &emuenv, const 
     if (!mz_zip_reader_init_cfile(&zip, archive_file.get(), 0, 0))
         return std::nullopt;
 
-    std::optional<App> app;
-    const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
-    for (mz_uint i = 0; i < num_files && !app.has_value(); i++) {
-        mz_zip_archive_file_stat file_stat;
-        if (!mz_zip_reader_file_stat(&zip, i, &file_stat))
-            continue;
-
-        const std::string filename = file_stat.m_filename;
-        if (!filename.ends_with("sce_sys/param.sfo"))
-            continue;
-
+    for (const auto &root : get_archive_content_roots_for_scan(zip)) {
         vfs::FileBuffer param_sfo;
-        if (!mz_zip_reader_extract_file_to_callback(&zip, filename.c_str(), &write_archive_to_buffer, &param_sfo, 0))
+        if (!extract_archive_file_to_buffer(zip, root + "sce_sys/param.sfo", param_sfo))
             continue;
 
-        auto root = filename;
-        root.erase(root.find("sce_sys/param.sfo"));
-        app = app_from_param(emuenv, param_sfo, archive_path.generic_path(), root);
+        auto app = app_from_param(emuenv, param_sfo, archive_path.generic_path(), root);
+        if (app.has_value()) {
+            mz_zip_reader_end(&zip);
+            return app;
+        }
     }
 
     mz_zip_reader_end(&zip);
-    return app;
+    return std::nullopt;
 }
 
 static void refresh_cheat_badges(GuiState &gui, EmuEnvState &emuenv) {
@@ -175,8 +293,50 @@ static void append_virtual_cartridge_apps(GuiState &gui, EmuEnvState &emuenv) {
     for (const auto &app : gui.app_selector.user_apps)
         indexed_paths.insert(app.path);
 
-    for (const auto &dir_utf8 : emuenv.cfg.virtual_cartridge_dirs) {
-        const auto scan_root = fs_utils::utf8_to_path(dir_utf8);
+    std::vector<fs::path> scan_roots;
+    std::set<std::string> scan_root_keys;
+    const auto add_scan_root = [&](const fs::path &scan_root) {
+        auto key = scan_root.generic_string();
+#ifdef __ANDROID__
+        key = string_utils::tolower(key);
+#endif
+        if (key.empty() || scan_root_keys.contains(key))
+            return;
+
+        scan_root_keys.insert(key);
+        scan_roots.push_back(scan_root);
+    };
+
+    for (const auto &dir_utf8 : emuenv.cfg.virtual_cartridge_dirs)
+        add_scan_root(fs_utils::utf8_to_path(dir_utf8));
+
+#ifdef __ANDROID__
+    add_scan_root(fs_utils::utf8_to_path("/sdcard/Roms/psvita"));
+    add_scan_root(fs_utils::utf8_to_path("/storage/emulated/0/Roms/psvita"));
+
+    try {
+        const fs::path storage_root{ "/storage" };
+        if (fs::exists(storage_root)) {
+            for (const auto &entry : fs::directory_iterator(storage_root)) {
+                if (!fs::is_directory(entry.path()))
+                    continue;
+
+                const auto name = entry.path().filename().generic_string();
+                if (name == "emulated" || name == "self")
+                    continue;
+
+                add_scan_root(entry.path() / "Roms/psvita");
+                add_scan_root(entry.path() / "roms/psvita");
+                add_scan_root(entry.path() / "Emulation/ROMs/PSVita");
+                add_scan_root(entry.path() / "Emulation/roms/psvita");
+            }
+        }
+    } catch (const fs::filesystem_error &e) {
+        LOG_WARN("Could not discover external storage virtual cartridge directories: {}", e.what());
+    }
+#endif
+
+    for (const auto &scan_root : scan_roots) {
         if (!fs::exists(scan_root))
             continue;
 

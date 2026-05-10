@@ -410,6 +410,51 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     if (context.current_pipeline == nullptr)
         return;
 
+    if (context.state.renderer_trace_gxm_state) {
+        const uint32_t trace_draw_index = context.debug_scene_draw_count++;
+        constexpr uint32_t trace_draw_limit = 32;
+        if (trace_draw_index < trace_draw_limit) {
+            const auto &vertex_data = context.record.vertex_program.get(mem)->renderer_data;
+            const auto &fragment_data = context.record.fragment_program.get(mem)->renderer_data;
+            const std::string hash_text_f = hex_string(fragment_data->hash);
+            const std::string hash_text_v = hex_string(vertex_data->hash);
+
+            LOG_INFO("ThorRenderTrace draw frame={} scene={} draw={} prim={} index_fmt={} count={} instances={} pipeline={} framebuffer_fetch={} vhash={} fhash={} vtex={} ftex={} vbufs={} fbufs={} depth_func={}/{} depth_write={}/{} stencil_func={}/{} cull={} two_sided={} vp_flat={} z_offset={} z_scale={} writing_mask={}",
+                context.frame_timestamp,
+                context.scene_timestamp,
+                trace_draw_index,
+                static_cast<uint32_t>(type),
+                static_cast<uint32_t>(format),
+                count,
+                instance_count,
+                context.current_pipeline != nullptr,
+                fragment_program_gxp.is_frag_color_used(),
+                hash_text_v,
+                hash_text_f,
+                vertex_data->texture_count,
+                fragment_data->texture_count,
+                vertex_data->buffer_count,
+                fragment_data->buffer_count,
+                static_cast<uint32_t>(context.record.front_depth_func),
+                static_cast<uint32_t>(context.record.back_depth_func),
+                static_cast<uint32_t>(context.record.front_depth_write_mode),
+                static_cast<uint32_t>(context.record.back_depth_write_mode),
+                static_cast<uint32_t>(context.record.front_stencil_state_op.func),
+                static_cast<uint32_t>(context.record.back_stencil_state_op.func),
+                static_cast<uint32_t>(context.record.cull_mode),
+                static_cast<uint32_t>(context.record.two_sided),
+                context.record.viewport_flat,
+                context.record.z_offset,
+                context.record.z_scale,
+                context.record.writing_mask);
+        } else if (trace_draw_index == trace_draw_limit) {
+            LOG_INFO("ThorRenderTrace draw frame={} scene={} draw_limit={} reached; suppressing remaining draws for this scene",
+                context.frame_timestamp,
+                context.scene_timestamp,
+                trace_draw_limit);
+        }
+    }
+
     if (config.log_active_shaders) {
         const std::string hash_text_f = hex_string(context.record.fragment_program.get(mem)->renderer_data->hash);
         const std::string hash_text_v = hex_string(context.record.vertex_program.get(mem)->renderer_data->hash);

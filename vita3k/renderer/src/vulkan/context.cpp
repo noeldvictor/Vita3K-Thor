@@ -179,6 +179,50 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.current_shader_interlock_framebuffer = framebuffer.shader_interlock;
     context.current_color_base_image = framebuffer.base_image;
 
+    context.debug_scene_draw_count = 0;
+    if (state.renderer_trace_gxm_state) {
+        const uint32_t color_addr = color_surface_fin ? color_surface_fin->data.address() : 0;
+        const uint32_t color_format = color_surface_fin ? static_cast<uint32_t>(color_surface_fin->colorFormat) : 0;
+        const uint32_t color_type = color_surface_fin ? static_cast<uint32_t>(color_surface_fin->surfaceType) : 0;
+        const uint32_t color_stride = color_surface_fin ? color_surface_fin->strideInPixels : 0;
+        const uint32_t color_width = color_surface_fin ? color_surface_fin->width : 0;
+        const uint32_t color_height = color_surface_fin ? color_surface_fin->height : 0;
+        const uint32_t ds_depth_addr = ds_surface_fin ? ds_surface_fin->depth_data.address() : 0;
+        const uint32_t ds_stencil_addr = ds_surface_fin ? ds_surface_fin->stencil_data.address() : 0;
+        const uint32_t ds_format = ds_surface_fin ? static_cast<uint32_t>(ds_surface_fin->get_format()) : 0;
+        const uint32_t ds_type = ds_surface_fin ? static_cast<uint32_t>(ds_surface_fin->get_type()) : 0;
+        const uint32_t ds_stride = ds_surface_fin ? ds_surface_fin->get_stride() : 0;
+
+        LOG_INFO("ThorRenderTrace scene frame={} scene={} rt={}x{} msaa={} macroblock={}x{} sync={} mapping={} shader_interlock={} texture_viewport={} adreno_stock={} adreno_turnip={} color_addr=0x{:08X} color={}x{} stride={} fmt=0x{:08X} type=0x{:08X} downscale={} ds_depth=0x{:08X} ds_stencil=0x{:08X} ds_stride={} ds_fmt=0x{:08X} ds_type=0x{:08X} ds_load={} ds_store={}",
+            context.frame_timestamp,
+            context.scene_timestamp,
+            rt->width,
+            rt->height,
+            static_cast<uint32_t>(rt->multisample_mode),
+            rt->macroblock_width,
+            rt->macroblock_height,
+            state.disable_surface_sync ? "off" : "on",
+            static_cast<int>(state.mapping_method),
+            state.features.support_shader_interlock,
+            state.features.use_texture_viewport,
+            state.is_adreno_stock,
+            state.is_adreno_turnip,
+            color_addr,
+            color_width,
+            color_height,
+            color_stride,
+            color_format,
+            color_type,
+            color_surface_fin ? static_cast<bool>(color_surface_fin->downscale) : false,
+            ds_depth_addr,
+            ds_stencil_addr,
+            ds_stride,
+            ds_format,
+            ds_type,
+            ds_surface_fin ? static_cast<bool>(ds_surface_fin->force_load) : false,
+            ds_surface_fin ? static_cast<bool>(ds_surface_fin->force_store) : false);
+    }
+
     // make sure we are not keeping any texture from the previous pass
     // (textures can be still bound even though they are not used)
     context.last_vert_texture_count = ~0;

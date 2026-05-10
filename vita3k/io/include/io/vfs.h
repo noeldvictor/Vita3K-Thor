@@ -30,7 +30,7 @@ using FileBuffer = std::vector<SceUInt8>;
 bool read_file(VitaIoDevice device, FileBuffer &buf, const fs::path &pref_path, const fs::path &vfs_file_path);
 bool read_app_file(FileBuffer &buf, const fs::path &pref_path, const std::string &app_path, const fs::path &vfs_file_path);
 bool read_current_app_file(FileBuffer &buf, const IOState &io, const fs::path &pref_path, const fs::path &vfs_file_path);
-bool mount_current_app_archive(IOState &io, const fs::path &archive_path, const std::string &content_root);
+bool mount_current_app_archive(IOState &io, const fs::path &archive_path, const std::string &content_root, const std::string &title_id = {});
 void unmount_current_app_archive(IOState &io);
 bool current_app_archive_mounted(const IOState &io);
 bool current_app_file_exists(const IOState &io, const fs::path &vfs_file_path);

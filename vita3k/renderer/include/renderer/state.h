@@ -98,6 +98,7 @@ struct State {
     // used for driver bug workaround
     bool is_adreno_stock = false;
     bool is_adreno_turnip = false;
+    bool renderer_trace_gxm_state = false;
 
     virtual bool init() = 0;
     virtual void late_init(const Config &cfg, const std::string_view game_id, MemState &mem) = 0;

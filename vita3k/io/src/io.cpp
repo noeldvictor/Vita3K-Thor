@@ -44,7 +44,9 @@
 #include <iostream>
 #include <iterator>
 #include <optional>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #if defined(__aarch64__) && defined(__APPLE__)
@@ -148,6 +150,149 @@ static void add_archive_directory(IOState::ArchiveMount &mount, const std::strin
     }
 }
 
+static bool add_archive_entry(IOState::ArchiveMount &mount, const std::string &relative_path, const std::string &archive_name, const std::uint64_t size, const bool is_dir, const bool allow_override) {
+    if (relative_path.empty())
+        return false;
+
+    if (!is_safe_archive_path(relative_path)) {
+        LOG_WARN("Skipping unsafe app archive entry {}", archive_name);
+        return false;
+    }
+
+    const auto parent = parent_path_of(relative_path);
+    add_archive_directory(mount, parent);
+    mount.dir_children[parent].insert(filename_of(relative_path));
+
+    if (is_dir) {
+        add_archive_directory(mount, relative_path);
+        return true;
+    }
+
+    const auto lower_path = string_utils::tolower(relative_path);
+    const auto existing_case = mount.lower_to_path.find(lower_path);
+    if (existing_case != mount.lower_to_path.end() && existing_case->second != relative_path) {
+        if (!allow_override)
+            return false;
+
+        mount.entries.erase(existing_case->second);
+    } else if (!allow_override && mount.entries.contains(relative_path)) {
+        return false;
+    }
+
+    mount.entries[relative_path] = { archive_name, size, false };
+    mount.lower_to_path[lower_path] = relative_path;
+    return true;
+}
+
+static size_t mount_archive_root_entries(mz_zip_archive &zip, IOState::ArchiveMount &mount, const std::string &content_root, const bool allow_override) {
+    const auto normalized_root = normalize_archive_path(content_root);
+    const auto root_prefix = normalized_root.empty() ? std::string{} : normalized_root + "/";
+    const auto root_prefix_lower = string_utils::tolower(root_prefix);
+    const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
+    size_t mounted_entries = 0;
+
+    for (mz_uint i = 0; i < num_files; i++) {
+        mz_zip_archive_file_stat file_stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &file_stat))
+            continue;
+
+        const std::string archive_name = file_stat.m_filename;
+        const std::string normalized_archive_name = normalize_archive_path(archive_name);
+        const std::string normalized_archive_name_lower = string_utils::tolower(normalized_archive_name);
+        if (!root_prefix_lower.empty() && !normalized_archive_name_lower.starts_with(root_prefix_lower))
+            continue;
+
+        const auto relative_path = root_prefix.empty() ? normalized_archive_name : normalize_archive_path(normalized_archive_name.substr(root_prefix.size()));
+        const bool is_dir = mz_zip_reader_is_file_a_directory(&zip, i);
+        if (add_archive_entry(mount, relative_path, archive_name, file_stat.m_uncomp_size, is_dir, allow_override))
+            mounted_entries++;
+    }
+
+    return mounted_entries;
+}
+
+static std::vector<std::string> split_archive_path_segments(const std::string &path) {
+    std::vector<std::string> segments;
+    size_t start = 0;
+
+    while (start < path.size()) {
+        const auto slash = path.find('/', start);
+        const auto end = slash == std::string::npos ? path.size() : slash;
+        if (end > start)
+            segments.push_back(path.substr(start, end - start));
+
+        if (slash == std::string::npos)
+            break;
+
+        start = slash + 1;
+    }
+
+    return segments;
+}
+
+static std::string join_archive_path_segments(const std::vector<std::string> &segments, const size_t count) {
+    std::string path;
+    for (size_t i = 0; i < count && i < segments.size(); i++) {
+        if (!path.empty())
+            path += "/";
+        path += segments[i];
+    }
+
+    return path;
+}
+
+static std::vector<std::pair<std::string, std::string>> find_archive_overlay_roots(mz_zip_archive &zip, const std::string &title_id) {
+    std::vector<std::string> patch_roots;
+    std::vector<std::string> repatch_roots;
+    std::set<std::string> patch_seen;
+    std::set<std::string> repatch_seen;
+    const auto title_id_lower = string_utils::tolower(title_id);
+    if (title_id_lower.empty())
+        return {};
+
+    const auto remember_root = [](std::vector<std::string> &roots, std::set<std::string> &seen, const std::string &root) {
+        const auto normalized_root = normalize_archive_path(root);
+        const auto lower_root = string_utils::tolower(normalized_root);
+        if (normalized_root.empty() || seen.contains(lower_root))
+            return;
+
+        seen.insert(lower_root);
+        roots.push_back(normalized_root);
+    };
+
+    const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < num_files; i++) {
+        mz_zip_archive_file_stat file_stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &file_stat))
+            continue;
+
+        const auto segments = split_archive_path_segments(normalize_archive_path(file_stat.m_filename));
+        if (segments.size() < 3)
+            continue;
+
+        for (size_t segment_index = 0; segment_index + 1 < segments.size(); segment_index++) {
+            const auto segment = string_utils::tolower(segments[segment_index]);
+            if (string_utils::tolower(segments[segment_index + 1]) != title_id_lower)
+                continue;
+
+            if (segment == "patch") {
+                remember_root(patch_roots, patch_seen, join_archive_path_segments(segments, segment_index + 2));
+            } else if (segment == "repatch") {
+                remember_root(repatch_roots, repatch_seen, join_archive_path_segments(segments, segment_index + 2));
+            }
+        }
+    }
+
+    std::vector<std::pair<std::string, std::string>> roots;
+    roots.reserve(patch_roots.size() + repatch_roots.size());
+    for (const auto &root : patch_roots)
+        roots.emplace_back(root, "patch");
+    for (const auto &root : repatch_roots)
+        roots.emplace_back(root, "rePatch");
+
+    return roots;
+}
+
 static const IOState::ArchiveMount::Entry *find_archive_entry(const IOState::ArchiveMount &mount, const std::string &relative_path) {
     const auto normalized = normalize_archive_path(relative_path);
     if (normalized.empty()) {
@@ -240,7 +385,7 @@ bool read_current_app_file(FileBuffer &buf, const IOState &io, const fs::path &p
     return fs_utils::read_data(get_app_file_path(io, pref_path, vfs_file_path), buf);
 }
 
-bool mount_current_app_archive(IOState &io, const fs::path &archive_path, const std::string &content_root) {
+bool mount_current_app_archive(IOState &io, const fs::path &archive_path, const std::string &content_root, const std::string &title_id) {
     FILE *archive_file = FOPEN(archive_path.c_str(), "rb");
     if (!archive_file) {
         LOG_ERROR("Failed to open current app archive {}", archive_path);
@@ -259,39 +404,22 @@ bool mount_current_app_archive(IOState &io, const fs::path &archive_path, const 
     mount.content_root = content_root;
     add_archive_directory(mount, "");
 
-    const auto normalized_root = normalize_archive_path(content_root);
-    const auto root_prefix = normalized_root.empty() ? std::string{} : normalized_root + "/";
-    const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
+    const auto base_entries = mount_archive_root_entries(zip, mount, content_root, true);
+    size_t overlay_roots = 0;
+    size_t overlay_entries = 0;
+    const auto normalized_content_root = string_utils::tolower(normalize_archive_path(content_root));
 
-    for (mz_uint i = 0; i < num_files; i++) {
-        mz_zip_archive_file_stat file_stat;
-        if (!mz_zip_reader_file_stat(&zip, i, &file_stat))
+    for (const auto &[overlay_root, overlay_kind] : find_archive_overlay_roots(zip, title_id)) {
+        if (string_utils::tolower(normalize_archive_path(overlay_root)) == normalized_content_root)
             continue;
 
-        const std::string archive_name = file_stat.m_filename;
-        if (!root_prefix.empty() && !archive_name.starts_with(root_prefix))
+        const auto mounted_entries = mount_archive_root_entries(zip, mount, overlay_root, true);
+        if (mounted_entries == 0)
             continue;
 
-        auto relative_path = root_prefix.empty() ? archive_name : archive_name.substr(root_prefix.size());
-        relative_path = normalize_archive_path(relative_path);
-        if (!is_safe_archive_path(relative_path)) {
-            LOG_WARN("Skipping unsafe app archive entry {}", archive_name);
-            continue;
-        }
-
-        if (relative_path.empty())
-            continue;
-
-        const bool is_dir = mz_zip_reader_is_file_a_directory(&zip, i) || archive_name.ends_with("/");
-        const auto parent = parent_path_of(relative_path);
-        add_archive_directory(mount, parent);
-
-        mount.dir_children[parent].insert(filename_of(relative_path));
-        mount.entries[relative_path] = { archive_name, file_stat.m_uncomp_size, is_dir };
-        mount.lower_to_path[string_utils::tolower(relative_path)] = relative_path;
-
-        if (is_dir)
-            add_archive_directory(mount, relative_path);
+        overlay_roots++;
+        overlay_entries += mounted_entries;
+        LOG_INFO("Applied {} archive overlay root {} for {} with {} entries", overlay_kind, overlay_root, title_id, mounted_entries);
     }
 
     mz_zip_reader_end(&zip);
@@ -304,7 +432,7 @@ bool mount_current_app_archive(IOState &io, const fs::path &archive_path, const 
 
     io.app0_archive = std::move(mount);
     io.app0_host_path.clear();
-    LOG_INFO("Mounted app0 directly from archive {} root {}", archive_path, content_root);
+    LOG_INFO("Mounted app0 directly from archive {} root {} base_entries={} overlay_roots={} overlay_entries={}", archive_path, content_root, base_entries, overlay_roots, overlay_entries);
     return true;
 }
 

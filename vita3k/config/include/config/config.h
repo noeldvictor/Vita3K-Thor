@@ -52,7 +52,7 @@ enum ScreenshotFormat {
 
 inline std::vector<std::string> default_virtual_cartridge_dirs() {
 #ifdef __ANDROID__
-    return { "/sdcard/roms/psvita", "/storage/emulated/0/roms/psvita" };
+    return { "/sdcard/roms/psvita", "/sdcard/Roms/psvita", "/storage/emulated/0/roms/psvita", "/storage/emulated/0/Roms/psvita" };
 #else
     return {};
 #endif

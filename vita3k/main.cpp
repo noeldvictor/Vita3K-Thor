@@ -582,6 +582,13 @@ static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &
 #endif
     const std::string quick_state_status = runtime_quick_state_slot_valid(emuenv) ? fmt::format("{} MiB", runtime_quick_state_slot_bytes() / (1024 * 1024)) : "empty";
     ImGui::Text("Quickstate slot 0: %s", quick_state_status.c_str());
+    if (emuenv.renderer) {
+        bool renderer_trace = emuenv.renderer->renderer_trace_gxm_state;
+        if (ImGui::Checkbox("Renderer Trace", &renderer_trace)) {
+            emuenv.renderer->renderer_trace_gxm_state = renderer_trace;
+            LOG_INFO("{} Thor renderer GXM trace", renderer_trace ? "Enabled" : "Disabled");
+        }
+    }
     ImGui::Separator();
 
     if (ImGui::Button("Resume", ImVec2(150.f, 0.f)))
