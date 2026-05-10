@@ -57,6 +57,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -147,6 +148,30 @@ static bool extract_archive_file_to_buffer(const ZipPtr &zip, const std::string 
 
 static bool archive_file_exists_case_insensitive(const ZipPtr &zip, const std::string &path) {
     return find_archive_file_case_insensitive(zip, path).has_value();
+}
+
+static bool buffer_starts_with(const vfs::FileBuffer &buffer, const std::initializer_list<uint8_t> prefix) {
+    if (buffer.size() < prefix.size())
+        return false;
+
+    return std::equal(prefix.begin(), prefix.end(), buffer.begin());
+}
+
+static bool archive_buffer_is_png(const vfs::FileBuffer &buffer) {
+    return buffer_starts_with(buffer, { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A });
+}
+
+static bool archive_buffer_is_vita_executable(const vfs::FileBuffer &buffer) {
+    return buffer_starts_with(buffer, { 'S', 'C', 'E', 0x00 }) || buffer_starts_with(buffer, { 0x7F, 'E', 'L', 'F' });
+}
+
+static bool archive_content_appears_encrypted(const ZipPtr &zip, const std::string &content_path) {
+    vfs::FileBuffer buffer;
+    if (extract_archive_file_to_buffer(zip, content_path + "eboot.bin", buffer) && !buffer.empty() && !archive_buffer_is_vita_executable(buffer))
+        return true;
+
+    buffer.clear();
+    return extract_archive_file_to_buffer(zip, content_path + "sce_sys/icon0.png", buffer) && !buffer.empty() && !archive_buffer_is_png(buffer);
 }
 
 static void set_theme_name(EmuEnvState &emuenv, vfs::FileBuffer &buf) {
@@ -391,6 +416,11 @@ static bool mount_archive_content_as_cartridge(EmuEnvState &emuenv, const ZipPtr
 
     if (emuenv.app_info.app_title_id.find_first_of("/\\") != std::string::npos || !is_safe_archive_relative_path(fs::path(emuenv.app_info.app_title_id))) {
         LOG_ERROR("Unsafe cartridge title id {}", emuenv.app_info.app_title_id);
+        return false;
+    }
+
+    if (archive_content_appears_encrypted(zip, content_path)) {
+        LOG_ERROR("Cartridge archive {} root {} appears to contain encrypted app files. Direct ZIP mode needs Vita3K-readable app files from legally dumped content.", archive_path, content_path);
         return false;
     }
 

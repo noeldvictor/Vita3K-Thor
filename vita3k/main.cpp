@@ -643,6 +643,29 @@ static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &
     ImGui::SameLine();
     draw_speed_preset("4x", 400);
 
+    const ImVec2 confirm_button(std::max(128.f, (content_width - spacing) / 2.f), 52.f);
+    ImGui::TextUnformatted("Confirm Button");
+    const auto draw_confirm_button = [&](const char *label, const int sys_button) {
+        const bool active = emuenv.cfg.sys_button == sys_button;
+        if (active) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.40f, 0.62f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.52f, 0.76f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.20f, 0.60f, 0.86f, 1.0f));
+        }
+        if (ImGui::Button(label, confirm_button)) {
+            emuenv.cfg.sys_button = sys_button;
+            if (config::serialize_config(emuenv.cfg, emuenv.cfg.config_path) != Success)
+                LOG_WARN("Failed to save runtime confirm button setting");
+            LOG_INFO("Runtime confirm button set to {}", sys_button == 0 ? "Circle/O" : "Cross/X");
+        }
+        if (active)
+            ImGui::PopStyleColor(3);
+    };
+
+    draw_confirm_button("O / Japan", 0);
+    ImGui::SameLine();
+    draw_confirm_button("X / West", 1);
+
     ImGui::Separator();
 
     if (ImGui::Button("Resume", action_button))
@@ -1114,6 +1137,12 @@ int main(int argc, char *argv[]) {
     }
 
     if (APP_INDEX->virtual_cartridge) {
+        if (APP_INDEX->encrypted_content) {
+            LOG_WARN("Virtual cartridge {} [{}] appears encrypted and cannot run directly from ZIP.", APP_INDEX->title_id, APP_INDEX->source_path);
+            app::error_dialog(fmt::format("{} appears to be an encrypted Vita dump.\n\nPure ZIP mode needs Vita3K-readable app files from your own legally dumped content.", APP_INDEX->title_id), emuenv.window.get());
+            return InvalidApplicationPath;
+        }
+
         ContentInfo mounted_content;
         const auto source_path = fs_utils::utf8_to_path(APP_INDEX->source_path);
         if (fs::is_directory(source_path))

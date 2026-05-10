@@ -29,6 +29,7 @@
 #include <gui/imgui_impl_sdl_state.h>
 
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -68,10 +69,13 @@ struct App {
     std::string path;
     std::string source_path;
     std::string source_root;
+    uint64_t source_size = 0;
+    int64_t source_mtime = 0;
     time_t last_time{};
     compat::CompatibilityState compat = compat::UNKNOWN;
     bool custom_config = false;
     bool virtual_cartridge = false;
+    bool encrypted_content = false;
     bool cheats_available = false;
 };
 

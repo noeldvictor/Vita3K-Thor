@@ -25,6 +25,7 @@
 #include <renderer/state.h>
 
 #include <boost/algorithm/string/trim.hpp>
+#include <boost/system/error_code.hpp>
 #include <config/state.h>
 #include <dialog/state.h>
 #include <display/state.h>
@@ -50,7 +51,9 @@
 #include <cassert>
 #include <cctype>
 #include <cstdio>
+#include <cstdint>
 #include <fstream>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <optional>
@@ -61,7 +64,7 @@
 
 namespace gui {
 
-static constexpr uint32_t APPS_CACHE_VERSION = 2;
+static constexpr uint32_t APPS_CACHE_VERSION = 4;
 
 static size_t write_archive_to_buffer(void *pOpaque, mz_uint64 file_ofs, const void *pBuf, size_t n) {
     vfs::FileBuffer *const buffer = static_cast<vfs::FileBuffer *>(pOpaque);
@@ -117,6 +120,29 @@ static bool extract_archive_file_to_buffer(mz_zip_archive &zip, const std::strin
 
     buffer.clear();
     return mz_zip_reader_extract_file_to_callback(&zip, archive_name->c_str(), &write_archive_to_buffer, &buffer, 0);
+}
+
+static bool buffer_starts_with(const vfs::FileBuffer &buffer, const std::initializer_list<uint8_t> prefix) {
+    if (buffer.size() < prefix.size())
+        return false;
+
+    return std::equal(prefix.begin(), prefix.end(), buffer.begin());
+}
+
+static bool is_png_buffer(const vfs::FileBuffer &buffer) {
+    return buffer_starts_with(buffer, { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A });
+}
+
+static bool is_vita_executable_buffer(const vfs::FileBuffer &buffer) {
+    return buffer_starts_with(buffer, { 'S', 'C', 'E', 0x00 }) || buffer_starts_with(buffer, { 0x7F, 'E', 'L', 'F' });
+}
+
+static bool buffer_looks_encrypted_icon(const vfs::FileBuffer &buffer) {
+    return !buffer.empty() && !is_png_buffer(buffer);
+}
+
+static bool buffer_looks_encrypted_executable(const vfs::FileBuffer &buffer) {
+    return !buffer.empty() && !is_vita_executable_buffer(buffer);
 }
 
 static bool archive_root_title_id_like(const std::string &root) {
@@ -204,6 +230,62 @@ static bool has_cheats_for_title(const EmuEnvState &emuenv, const std::string &t
     return cheat_paths::has_vitacheat_file(emuenv.base_path, emuenv.shared_path, emuenv.pref_path, title_id);
 }
 
+static fs::path virtual_cartridge_stamp_path(const fs::path &source_path) {
+    boost::system::error_code error;
+    if (fs::is_directory(source_path, error) && !error)
+        return source_path / "sce_sys/param.sfo";
+
+    return source_path;
+}
+
+static uint64_t virtual_cartridge_source_size(const fs::path &source_path) {
+    boost::system::error_code error;
+    const auto stamp_path = virtual_cartridge_stamp_path(source_path);
+    if (!fs::is_regular_file(stamp_path, error) || error)
+        return 0;
+
+    const auto size = fs::file_size(stamp_path, error);
+    return error ? 0 : static_cast<uint64_t>(size);
+}
+
+static int64_t virtual_cartridge_source_mtime(const fs::path &source_path) {
+    boost::system::error_code error;
+    const auto stamp_path = virtual_cartridge_stamp_path(source_path);
+    const auto write_time = fs::last_write_time(stamp_path, error);
+    return error ? 0 : static_cast<int64_t>(write_time);
+}
+
+static bool virtual_cartridge_directory_appears_encrypted(const fs::path &content_path) {
+    vfs::FileBuffer buffer;
+    if (fs_utils::read_data(content_path / "eboot.bin", buffer) && buffer_looks_encrypted_executable(buffer))
+        return true;
+
+    buffer.clear();
+    return fs_utils::read_data(content_path / "sce_sys/icon0.png", buffer) && buffer_looks_encrypted_icon(buffer);
+}
+
+static bool virtual_cartridge_archive_appears_encrypted(mz_zip_archive &zip, const std::string &root) {
+    vfs::FileBuffer buffer;
+    if (extract_archive_file_to_buffer(zip, root + "eboot.bin", buffer) && buffer_looks_encrypted_executable(buffer))
+        return true;
+
+    buffer.clear();
+    return extract_archive_file_to_buffer(zip, root + "sce_sys/icon0.png", buffer) && buffer_looks_encrypted_icon(buffer);
+}
+
+static std::string virtual_cartridge_source_key(const fs::path &source_path) {
+    return fs_utils::path_to_utf8(source_path.generic_path());
+}
+
+static bool virtual_cartridge_source_unchanged(const App &app) {
+    if (!app.virtual_cartridge || app.source_path.empty())
+        return false;
+
+    const fs::path source_path = fs_utils::utf8_to_path(app.source_path);
+    return app.source_size == virtual_cartridge_source_size(source_path)
+        && app.source_mtime == virtual_cartridge_source_mtime(source_path);
+}
+
 static std::optional<App> app_from_param(const EmuEnvState &emuenv, const vfs::FileBuffer &param_sfo, const fs::path &source_path, const std::string &source_root) {
     sfo::SfoAppInfo app_info;
     sfo::get_param_info(app_info, param_sfo, emuenv.cfg.sys_lang);
@@ -224,6 +306,8 @@ static std::optional<App> app_from_param(const EmuEnvState &emuenv, const vfs::F
     };
     app.source_path = fs_utils::path_to_utf8(source_path);
     app.source_root = source_root;
+    app.source_size = virtual_cartridge_source_size(source_path);
+    app.source_mtime = virtual_cartridge_source_mtime(source_path);
     app.virtual_cartridge = true;
     app.cheats_available = has_cheats_for_title(emuenv, app.title_id);
     return app;
@@ -234,7 +318,11 @@ static std::optional<App> app_from_cartridge_directory(EmuEnvState &emuenv, cons
     if (!fs_utils::read_data(content_path / "sce_sys/param.sfo", param_sfo))
         return std::nullopt;
 
-    return app_from_param(emuenv, param_sfo, content_path.generic_path(), {});
+    auto app = app_from_param(emuenv, param_sfo, content_path.generic_path(), {});
+    if (app.has_value())
+        app->encrypted_content = virtual_cartridge_directory_appears_encrypted(content_path);
+
+    return app;
 }
 
 static std::optional<App> app_from_cartridge_archive(EmuEnvState &emuenv, const fs::path &archive_path) {
@@ -253,6 +341,9 @@ static std::optional<App> app_from_cartridge_archive(EmuEnvState &emuenv, const 
 
         auto app = app_from_param(emuenv, param_sfo, archive_path.generic_path(), root);
         if (app.has_value()) {
+            app->encrypted_content = virtual_cartridge_archive_appears_encrypted(zip, root);
+            if (app->encrypted_content)
+                LOG_WARN("Virtual cartridge {} [{}] appears to contain encrypted app files; pure ZIP launch will not work until the content is Vita3K-readable.", app->title_id, archive_path);
             mz_zip_reader_end(&zip);
             return app;
         }
@@ -270,14 +361,6 @@ static void refresh_cheat_badges(GuiState &gui, EmuEnvState &emuenv) {
 static void append_virtual_cartridge_apps(GuiState &gui, EmuEnvState &emuenv) {
     if (!emuenv.cfg.scan_virtual_cartridges)
         return;
-
-    gui.app_selector.user_apps.erase(std::remove_if(gui.app_selector.user_apps.begin(), gui.app_selector.user_apps.end(), [](const App &app) {
-        return app.virtual_cartridge;
-    }), gui.app_selector.user_apps.end());
-
-    std::set<std::string> indexed_paths;
-    for (const auto &app : gui.app_selector.user_apps)
-        indexed_paths.insert(app.path);
 
     std::vector<fs::path> scan_roots;
     std::set<std::string> scan_root_keys;
@@ -322,6 +405,37 @@ static void append_virtual_cartridge_apps(GuiState &gui, EmuEnvState &emuenv) {
     }
 #endif
 
+    const auto normalized_scan_key = [](const fs::path &path) {
+        auto key = path.lexically_normal().generic_string();
+#ifdef __ANDROID__
+        key = string_utils::tolower(key);
+#endif
+        while (key.size() > 1 && key.ends_with('/'))
+            key.pop_back();
+        return key;
+    };
+
+    const auto source_is_in_scan_roots = [&](const App &app) {
+        if (!app.virtual_cartridge || app.source_path.empty())
+            return false;
+
+        const auto source_key = normalized_scan_key(fs_utils::utf8_to_path(app.source_path));
+        for (const auto &scan_root : scan_roots) {
+            const auto scan_key = normalized_scan_key(scan_root);
+            if (!scan_key.empty() && (source_key == scan_key || source_key.starts_with(scan_key + "/")))
+                return true;
+        }
+        return false;
+    };
+
+    gui.app_selector.user_apps.erase(std::remove_if(gui.app_selector.user_apps.begin(), gui.app_selector.user_apps.end(), [&](const App &app) {
+        return app.virtual_cartridge && (!source_is_in_scan_roots(app) || !virtual_cartridge_source_unchanged(app));
+    }), gui.app_selector.user_apps.end());
+
+    std::set<std::string> indexed_paths;
+    for (const auto &app : gui.app_selector.user_apps)
+        indexed_paths.insert(app.path);
+
     for (const auto &scan_root : scan_roots) {
         if (!fs::exists(scan_root))
             continue;
@@ -337,20 +451,27 @@ static void append_virtual_cartridge_apps(GuiState &gui, EmuEnvState &emuenv) {
 
             for (const auto &entry : fs::directory_iterator(scan_root)) {
                 const auto path = entry.path();
+                const auto path_key = virtual_cartridge_source_key(path);
                 const auto extension = string_utils::tolower(path.extension().string());
 
                 if (fs::is_regular_file(path) && ((extension == ".zip") || (extension == ".vpk"))) {
-                    add_app(app_from_cartridge_archive(emuenv, path));
+                    if (!indexed_paths.contains(path_key))
+                        add_app(app_from_cartridge_archive(emuenv, path));
                 } else if (fs::is_regular_file(path) && (string_utils::tolower(path.filename().string()) == "param.sfo") && (path.parent_path().filename() == "sce_sys")) {
-                    add_app(app_from_cartridge_directory(emuenv, path.parent_path().parent_path()));
+                    const auto content_path = path.parent_path().parent_path();
+                    if (!indexed_paths.contains(virtual_cartridge_source_key(content_path)))
+                        add_app(app_from_cartridge_directory(emuenv, content_path));
                 } else if (fs::is_directory(path)) {
-                    add_app(app_from_cartridge_directory(emuenv, path));
+                    if (!indexed_paths.contains(path_key))
+                        add_app(app_from_cartridge_directory(emuenv, path));
 
                     for (const auto &child : fs::directory_iterator(path)) {
                         const auto child_path = child.path();
+                        const auto child_key = virtual_cartridge_source_key(child_path);
                         const auto child_extension = string_utils::tolower(child_path.extension().string());
                         if (fs::is_regular_file(child_path) && ((child_extension == ".zip") || (child_extension == ".vpk")))
-                            add_app(app_from_cartridge_archive(emuenv, child_path));
+                            if (!indexed_paths.contains(child_key))
+                                add_app(app_from_cartridge_archive(emuenv, child_path));
                     }
                 }
             }
@@ -657,15 +778,123 @@ vfs::FileBuffer init_default_icon(GuiState &gui, EmuEnvState &emuenv) {
     return buffer;
 }
 
+static fs::path virtual_cartridge_asset_cache_path(const EmuEnvState &emuenv, const App &app, const fs::path &relative_path) {
+    if (!app.virtual_cartridge || app.title_id.empty() || app.source_path.empty())
+        return {};
+
+    const std::string normalized_path = normalize_archive_member_name(relative_path.generic_string());
+    const std::string asset_name = normalized_path == "sce_sys/icon0.png" ? "icon0.png"
+        : normalized_path == "sce_sys/pic0.png" ? "pic0.png"
+                                               : "";
+    if (asset_name.empty())
+        return {};
+
+    const fs::path source_path = fs_utils::utf8_to_path(app.source_path);
+    boost::system::error_code error;
+    if (!fs::is_regular_file(source_path, error) || error)
+        return {};
+
+    const std::string source_stamp = std::to_string(app.source_size) + "_" + std::to_string(app.source_mtime);
+    return emuenv.cache_path / "virtual_cartridges" / app.title_id / source_stamp / asset_name;
+}
+
+static bool read_cached_virtual_cartridge_asset(const EmuEnvState &emuenv, const App &app, const fs::path &relative_path, vfs::FileBuffer &buffer) {
+    const auto cache_path = virtual_cartridge_asset_cache_path(emuenv, app, relative_path);
+    return !cache_path.empty() && fs_utils::read_data(cache_path, buffer);
+}
+
+static void write_cached_virtual_cartridge_asset(const EmuEnvState &emuenv, const App &app, const fs::path &relative_path, const vfs::FileBuffer &buffer) {
+    if (buffer.empty())
+        return;
+
+    const auto cache_path = virtual_cartridge_asset_cache_path(emuenv, app, relative_path);
+    if (cache_path.empty())
+        return;
+
+    boost::system::error_code error;
+    fs::create_directories(cache_path.parent_path(), error);
+    if (error) {
+        LOG_WARN("Failed to create virtual cartridge asset cache directory {}: {}", cache_path.parent_path(), error.message());
+        return;
+    }
+
+    const auto temp_path = fs_utils::path_concat(cache_path, ".tmp");
+    {
+        fs::ofstream cache_file(temp_path, std::ios::out | std::ios::binary);
+        if (!cache_file.is_open()) {
+            LOG_WARN("Failed to open virtual cartridge asset cache file {} for writing.", temp_path);
+            return;
+        }
+
+        cache_file.write(reinterpret_cast<const char *>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
+    }
+
+    fs::remove(cache_path, error);
+    error.clear();
+    fs::rename(temp_path, cache_path, error);
+    if (error) {
+        LOG_WARN("Failed to move virtual cartridge asset cache file {} to {}: {}", temp_path, cache_path, error.message());
+        fs::remove(temp_path, error);
+    }
+}
+
+static void remove_cached_virtual_cartridge_asset(const EmuEnvState &emuenv, const App &app, const fs::path &relative_path) {
+    const auto cache_path = virtual_cartridge_asset_cache_path(emuenv, app, relative_path);
+    if (cache_path.empty())
+        return;
+
+    boost::system::error_code error;
+    fs::remove(cache_path, error);
+}
+
+static bool read_virtual_cartridge_file(EmuEnvState &emuenv, const App &app, const fs::path &relative_path, vfs::FileBuffer &buffer) {
+    if (!app.virtual_cartridge || app.source_path.empty())
+        return false;
+
+    const std::string normalized_path = normalize_archive_member_name(relative_path.generic_string());
+    if (app.encrypted_content && ((normalized_path == "sce_sys/icon0.png") || (normalized_path == "sce_sys/pic0.png")))
+        return false;
+
+    if (read_cached_virtual_cartridge_asset(emuenv, app, relative_path, buffer))
+        return true;
+
+    const fs::path source_path = fs_utils::utf8_to_path(app.source_path);
+    if (fs::is_directory(source_path))
+        return fs_utils::read_data(source_path / relative_path, buffer);
+
+    if (!fs::is_regular_file(source_path))
+        return false;
+
+    std::unique_ptr<FILE, int (*)(FILE *)> archive_file(FOPEN(source_path.c_str(), "rb"), fclose);
+    if (!archive_file)
+        return false;
+
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_cfile(&zip, archive_file.get(), 0, 0))
+        return false;
+
+    const std::string archive_path = app.source_root + normalize_archive_member_name(relative_path.generic_string());
+    const bool extracted = extract_archive_file_to_buffer(zip, archive_path, buffer);
+    mz_zip_reader_end(&zip);
+    if (extracted)
+        write_cached_virtual_cartridge_asset(emuenv, app, relative_path, buffer);
+    return extracted;
+}
+
 static IconData load_app_icon(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path) {
     IconData image;
     vfs::FileBuffer buffer;
 
     const auto APP_INDEX = get_app_index(gui, app_path);
 
-    const auto read_icon = app_path == emuenv.io.app_path && (!emuenv.io.app0_host_path.empty() || vfs::current_app_archive_mounted(emuenv.io))
-        ? vfs::read_current_app_file(buffer, emuenv.io, emuenv.pref_path, "sce_sys/icon0.png")
-        : vfs::read_app_file(buffer, emuenv.pref_path, app_path, "sce_sys/icon0.png");
+    bool read_icon = false;
+    if (app_path == emuenv.io.app_path && (!emuenv.io.app0_host_path.empty() || vfs::current_app_archive_mounted(emuenv.io)))
+        read_icon = vfs::read_current_app_file(buffer, emuenv.io, emuenv.pref_path, "sce_sys/icon0.png");
+    else if (APP_INDEX && APP_INDEX->virtual_cartridge)
+        read_icon = read_virtual_cartridge_file(emuenv, *APP_INDEX, "sce_sys/icon0.png", buffer);
+    else
+        read_icon = vfs::read_app_file(buffer, emuenv.pref_path, app_path, "sce_sys/icon0.png");
+
     if (!read_icon) {
         buffer = init_default_icon(gui, emuenv);
         if (buffer.empty()) {
@@ -673,15 +902,26 @@ static IconData load_app_icon(GuiState &gui, EmuEnvState &emuenv, const std::str
                 APP_INDEX->title_id, APP_INDEX->title, app_path);
             return {};
         } else
-            LOG_INFO("Default icon found for App {}, [{}] in path {}.", APP_INDEX->title_id, APP_INDEX->title, app_path);
+        LOG_INFO("Default icon found for App {}, [{}] in path {}.", APP_INDEX->title_id, APP_INDEX->title, app_path);
     }
     image.data.reset(stbi_load_from_memory(
         buffer.data(), static_cast<int>(buffer.size()),
         &image.width, &image.height, nullptr, STBI_rgb_alpha));
-    if (!image.data || image.width != 128 || image.height != 128) {
+    if (!image.data) {
         LOG_ERROR("Invalid icon for title {}, [{}] in path {}.",
             APP_INDEX->title_id, APP_INDEX->title, app_path);
-        return {};
+        if (APP_INDEX && APP_INDEX->virtual_cartridge)
+            remove_cached_virtual_cartridge_asset(emuenv, *APP_INDEX, "sce_sys/icon0.png");
+
+        buffer = init_default_icon(gui, emuenv);
+        image.data.reset(stbi_load_from_memory(
+            buffer.data(), static_cast<int>(buffer.size()),
+            &image.width, &image.height, nullptr, STBI_rgb_alpha));
+        if (!image.data)
+            return {};
+    } else if (image.width != 128 || image.height != 128) {
+        LOG_WARN("Using non-standard icon size {}x{} for title {}, [{}] in path {}.",
+            image.width, image.height, APP_INDEX->title_id, APP_INDEX->title, app_path);
     }
 
     return image;
@@ -760,6 +1000,8 @@ void init_app_background(GuiState &gui, EmuEnvState &emuenv, const std::string &
         vfs::read_file(VitaIoDevice::vs0, buffer, emuenv.pref_path, "app/" + app_path + "/sce_sys/pic0.png");
     else if (app_path == emuenv.io.app_path && (!emuenv.io.app0_host_path.empty() || vfs::current_app_archive_mounted(emuenv.io)))
         vfs::read_current_app_file(buffer, emuenv.io, emuenv.pref_path, "sce_sys/pic0.png");
+    else if (APP_INDEX && APP_INDEX->virtual_cartridge)
+        read_virtual_cartridge_file(emuenv, *APP_INDEX, "sce_sys/pic0.png", buffer);
     else
         vfs::read_app_file(buffer, emuenv.pref_path, app_path, "sce_sys/pic0.png");
 
@@ -838,7 +1080,10 @@ static bool get_user_apps(GuiState &gui, EmuEnvState &emuenv) {
             app.path = read();
             app.source_path = read();
             app.source_root = read();
+            apps_cache.read(reinterpret_cast<char *>(&app.source_size), sizeof(app.source_size));
+            apps_cache.read(reinterpret_cast<char *>(&app.source_mtime), sizeof(app.source_mtime));
             apps_cache.read(reinterpret_cast<char *>(&app.virtual_cartridge), sizeof(app.virtual_cartridge));
+            apps_cache.read(reinterpret_cast<char *>(&app.encrypted_content), sizeof(app.encrypted_content));
 
             gui.app_selector.user_apps.push_back(app);
         }
@@ -891,7 +1136,10 @@ void save_apps_cache(GuiState &gui, EmuEnvState &emuenv) {
             write(app.path);
             write(app.source_path);
             write(app.source_root);
+            apps_cache.write(reinterpret_cast<const char *>(&app.source_size), sizeof(app.source_size));
+            apps_cache.write(reinterpret_cast<const char *>(&app.source_mtime), sizeof(app.source_mtime));
             apps_cache.write(reinterpret_cast<const char *>(&app.virtual_cartridge), sizeof(app.virtual_cartridge));
+            apps_cache.write(reinterpret_cast<const char *>(&app.encrypted_content), sizeof(app.encrypted_content));
         }
         apps_cache.close();
     }

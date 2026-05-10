@@ -139,8 +139,14 @@ void pre_load_app(GuiState &gui, EmuEnvState &emuenv, bool live_area, const std:
         update_last_time_app_used(gui, emuenv, app_path);
         open_path("https://Vita3k.org");
     } else {
-        if (const auto app = get_app_index(gui, app_path); app && app->virtual_cartridge)
+        if (const auto app = get_app_index(gui, app_path); app && app->virtual_cartridge) {
+            if (app->encrypted_content) {
+                LOG_WARN("Virtual cartridge {} [{}] appears encrypted and cannot run directly from ZIP.", app->title_id, app->source_path);
+                app::error_dialog(fmt::format("{} appears to be an encrypted Vita dump.\n\nPure ZIP mode needs Vita3K-readable app files from your own legally dumped content.", app->title_id), emuenv.window.get());
+                return;
+            }
             live_area = false;
+        }
         if (live_area)
             open_live_area(gui, emuenv, app_path);
         else
@@ -877,17 +883,24 @@ void draw_home_screen(GuiState &gui, EmuEnvState &emuenv) {
                     ImGui::PopStyleColor();
                 }
 
-                if (app.cheats_available) {
+                const auto draw_icon_badge = [&](const char *label, const int badge_index, const ImU32 fill_color, const ImU32 text_color) {
                     const auto badge_size = ImVec2(32.f * VIEWPORT_SCALE.x, 22.f * VIEWPORT_SCALE.y);
+                    const auto badge_gap = 4.f * VIEWPORT_SCALE.y;
                     const auto badge_pos = emuenv.cfg.apps_list_grid
-                        ? ImVec2(GRID_ICON_POS + ICON_SIZE.x - badge_size.x - (4.f * VIEWPORT_SCALE.x), POS_ICON.y + (4.f * VIEWPORT_SCALE.y))
-                        : ImVec2(POS_ICON.x + ICON_SIZE.x - badge_size.x, POS_ICON.y);
+                        ? ImVec2(GRID_ICON_POS + ICON_SIZE.x - badge_size.x - (4.f * VIEWPORT_SCALE.x), POS_ICON.y + (4.f * VIEWPORT_SCALE.y) + (badge_size.y + badge_gap) * badge_index)
+                        : ImVec2(POS_ICON.x + ICON_SIZE.x - badge_size.x, POS_ICON.y + (badge_size.y + badge_gap) * badge_index);
                     const auto badge_screen_pos = ImVec2(ImGui::GetWindowPos().x + badge_pos.x - ImGui::GetScrollX(), ImGui::GetWindowPos().y + badge_pos.y - ImGui::GetScrollY());
                     const auto badge_screen_max = ImVec2(badge_screen_pos.x + badge_size.x, badge_screen_pos.y + badge_size.y);
-                    ImGui::GetWindowDrawList()->AddRectFilled(badge_screen_pos, badge_screen_max, IM_COL32(255, 199, 67, 238), 4.f * VIEWPORT_SCALE.x);
-                    const auto text_size = ImGui::CalcTextSize("C");
-                    ImGui::GetWindowDrawList()->AddText(ImVec2(badge_screen_pos.x + (badge_size.x - text_size.x) / 2.f, badge_screen_pos.y + (badge_size.y - text_size.y) / 2.f), IM_COL32(24, 24, 24, 255), "C");
-                }
+                    ImGui::GetWindowDrawList()->AddRectFilled(badge_screen_pos, badge_screen_max, fill_color, 4.f * VIEWPORT_SCALE.x);
+                    const auto text_size = ImGui::CalcTextSize(label);
+                    ImGui::GetWindowDrawList()->AddText(ImVec2(badge_screen_pos.x + (badge_size.x - text_size.x) / 2.f, badge_screen_pos.y + (badge_size.y - text_size.y) / 2.f), text_color, label);
+                };
+
+                int badge_index = 0;
+                if (app.cheats_available)
+                    draw_icon_badge("C", badge_index++, IM_COL32(255, 199, 67, 238), IM_COL32(24, 24, 24, 255));
+                if (app.encrypted_content)
+                    draw_icon_badge("E", badge_index++, IM_COL32(194, 45, 45, 238), IM_COL32(255, 255, 255, 255));
             } else if (!gui.is_nav_button && (current_selected_app == app.path)) {
                 // When the app is selected but not visible, reset the current selected app index.
                 current_selected_app.clear();
