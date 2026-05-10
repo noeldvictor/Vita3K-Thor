@@ -100,8 +100,8 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 
 ## Runtime OSD
 
-- The game-running OSD opens from a short Back/Select press, including Android `AC_BACK` key events on AYN Thor. Do not let it steal existing chord shortcuts: `Select + R1`, `Select + right-stick down`, and `Select + right-stick up` must keep working without opening the OSD.
-- AYN Thor/Odin controller input may expose Back/Select through multiple Android paths (`KEY_BACK`, `KEY_APPSELECT`, `BTN_SELECT`, and SDL gamepad Back). When debugging OSD behavior, capture `getevent -lp`, SDL/logcat event traces, and before/after screenshots before changing bindings.
+- The game-running OSD opens from a short Android Back press (`AC_BACK`) on AYN Thor. Do not bind plain gamepad Select/`BTN_SELECT`/SDL `GamepadBack` as a second OSD opener; Select must remain Vita `SCE_CTRL_SELECT` and the modifier for `Select + R1`, `Select + right-stick down`, and `Select + right-stick up`.
+- AYN Thor/Odin controller input may expose Back/Select through multiple Android paths (`KEY_BACK`, `KEY_APPSELECT`, `BTN_SELECT`, and SDL gamepad Back). Back and Select are separate controls: use `KEY_BACK`/`AC_BACK` for OSD, and use `BTN_SELECT`/SDL gamepad Back only for Vita Select and Select chords. When debugging OSD behavior, capture `getevent -lp`, SDL/logcat event traces, and before/after screenshots before changing bindings.
 - Opening the OSD pauses guest threads by default. Closing/resuming from the OSD resumes guest threads unless the user explicitly changed pause state in the OSD.
 - OSD feedback should replace toast feedback for runtime actions. Fast-forward, save/load quickstate, cheat toggles, and pause/resume should update OSD/overlay status and logs.
 - OSD first-level actions currently include Resume, Pause/Resume, Save State slot 0, Load State slot 0, Fast Forward toggle, Screenshot, Settings, and disabled placeholders for Reset Game and Close Game.

@@ -1042,8 +1042,6 @@ static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &
     static bool fast_forward_latched = false;
     static bool save_state_latched = false;
     static bool load_state_latched = false;
-    static bool back_press_candidate = false;
-    static bool back_chord_used = false;
     const SDL_GamepadButton select_button = runtime_configured_button(emuenv, SDL_GAMEPAD_BUTTON_BACK);
     const SDL_GamepadButton r1_button = runtime_configured_button(emuenv, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
 
@@ -1052,14 +1050,6 @@ static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &
             fast_forward_latched = false;
         if (runtime_button_matches(static_cast<SDL_GamepadButton>(event.gbutton.button), select_button, SDL_GAMEPAD_BUTTON_BACK)) {
             fast_forward_latched = false;
-            if (back_press_candidate && !back_chord_used) {
-                if (!emuenv.io.title_id.empty())
-                    runtime_osd_set_open(emuenv, !runtime_osd_is_open());
-                back_press_candidate = false;
-                return true;
-            }
-            back_press_candidate = false;
-            back_chord_used = false;
         }
         return false;
     }
@@ -1080,14 +1070,11 @@ static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &
             return false;
         if (r1_down && !fast_forward_latched) {
             fast_forward_latched = true;
-            back_chord_used = true;
             android_back_chord_used = true;
             runtime_toggle_fast_forward(emuenv);
             return true;
         }
-        back_press_candidate = true;
-        back_chord_used = false;
-        return true;
+        return false;
     }
 
     if (!select_down) {
@@ -1099,7 +1086,6 @@ static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &
     if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
         if (r1_down && !fast_forward_latched) {
             fast_forward_latched = true;
-            back_chord_used = true;
             android_back_chord_used = true;
             runtime_toggle_fast_forward(emuenv);
             return true;
@@ -1111,14 +1097,12 @@ static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &
         constexpr Sint16 axis_release = 8000;
         if (event.gaxis.value > axis_threshold && !save_state_latched) {
             save_state_latched = true;
-            back_chord_used = true;
             android_back_chord_used = true;
             runtime_request_save_state(emuenv);
             return true;
         }
         if (event.gaxis.value < -axis_threshold && !load_state_latched) {
             load_state_latched = true;
-            back_chord_used = true;
             android_back_chord_used = true;
             runtime_request_load_state(emuenv);
             return true;
