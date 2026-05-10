@@ -44,7 +44,8 @@ void switch_state(EmuEnvState &emuenv, const bool pause);
 void error_dialog(const std::string &message, SDL_Window *window = nullptr);
 
 #ifdef __ANDROID__
-void add_custom_driver(EmuEnvState &emuenv);
+std::string add_custom_driver(EmuEnvState &emuenv);
+std::string add_custom_driver_from_path(const std::string &file_path);
 void remove_custom_driver(EmuEnvState &emuenv, const std::string &driver);
 #endif
 

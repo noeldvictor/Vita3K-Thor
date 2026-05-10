@@ -37,11 +37,24 @@
 
 #include <emuenv/state.h>
 
+#include <atomic>
+#include <cctype>
+#include <chrono>
+#include <cstdlib>
+#include <exception>
+#include <future>
+#include <mutex>
+#include <optional>
+#include <sstream>
 #include <string>
 #include <util/fs.h>
 #include <util/log.h>
 #include <util/net_utils.h>
+#include <vector>
 
+#ifdef __ANDROID__
+#include <SDL3/SDL_system.h>
+#endif
 #include <SDL3/SDL_video.h>
 
 #include <SDL3/SDL_camera.h>
@@ -83,6 +96,463 @@ enum class SettingsDialogSection {
 };
 
 static SettingsDialogSection current_settings_section = SettingsDialogSection::Core;
+
+#ifdef __ANDROID__
+struct TurnipDriverAsset {
+    std::string release_name;
+    std::string tag_name;
+    std::string asset_name;
+    std::string download_url;
+    uint64_t size = 0;
+};
+
+struct TurnipDriverFetchResult {
+    std::vector<TurnipDriverAsset> assets;
+    std::string error;
+};
+
+struct TurnipDriverInstallResult {
+    std::string driver_name;
+    std::string error;
+};
+
+static std::vector<TurnipDriverAsset> turnip_driver_assets;
+static std::future<TurnipDriverFetchResult> turnip_driver_fetch_future;
+static std::future<TurnipDriverInstallResult> turnip_driver_install_future;
+static bool turnip_driver_fetch_pending = false;
+static bool turnip_driver_install_pending = false;
+static int selected_turnip_driver = 0;
+static std::string turnip_driver_status_message;
+static std::string pending_custom_driver_selection;
+static std::atomic<float> turnip_driver_download_progress = 0.f;
+static std::atomic<uint64_t> turnip_driver_download_remaining = 0;
+static net_utils::ProgressState turnip_driver_progress_state;
+
+static std::string to_lower_copy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+static bool ends_with_case_insensitive(const std::string &value, const std::string &suffix) {
+    if (value.size() < suffix.size())
+        return false;
+
+    return to_lower_copy(value.substr(value.size() - suffix.size())) == to_lower_copy(suffix);
+}
+
+static std::optional<std::string> parse_json_quoted_string(const std::string &text, size_t quote_pos) {
+    if (quote_pos == std::string::npos || quote_pos >= text.size() || text[quote_pos] != '"')
+        return std::nullopt;
+
+    std::string result;
+    bool escape = false;
+    for (size_t i = quote_pos + 1; i < text.size(); ++i) {
+        const char c = text[i];
+        if (escape) {
+            switch (c) {
+            case '"':
+            case '\\':
+            case '/':
+                result.push_back(c);
+                break;
+            case 'b':
+                result.push_back('\b');
+                break;
+            case 'f':
+                result.push_back('\f');
+                break;
+            case 'n':
+                result.push_back('\n');
+                break;
+            case 'r':
+                result.push_back('\r');
+                break;
+            case 't':
+                result.push_back('\t');
+                break;
+            case 'u':
+                if (i + 4 < text.size())
+                    i += 4;
+                result.push_back('?');
+                break;
+            default:
+                result.push_back(c);
+                break;
+            }
+            escape = false;
+            continue;
+        }
+
+        if (c == '\\') {
+            escape = true;
+            continue;
+        }
+
+        if (c == '"')
+            return result;
+
+        result.push_back(c);
+    }
+
+    return std::nullopt;
+}
+
+static std::string json_string_value(const std::string &object, const std::string &key) {
+    const std::string key_pattern = "\"" + key + "\"";
+    const size_t key_pos = object.find(key_pattern);
+    if (key_pos == std::string::npos)
+        return {};
+
+    const size_t colon_pos = object.find(':', key_pos + key_pattern.size());
+    if (colon_pos == std::string::npos)
+        return {};
+
+    const size_t quote_pos = object.find('"', colon_pos + 1);
+    const auto parsed = parse_json_quoted_string(object, quote_pos);
+    return parsed.value_or("");
+}
+
+static uint64_t json_uint_value(const std::string &object, const std::string &key) {
+    const std::string key_pattern = "\"" + key + "\"";
+    const size_t key_pos = object.find(key_pattern);
+    if (key_pos == std::string::npos)
+        return 0;
+
+    const size_t colon_pos = object.find(':', key_pos + key_pattern.size());
+    if (colon_pos == std::string::npos)
+        return 0;
+
+    const size_t number_pos = object.find_first_of("0123456789", colon_pos + 1);
+    if (number_pos == std::string::npos)
+        return 0;
+
+    const size_t number_end = object.find_first_not_of("0123456789", number_pos);
+    return std::strtoull(object.substr(number_pos, number_end - number_pos).c_str(), nullptr, 10);
+}
+
+static std::string json_array_value(const std::string &object, const std::string &key) {
+    const std::string key_pattern = "\"" + key + "\"";
+    const size_t key_pos = object.find(key_pattern);
+    if (key_pos == std::string::npos)
+        return {};
+
+    const size_t colon_pos = object.find(':', key_pos + key_pattern.size());
+    const size_t array_start = object.find('[', colon_pos);
+    if (colon_pos == std::string::npos || array_start == std::string::npos)
+        return {};
+
+    int depth = 0;
+    bool in_string = false;
+    bool escape = false;
+    for (size_t i = array_start; i < object.size(); ++i) {
+        const char c = object[i];
+        if (in_string) {
+            if (escape) {
+                escape = false;
+            } else if (c == '\\') {
+                escape = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if (c == '"') {
+            in_string = true;
+        } else if (c == '[') {
+            ++depth;
+        } else if (c == ']') {
+            --depth;
+            if (depth == 0)
+                return object.substr(array_start, i - array_start + 1);
+        }
+    }
+
+    return {};
+}
+
+static std::vector<std::string> split_json_objects(const std::string &json) {
+    std::vector<std::string> objects;
+    int depth = 0;
+    bool in_string = false;
+    bool escape = false;
+    size_t object_start = std::string::npos;
+
+    for (size_t i = 0; i < json.size(); ++i) {
+        const char c = json[i];
+        if (in_string) {
+            if (escape) {
+                escape = false;
+            } else if (c == '\\') {
+                escape = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if (c == '"') {
+            in_string = true;
+        } else if (c == '{') {
+            if (depth == 0)
+                object_start = i;
+            ++depth;
+        } else if (c == '}') {
+            --depth;
+            if (depth == 0 && object_start != std::string::npos) {
+                objects.push_back(json.substr(object_start, i - object_start + 1));
+                object_start = std::string::npos;
+            }
+        }
+    }
+
+    return objects;
+}
+
+static std::vector<TurnipDriverAsset> parse_turnip_driver_assets(const std::string &response) {
+    std::vector<TurnipDriverAsset> assets;
+
+    for (const auto &release_object : split_json_objects(response)) {
+        const std::string tag_name = json_string_value(release_object, "tag_name");
+        std::string release_name = json_string_value(release_object, "name");
+        if (release_name.empty())
+            release_name = tag_name;
+
+        const std::string release_label = to_lower_copy(release_name + " " + tag_name);
+        const auto asset_objects = split_json_objects(json_array_value(release_object, "assets"));
+        for (const auto &asset_object : asset_objects) {
+            const std::string asset_name = json_string_value(asset_object, "name");
+            const std::string download_url = json_string_value(asset_object, "browser_download_url");
+            const std::string asset_label = to_lower_copy(asset_name + " " + release_label);
+
+            const bool looks_like_turnip = asset_label.find("turnip") != std::string::npos
+                || asset_label.find("mesa") != std::string::npos;
+            if (asset_name.empty() || download_url.empty() || !ends_with_case_insensitive(asset_name, ".zip") || !looks_like_turnip)
+                continue;
+
+            assets.push_back({ release_name, tag_name, asset_name, download_url, json_uint_value(asset_object, "size") });
+        }
+    }
+
+    return assets;
+}
+
+static std::string sanitize_download_file_name(std::string value) {
+    for (char &c : value) {
+        const auto uc = static_cast<unsigned char>(c);
+        if (!std::isalnum(uc) && c != '.' && c != '_' && c != '-')
+            c = '_';
+    }
+    return value.empty() ? "turnip-driver.zip" : value;
+}
+
+static std::string format_driver_size(uint64_t size) {
+    if (size == 0)
+        return "unknown size";
+
+    return fmt::format("{:.1f} MB", static_cast<double>(size) / (1024.0 * 1024.0));
+}
+
+static void start_turnip_driver_fetch() {
+    if (turnip_driver_fetch_pending)
+        return;
+
+    turnip_driver_status_message = "Loading Turnip driver releases...";
+    turnip_driver_fetch_pending = true;
+    turnip_driver_fetch_future = std::async(std::launch::async, []() -> TurnipDriverFetchResult {
+        try {
+            constexpr auto RELEASES_URL = "https://api.github.com/repos/K11MCH1/AdrenoToolsDrivers/releases?per_page=25";
+            const auto response = net_utils::get_web_response(RELEASES_URL);
+            if (response.empty())
+                return { {}, "Could not load driver releases from GitHub." };
+
+            auto assets = parse_turnip_driver_assets(response);
+            if (assets.empty())
+                return { {}, "No Turnip ZIP assets were found in the latest releases." };
+
+            return { std::move(assets), {} };
+        } catch (const std::exception &e) {
+            return { {}, fmt::format("Driver release refresh failed: {}", e.what()) };
+        } catch (...) {
+            return { {}, "Driver release refresh failed." };
+        }
+    });
+}
+
+static void start_turnip_driver_install(const TurnipDriverAsset &asset) {
+    if (turnip_driver_install_pending)
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(turnip_driver_progress_state.mutex);
+        turnip_driver_progress_state.download = true;
+        turnip_driver_progress_state.pause = false;
+    }
+    turnip_driver_progress_state.cv.notify_all();
+    turnip_driver_download_progress = 0.f;
+    turnip_driver_download_remaining = 0;
+    turnip_driver_status_message = fmt::format("Downloading {}...", asset.asset_name);
+    turnip_driver_install_pending = true;
+    turnip_driver_install_future = std::async(std::launch::async, [asset]() -> TurnipDriverInstallResult {
+        try {
+            fs::path download_dir = fs::path(SDL_GetAndroidInternalStoragePath()) / "driver_downloads";
+            fs::create_directories(download_dir);
+            const fs::path archive_path = download_dir / sanitize_download_file_name(asset.asset_name);
+            if (fs::exists(archive_path))
+                fs::remove(archive_path);
+
+            const auto progress_callback = [](float progress, uint64_t remaining_time) -> net_utils::ProgressState * {
+                turnip_driver_download_progress = progress;
+                turnip_driver_download_remaining = remaining_time;
+                return &turnip_driver_progress_state;
+            };
+
+            if (!net_utils::download_file(asset.download_url, archive_path.string(), progress_callback)) {
+                if (fs::exists(archive_path))
+                    fs::remove(archive_path);
+                return { {}, fmt::format("Failed to download {}.", asset.asset_name) };
+            }
+
+            const std::string driver_name = app::add_custom_driver_from_path(archive_path.string());
+            if (fs::exists(archive_path))
+                fs::remove(archive_path);
+
+            if (driver_name.empty())
+                return { {}, fmt::format("Downloaded {}, but Vita3K could not install it.", asset.asset_name) };
+
+            return { driver_name, {} };
+        } catch (const std::exception &e) {
+            return { {}, fmt::format("Driver install failed: {}", e.what()) };
+        } catch (...) {
+            return { {}, "Driver install failed." };
+        }
+    });
+}
+
+static void cancel_turnip_driver_download() {
+    std::lock_guard<std::mutex> lock(turnip_driver_progress_state.mutex);
+    turnip_driver_progress_state.download = false;
+    turnip_driver_progress_state.pause = false;
+    turnip_driver_progress_state.cv.notify_all();
+}
+
+static void update_turnip_driver_tasks() {
+    if (turnip_driver_fetch_pending && turnip_driver_fetch_future.valid()
+        && turnip_driver_fetch_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const auto result = turnip_driver_fetch_future.get();
+        turnip_driver_fetch_pending = false;
+        if (!result.error.empty()) {
+            turnip_driver_assets.clear();
+            turnip_driver_status_message = result.error;
+        } else {
+            turnip_driver_assets = result.assets;
+            selected_turnip_driver = 0;
+            turnip_driver_status_message = fmt::format("Found {} downloadable Turnip driver assets.", turnip_driver_assets.size());
+        }
+    }
+
+    if (turnip_driver_install_pending && turnip_driver_install_future.valid()
+        && turnip_driver_install_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const auto result = turnip_driver_install_future.get();
+        turnip_driver_install_pending = false;
+        if (!result.error.empty()) {
+            turnip_driver_status_message = result.error;
+        } else {
+            pending_custom_driver_selection = result.driver_name;
+            turnip_driver_status_message = fmt::format("Installed and selected {}. Reboot emulation to apply it.", result.driver_name);
+        }
+    }
+}
+
+static void select_pending_custom_driver(const std::vector<std::string> &gpu_list_str) {
+    if (pending_custom_driver_selection.empty())
+        return;
+
+    const auto driver = std::find(gpu_list_str.begin(), gpu_list_str.end(), pending_custom_driver_selection);
+    if (driver == gpu_list_str.end())
+        return;
+
+    config.gpu_idx = static_cast<int>(std::distance(gpu_list_str.begin(), driver));
+    config.custom_driver_name = pending_custom_driver_selection;
+    pending_custom_driver_selection.clear();
+}
+
+static void draw_turnip_driver_download_popup() {
+    update_turnip_driver_tasks();
+
+    if (!ImGui::BeginPopupModal("Turnip Driver Downloads", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+
+    ImGui::TextWrapped("Download a Turnip driver ZIP from K11MCH1/AdrenoToolsDrivers, install it into Vita3K's custom driver folder, and select it for Vulkan.");
+    ImGui::Spacing();
+
+    if (ImGui::Button("Refresh releases")) {
+        start_turnip_driver_fetch();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Open releases page")) {
+        open_path("https://github.com/K11MCH1/AdrenoToolsDrivers/releases/");
+    }
+
+    if (turnip_driver_fetch_pending) {
+        ImGui::TextColored(GUI_COLOR_TEXT_TITLE, "%s", "Loading releases...");
+    } else if (!turnip_driver_assets.empty()) {
+        std::vector<std::string> labels;
+        labels.reserve(turnip_driver_assets.size());
+        std::vector<const char *> label_ptrs;
+        label_ptrs.reserve(turnip_driver_assets.size());
+        for (const auto &asset : turnip_driver_assets) {
+            labels.push_back(fmt::format("{} / {} ({})", asset.release_name, asset.asset_name, format_driver_size(asset.size)));
+            label_ptrs.push_back(labels.back().c_str());
+        }
+
+        if (selected_turnip_driver >= static_cast<int>(turnip_driver_assets.size()))
+            selected_turnip_driver = 0;
+
+        ImGui::SetNextItemWidth(620.f);
+        ImGui::Combo("Driver", &selected_turnip_driver, label_ptrs.data(), static_cast<int>(label_ptrs.size()));
+
+        const auto &asset = turnip_driver_assets[selected_turnip_driver];
+        ImGui::TextWrapped("Selected: %s", asset.asset_name.c_str());
+        ImGui::TextWrapped("Release: %s", asset.release_name.c_str());
+        ImGui::TextWrapped("Source: %s", asset.download_url.c_str());
+        ImGui::Spacing();
+
+        if (turnip_driver_install_pending)
+            ImGui::BeginDisabled();
+
+        if (ImGui::Button("Download, install, and select")) {
+            start_turnip_driver_install(asset);
+        }
+
+        if (turnip_driver_install_pending)
+            ImGui::EndDisabled();
+    }
+
+    if (!turnip_driver_status_message.empty()) {
+        ImGui::Spacing();
+        ImGui::TextWrapped("%s", turnip_driver_status_message.c_str());
+    }
+
+    if (turnip_driver_install_pending) {
+        const float progress = turnip_driver_download_progress.load() / 100.f;
+        ImGui::ProgressBar(progress, ImVec2(620.f, 0.f));
+        const uint64_t remaining = turnip_driver_download_remaining.load();
+        if (remaining > 0)
+            ImGui::Text("Remaining: %llus", static_cast<unsigned long long>(remaining));
+        if (ImGui::Button("Cancel download"))
+            cancel_turnip_driver_download();
+    }
+
+    ImGui::Spacing();
+    if (!turnip_driver_install_pending && ImGui::Button("Close"))
+        ImGui::CloseCurrentPopup();
+
+    ImGui::EndPopup();
+}
+#endif
 
 void get_modules_list(GuiState &gui, EmuEnvState &emuenv) {
     gui.modules.clear();
@@ -794,6 +1264,9 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
         const bool is_renderer_changed = (emuenv.backend_renderer != emuenv.renderer->current_backend);
         if (is_vulkan && !is_renderer_changed) {
             const std::vector<std::string> gpu_list_str = emuenv.renderer->get_gpu_list();
+#ifdef __ANDROID__
+            select_pending_custom_driver(gpu_list_str);
+#endif
             // must convert to a vector of char*
             std::vector<const char *> gpu_list;
             for (const auto &gpu : gpu_list_str)
@@ -807,14 +1280,16 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
                     config.custom_driver_name = "";
 
                 if (ImGui::Button(lang.gpu["add_custom_driver"].c_str())) {
-                    app::add_custom_driver(emuenv);
-                    // also set it to stock after
-                    config.gpu_idx = 0;
+                    pending_custom_driver_selection = app::add_custom_driver(emuenv);
                 }
 
                 ImGui::SameLine();
-                if (ImGui::Button(lang.gpu["download_custom_driver"].c_str()))
-                    open_path("https://github.com/K11MCH1/AdrenoToolsDrivers/releases/");
+                if (ImGui::Button(lang.gpu["download_custom_driver"].c_str())) {
+                    ImGui::OpenPopup("Turnip Driver Downloads");
+                    if (turnip_driver_assets.empty())
+                        start_turnip_driver_fetch();
+                }
+                draw_turnip_driver_download_popup();
 
                 // first is the stock gpu
                 if (config.gpu_idx > 0) {

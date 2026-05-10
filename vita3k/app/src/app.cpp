@@ -83,43 +83,64 @@ void set_window_title(EmuEnvState &emuenv) {
 }
 
 #ifdef __ANDROID__
-void add_custom_driver(EmuEnvState &emuenv) {
-    fs::path file_path{};
-    host::dialog::filesystem::Result result = host::dialog::filesystem::open_file(file_path);
+static bool is_safe_zip_entry_path(const fs::path &entry_path) {
+    if (entry_path.is_absolute())
+        return false;
 
-    if (result != host::dialog::filesystem::SUCCESS)
-        return;
+    for (const auto &part : entry_path) {
+        if (part.string() == "..")
+            return false;
+    }
 
+    return true;
+}
+
+static std::string install_custom_driver_archive(const fs::path &file_path) {
     // remove the .zip extension
     std::string driver = file_path.filename().stem().string();
 
     fs::path driver_path = fs::path(SDL_GetAndroidInternalStoragePath()) / "driver" / driver;
 
     if (fs::exists(driver_path) && !fs::is_empty(driver_path)) {
-        LOG_ERROR("Driver {} already exists", driver);
-        return;
+        LOG_INFO("Driver {} already exists, selecting installed copy.", driver);
+        return driver;
     }
 
     fs::create_directories(driver_path);
 
     std::unique_ptr<FILE, int (*)(FILE *)> zip_file(FOPEN(file_path.c_str(), "rb"), fclose);
+    if (!zip_file) {
+        LOG_CRITICAL("Could not open custom driver archive {}", file_path);
+        fs::remove_all(driver_path);
+        return {};
+    }
+
     std::string driver_so = "";
 
     mz_zip_archive zip;
     memset(&zip, 0, sizeof(mz_zip_archive));
     if (!mz_zip_reader_init_cfile(&zip, zip_file.get(), 0, 0)) {
         LOG_CRITICAL("miniz error reading archive: {}", mz_zip_get_error_string(mz_zip_get_last_error(&zip)));
-        return;
+        fs::remove_all(driver_path);
+        return {};
     }
+
+    bool extract_failed = false;
     const int num_files = mz_zip_reader_get_num_files(&zip);
     for (int i = 0; i < num_files; i++) {
         mz_zip_archive_file_stat file_stat;
         if (!mz_zip_reader_file_stat(&zip, i, &file_stat)) {
             continue;
         }
-        const std::string_view m_filename = file_stat.m_filename;
+        const std::string m_filename = file_stat.m_filename;
         if (m_filename.ends_with("/")) {
             // directory
+            continue;
+        }
+
+        const fs::path entry_path(m_filename);
+        if (!is_safe_zip_entry_path(entry_path)) {
+            LOG_WARN("Skipping unsafe custom driver archive entry {}", m_filename);
             continue;
         }
 
@@ -132,19 +153,23 @@ void add_custom_driver(EmuEnvState &emuenv) {
         }
 
         LOG_INFO("Extracting {}", m_filename);
-        const fs::path file_output = driver_path / m_filename;
+        const fs::path file_output = driver_path / entry_path;
         if (!fs::exists(file_output.parent_path()))
             fs::create_directories(file_output.parent_path());
 
-        mz_zip_reader_extract_to_file(&zip, i, file_output.c_str(), 0);
+        if (!mz_zip_reader_extract_to_file(&zip, i, file_output.c_str(), 0)) {
+            LOG_CRITICAL("miniz error extracting {}: {}", m_filename, mz_zip_get_error_string(mz_zip_get_last_error(&zip)));
+            extract_failed = true;
+            break;
+        }
     }
 
     mz_zip_reader_end(&zip);
 
-    if (driver_so.empty()) {
+    if (extract_failed || driver_so.empty()) {
         LOG_ERROR("Could not locate main driver file!");
         fs::remove_all(driver_path);
-        return;
+        return {};
     }
 
     // last thing to do: create a driver_name.txt file with the name of the main so
@@ -153,6 +178,21 @@ void add_custom_driver(EmuEnvState &emuenv) {
     driver_name_file.close();
 
     LOG_INFO("Successfully installed driver {}!", driver);
+    return driver;
+}
+
+std::string add_custom_driver(EmuEnvState &emuenv) {
+    fs::path file_path{};
+    host::dialog::filesystem::Result result = host::dialog::filesystem::open_file(file_path);
+
+    if (result != host::dialog::filesystem::SUCCESS)
+        return {};
+
+    return install_custom_driver_archive(file_path);
+}
+
+std::string add_custom_driver_from_path(const std::string &file_path) {
+    return install_custom_driver_archive(fs::path(file_path));
 }
 
 void remove_custom_driver(EmuEnvState &emuenv, const std::string &driver) {

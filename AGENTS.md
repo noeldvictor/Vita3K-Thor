@@ -1,0 +1,56 @@
+# Vita3K Thor Agent Notes
+
+These notes are for work in Vita3K Thor Experiment, a personal Android-focused Vita3K fork for AYN Thor testing. Keep changes practical, reversible, and clearly scoped to handheld compatibility work.
+
+## Source Control
+
+- Writable remote is the user's fork: `origin = git@github.com:noeldvictor/Vita3K-Thor.git`.
+- Upstream reference is `https://github.com/Vita3K/Vita3K`.
+- Always push with SSH; do not switch `origin` to HTTPS.
+- Do not push to upstream Vita3K from this checkout.
+- Keep Thor-specific changes easy to identify so broadly useful fixes can be proposed upstream separately.
+- Do not commit APK outputs, build folders, downloaded driver ZIPs, extracted drivers, caches, SDKs, firmware, license files, or game content.
+
+## Safety Scope
+
+- Work only on emulator compatibility, Android handheld UX, controller/touch behavior, renderer settings, driver selection, diagnostics, and build/test documentation.
+- Do not add piracy, DRM bypass, license bypass, key distribution, firmware redistribution, online cheating, anti-cheat bypass, or commercial game redistribution support.
+- Keep all docs explicit that users must provide their own legally dumped content and homebrew.
+- Third-party driver downloads must stay user-initiated, clearly sourced, and stored under app-local custom-driver paths.
+
+## Android And Thor Focus
+
+- Primary target is AYN Thor Base/Pro/Max: Snapdragon 8 Gen 2, Adreno 740, active cooling, LPDDR5X, and UFS4 storage.
+- Thor Lite is a different Snapdragon 865 / Adreno 650 target and should not silently drive defaults.
+- Prefer Android `arm64-v8a` test paths. Desktop build support should not be broken, but desktop packaging is not this fork's main purpose.
+- The Android app label and package id should remain unchanged unless the user explicitly asks to split installs.
+
+## Custom Driver Workflow
+
+- Existing Vita3K custom drivers live under Android internal storage in the `driver/` directory and are selected through `custom_driver_name`.
+- Turnip driver download UX should use K11MCH1/AdrenoToolsDrivers as the visible source and should install standard ZIP assets through the same custom-driver extraction path as manual installs.
+- After installing a driver from the picker, select it immediately in the GPU settings and remind users that emulation must reboot for the renderer change to apply.
+- Extract only safe relative ZIP entries; never allow absolute paths or `..` traversal from downloaded archives.
+- If a downloaded driver is already installed, selecting the existing copy is acceptable and should not be treated as a fatal error.
+
+## Build Notes
+
+- Android CI-style builds stage assets before Gradle:
+
+```powershell
+Copy-Item -Recurse -Force data android/assets
+Copy-Item -Recurse -Force lang android/assets
+Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
+.\gradlew.bat assembleReldebug
+```
+
+- If local Android SDK, NDK, Java, vcpkg, or signing setup is missing, do not claim an APK was built.
+- For C++ changes, run the lightest practical checks first, such as `git diff --check` and a targeted configure/build when the local toolchain is available.
+
+## Reporting Thor Results
+
+- Record device model, Android version, Vita3K commit, APK/build type, renderer, selected driver, title ID, game version/update, settings, screenshots, and logs.
+- A "works" claim should include proof for boot, rendering, input, audio, save/load, suspend/resume, and exit when those areas matter.
+- Do not send Thor-experiment regressions to upstream Vita3K unless the issue is reproduced cleanly on upstream too.
+- Write repo work reports as timestamped Markdown files under `reports/`, using names like `YYYYMMDD_HHMMSS.md`.
+- Reports should briefly state what changed, why, verification performed, and any remaining blockers.

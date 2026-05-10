@@ -587,7 +587,7 @@ struct LangState {
             { "gpu", "GPU (Reboot to apply)" },
             { "select_gpu", "Select the GPU Vita3K should run on." },
             { "add_custom_driver", "Add custom driver" },
-            { "download_custom_driver", "Download Custom Driver" },
+            { "download_custom_driver", "Download Turnip driver" },
             { "remove_custom_driver", "Remove custom driver" },
             { "standard", "Standard" },
             { "high", "High" },

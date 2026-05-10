@@ -49,6 +49,7 @@ This fork should keep its differences from stock Vita3K visible and testable:
 - README and repo branding identify this as the `Vita3K Thor Experiment`.
 - Writable fork remote is `git@github.com:noeldvictor/Vita3K-Thor.git`.
 - Android testing targets the existing `android/` Gradle project and `arm64-v8a` native build path.
+- GPU settings include an in-app Turnip driver picker that can download K11MCH1 AdrenoToolsDrivers ZIP assets, install them, and select the installed custom driver.
 - Thor test APKs should prefer debug-friendly builds while renderer and input experiments are still moving.
 - Compatibility claims should include commit, APK/build type, renderer, graphics driver, title ID, settings, screenshots, and logs.
 - Thor-only behavior should be guarded behind settings, build flags, device detection, or clearly named code paths.
