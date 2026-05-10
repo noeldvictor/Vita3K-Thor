@@ -92,6 +92,7 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - Cheats are offline single-player only. Do not add online cheating, anti-cheat bypass, DRM bypass, license bypass, or commercial cheat pack redistribution.
 - VitaCheat `.psv` files can be detected by title ID from repo/user cheat roots such as `cheats/<TITLEID>.psv`, `cheats/db/<TITLEID>.psv`, shared `cheats/`, `ux0/vitacheat/db/`, and Android shared-storage/SD-card roots like `/storage/<card>/cheats/psvita`, `/storage/<card>/VitaCheat/db`, and `/storage/<card>/Roms/psvita/cheats`.
 - Only commit third-party cheat files when their license/source permits redistribution. Otherwise commit importer/conversion tooling and user instructions, not the database itself.
+- Use `tools/sync_vitacheat_db.ps1` to clone/update an external VitaCheat DB into ignored `tmp/` storage and push it to the Thor SD card; do not commit the cloned DB.
 - Games with detected cheat files show a `C` badge in the app list.
 - Runtime cheat support is fail-closed and currently applies only enabled `_V1` VitaCheat writes: `$0000`, `$0100`, `$0200`, ARM/code writes `$A000`, `$A100`, `$A200`, level-1 pointer writes ending in `$3300`, plus simple `$B200` main-module segment-relative base selectors. Unsupported multi-level pointer, condition, block, and button-code formats are skipped and logged.
 - `tools/convert_vitacheat.py` converts VitaCheat `.psv` files into JSON metadata for auditing and future UI work. The emulator runtime still reads `.psv` directly.

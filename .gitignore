@@ -84,3 +84,6 @@ fastlane/readme.md
 
 # Copilot local config
 .github/copilot-instructions.md
+
+# Local imported databases and scratch analysis
+tmp/

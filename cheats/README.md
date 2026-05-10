@@ -40,6 +40,16 @@ python tools/convert_vitacheat.py C:\path\to\PCSE00000.psv -o cheats\converted
 
 The emulator runtime still reads `.psv` files directly for now; the JSON output is for review, auditing unsupported codes, and future UI work.
 
+## Android Sync Helper
+
+Use `tools/sync_vitacheat_db.ps1` to clone/update a VitaCheat database into ignored `tmp/` storage and push its `db` folder to the Thor SD card:
+
+```powershell
+.\tools\sync_vitacheat_db.ps1
+```
+
+By default it pushes to `/storage/2664-21DE/cheats/psvita/db`, which Vita3K Thor scans for `<TITLEID>.psv` files.
+
 ## Import Rules
 
 - Only add cheats for legally owned offline single-player games.
