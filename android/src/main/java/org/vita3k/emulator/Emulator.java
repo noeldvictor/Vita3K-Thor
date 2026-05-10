@@ -19,6 +19,7 @@ import android.util.Log;
 import android.view.Surface;
 import android.view.ViewGroup;
 import android.view.View;
+import android.view.KeyEvent;
 import android.widget.Toast;
 
 import androidx.annotation.Keep;
@@ -130,6 +131,28 @@ public class Emulator extends SDLActivity
         if (hasFocus) {
             hideSystemBars();
         }
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
+            if (SDLActivity.mBrokenLibraries)
+                return super.dispatchKeyEvent(event);
+
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                Log.i(TAG, "Routing KEYCODE_BACK down through SDL native key path");
+                SDLActivity.onNativeKeyDown(event.getKeyCode());
+                return true;
+            }
+
+            if (event.getAction() == KeyEvent.ACTION_UP) {
+                Log.i(TAG, "Routing KEYCODE_BACK up through SDL native key path");
+                SDLActivity.onNativeKeyUp(event.getKeyCode());
+                return true;
+            }
+        }
+
+        return super.dispatchKeyEvent(event);
     }
 
     @Keep
