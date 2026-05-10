@@ -3,6 +3,7 @@ package org.vita3k.emulator;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.AssetFileDescriptor;
+import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
@@ -11,8 +12,10 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.provider.Settings;
+import android.provider.OpenableColumns;
 import android.system.ErrnoException;
 import android.system.Os;
+import android.util.Log;
 import android.view.Surface;
 import android.view.ViewGroup;
 import android.view.View;
@@ -33,6 +36,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Locale;
 
 import org.libsdl.app.SDLActivity;
 import org.libsdl.app.SDLSurface;
@@ -40,6 +44,7 @@ import org.vita3k.emulator.overlay.InputOverlay;
 
 public class Emulator extends SDLActivity
 {
+    private static final String TAG = "Vita3KThor";
     private String currentGameId = "";
     private EmuSurface mSurface;
 
@@ -85,6 +90,8 @@ public class Emulator extends SDLActivity
 
         String[] args = intent.getStringArrayExtra(APP_RESTART_PARAMETERS);
         if(args == null)
+            args = getArchiveLaunchArguments(intent);
+        if(args == null)
             args = new String[]{};
 
         return args;
@@ -96,10 +103,12 @@ public class Emulator extends SDLActivity
 
         // if we start the app from a shortcut and are in the main menu
         // or in a different game, start the new game
-        if(intent.getAction().startsWith("LAUNCH_")){
+        if(intent.getAction() != null && intent.getAction().startsWith("LAUNCH_")){
             String game_id = intent.getAction().substring(7);
             if(!game_id.equals(currentGameId))
                 ProcessPhoenix.triggerRebirth(getContext(), intent);
+        } else if(isArchiveLaunchIntent(intent)) {
+            ProcessPhoenix.triggerRebirth(getContext(), intent);
         }
     }
 
@@ -203,6 +212,11 @@ public class Emulator extends SDLActivity
 
     private String resolveUriToPath(Uri result_uri) {
         String result_path = "";
+        if (result_uri == null)
+            return result_path;
+
+        if ("file".equals(result_uri.getScheme()))
+            return result_uri.getPath();
 
         try (ParcelFileDescriptor file_descr = getContentResolver().openFileDescriptor(result_uri, "r")) {
             result_path = Os.readlink("/proc/self/fd/" + file_descr.getFd());
@@ -217,6 +231,114 @@ public class Emulator extends SDLActivity
         }
 
         return result_path;
+    }
+
+    private boolean isArchiveLaunchIntent(Intent intent) {
+        if (intent == null || intent.getAction() == null)
+            return false;
+
+        return (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null)
+                || (Intent.ACTION_SEND.equals(intent.getAction()) && intent.getParcelableExtra(Intent.EXTRA_STREAM) instanceof Uri);
+    }
+
+    private String[] getArchiveLaunchArguments(Intent intent) {
+        Uri uri = getArchiveLaunchUri(intent);
+        if (uri == null)
+            return null;
+
+        String path = resolveArchiveLaunchPath(intent, uri);
+        if (path == null || path.isEmpty())
+            return null;
+
+        ArrayList<String> args = new ArrayList<>();
+        args.add("-a");
+        args.add("true");
+        args.add("--cartridge");
+        args.add(path);
+        return args.toArray(new String[]{});
+    }
+
+    private Uri getArchiveLaunchUri(Intent intent) {
+        if (intent == null || intent.getAction() == null)
+            return null;
+
+        if (Intent.ACTION_VIEW.equals(intent.getAction()))
+            return intent.getData();
+
+        if (Intent.ACTION_SEND.equals(intent.getAction())) {
+            Object stream = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (stream instanceof Uri)
+                return (Uri)stream;
+        }
+
+        return null;
+    }
+
+    private String resolveArchiveLaunchPath(Intent intent, Uri uri) {
+        try {
+            if ((intent.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0)
+                getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (Exception ignored) {
+        }
+
+        String resolvedPath = resolveUriToPath(uri);
+        if (resolvedPath != null && !resolvedPath.isEmpty() && !resolvedPath.startsWith("/proc/"))
+            return resolvedPath;
+
+        return copyUriToLaunchCache(uri);
+    }
+
+    private String copyUriToLaunchCache(Uri uri) {
+        File outputDir = new File(getExternalFilesDir(null), "cartridge_launch");
+        if (!outputDir.exists() && !outputDir.mkdirs())
+            return "";
+
+        File outputFile = new File(outputDir, sanitizeArchiveName(getDisplayName(uri)));
+        byte[] buffer = new byte[1024 * 1024];
+
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             FileOutputStream output = new FileOutputStream(outputFile)) {
+            if (input == null)
+                return "";
+
+            int read;
+            while ((read = input.read(buffer)) != -1)
+                output.write(buffer, 0, read);
+
+            return outputFile.getAbsolutePath();
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to copy archive launch URI", e);
+            return "";
+        }
+    }
+
+    private String getDisplayName(Uri uri) {
+        String displayName = null;
+
+        try (Cursor cursor = getContentResolver().query(uri, null, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (nameIndex >= 0)
+                    displayName = cursor.getString(nameIndex);
+            }
+        } catch (Exception ignored) {
+        }
+
+        if (displayName == null || displayName.isEmpty())
+            displayName = uri.getLastPathSegment();
+        if (displayName == null || displayName.isEmpty())
+            displayName = "cartridge.zip";
+
+        return displayName;
+    }
+
+    private String sanitizeArchiveName(String name) {
+        String sanitized = name.replaceAll("[\\\\/:*?\"<>|]", "_");
+        String lower = sanitized.toLowerCase(Locale.ROOT);
+        if (!lower.endsWith(".zip") && !lower.endsWith(".vpk"))
+            sanitized += ".zip";
+
+        return sanitized;
     }
 
     @Override

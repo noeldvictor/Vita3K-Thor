@@ -74,11 +74,14 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 
 - Vita3K Thor now has an experimental cartridge launch path for archives: use `--cartridge <path-to-vpk-or-zip>` to mount game content as a read-only virtual game card for the session instead of adding it to the installed app library.
 - On device, the visible launcher path is `File` -> `Play ZIP as Cartridge`; select a `.zip` or `.vpk`, wait for the virtual cartridge cache to mount, then press `Start Cartridge`.
+- Android file/front-end launching is supported through `ACTION_VIEW` and `ACTION_SEND` for `.zip`/`.vpk`-style archive intents. The Android bridge converts the incoming file/content URI into `-a true --cartridge <path>`.
+- If Android only provides a content URI without a raw filesystem path, copy the URI into app-local `cartridge_launch/` and launch the copied archive from there.
 - The first implementation extracts the chosen archive into app-local `ux0/cart/<TITLEID>` and redirects `app0:` there. Treat this as a virtual cartridge cache, not a permanent install.
 - The visible menu path should add only a transient in-memory app entry for launch and must not save the cartridge title into the normal installed app cache.
 - Normal `content-path` without `--cartridge` remains the upstream install-and-run convenience path for `.vpk`/`.zip` archives or content folders.
 - The `--installed-path` / `-r` path runs an already-installed app path from Vita3K storage. A future no-install-like UX would need a new staging, cache, or mount feature and must not bypass ownership or license expectations.
 - Cartridge mode should stay read-only from the emulated app side. Do not let games create, delete, or rename files under the virtual card path.
+- True pure-ZIP play would require an archive-backed VFS for `app0:` that can lazily map Vita file opens, stats, directory reads, and seeking into ZIP entries. Do not call the current cartridge cache true direct ZIP play.
 
 ## ADB Thor Testing
 
