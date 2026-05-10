@@ -35,6 +35,7 @@
 #include <packages/sfo.h>
 #include <regmgr/functions.h>
 #include <touch/functions.h>
+#include <util/cheat_paths.h>
 #include <util/fs.h>
 #include <util/log.h>
 #include <util/string_utils.h>
@@ -200,22 +201,7 @@ static std::vector<std::string> get_archive_content_roots_for_scan(mz_zip_archiv
 }
 
 static bool has_cheats_for_title(const EmuEnvState &emuenv, const std::string &title_id) {
-    if (title_id.empty())
-        return false;
-
-    const std::array<fs::path, 4> roots = {
-        emuenv.base_path / "cheats",
-        emuenv.shared_path / "cheats",
-        emuenv.pref_path / "ux0/vitacheat/db",
-        emuenv.pref_path / "ux0/vitacheat"
-    };
-
-    for (const auto &root : roots) {
-        if (fs::exists(root / (title_id + ".psv")) || fs::exists(root / "db" / (title_id + ".psv")))
-            return true;
-    }
-
-    return false;
+    return cheat_paths::has_vitacheat_file(emuenv.base_path, emuenv.shared_path, emuenv.pref_path, title_id);
 }
 
 static std::optional<App> app_from_param(const EmuEnvState &emuenv, const vfs::FileBuffer &param_sfo, const fs::path &source_path, const std::string &source_root) {

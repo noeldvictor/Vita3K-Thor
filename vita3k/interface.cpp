@@ -71,6 +71,7 @@
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_system.h>
+#include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_video.h>
 
 #include <fmt/chrono.h>
@@ -917,6 +918,9 @@ static bool runtime_osd_auto_paused = false;
 static bool android_back_key_down = false;
 static bool android_back_chord_used = false;
 static bool android_back_fast_forward_latched = false;
+static bool android_back_long_press_used = false;
+static uint64_t android_back_down_ticks = 0;
+constexpr uint64_t ANDROID_BACK_HOME_LONG_PRESS_MS = 400;
 
 static bool memory_page_is_allocated(const MemState &mem, const uint32_t page) {
     const uint32_t word = mem.allocator.words[page >> 5];
@@ -1326,6 +1330,31 @@ bool handle_events(EmuEnvState &emuenv, GuiState &gui) {
         }
     };
 
+#ifdef __ANDROID__
+    const auto android_back_held_ms = []() -> uint64_t {
+        if (!android_back_key_down || (android_back_down_ticks == 0))
+            return 0;
+
+        const uint64_t now = SDL_GetTicks();
+        return now >= android_back_down_ticks ? now - android_back_down_ticks : 0;
+    };
+
+    const auto route_android_back_to_vita_home = [&](const bool from_key_up) {
+        if (android_back_long_press_used || android_back_chord_used || emuenv.io.title_id.empty())
+            return;
+
+        android_back_long_press_used = true;
+        android_back_chord_used = true;
+        if (runtime_osd_is_open())
+            runtime_osd_set_open(emuenv, false);
+
+        LOG_INFO("Android Back long press: routing to Vita PS/Home");
+        ui_navigation(SCE_CTRL_PSBUTTON);
+        if (from_key_up)
+            gui.is_key_locked = false;
+    };
+#endif
+
     // Check if any settings or controls dialog is open and drop inputs on this case
     emuenv.drop_inputs = gui.configuration_menu.settings_dialog || gui.configuration_menu.custom_settings_dialog || gui.controls_menu.controllers_dialog || gui.controls_menu.controls_dialog;
 
@@ -1397,10 +1426,17 @@ bool handle_events(EmuEnvState &emuenv, GuiState &gui) {
 #ifdef __ANDROID__
             if (event.key.scancode == SDL_SCANCODE_AC_BACK) {
                 if (!emuenv.io.title_id.empty()) {
-                    android_back_key_down = true;
-                    android_back_chord_used = false;
+                    if (!android_back_key_down) {
+                        android_back_key_down = true;
+                        android_back_chord_used = false;
+                        android_back_fast_forward_latched = false;
+                        android_back_long_press_used = false;
+                        android_back_down_ticks = SDL_GetTicks();
+                    } else if (android_back_held_ms() >= ANDROID_BACK_HOME_LONG_PRESS_MS)
+                        route_android_back_to_vita_home(false);
+
                     const SDL_GamepadButton r1_button = runtime_configured_button(emuenv, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
-                    if (!android_back_fast_forward_latched && runtime_any_gamepad_button_down(emuenv, r1_button, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) {
+                    if (!android_back_chord_used && !android_back_fast_forward_latched && runtime_any_gamepad_button_down(emuenv, r1_button, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) {
                         android_back_fast_forward_latched = true;
                         android_back_chord_used = true;
                         runtime_toggle_fast_forward(emuenv);
@@ -1446,11 +1482,19 @@ bool handle_events(EmuEnvState &emuenv, GuiState &gui) {
             gui.is_key_locked = false;
 #ifdef __ANDROID__
             if (event.key.scancode == SDL_SCANCODE_AC_BACK) {
-                if (android_back_key_down && !android_back_chord_used && !emuenv.io.title_id.empty())
-                    runtime_osd_set_open(emuenv, !runtime_osd_is_open());
+                if (android_back_key_down && !android_back_chord_used && !emuenv.io.title_id.empty()) {
+                    if (android_back_held_ms() >= ANDROID_BACK_HOME_LONG_PRESS_MS)
+                        route_android_back_to_vita_home(true);
+                    else {
+                        LOG_INFO("Android Back short press: toggling runtime OSD");
+                        runtime_osd_set_open(emuenv, !runtime_osd_is_open());
+                    }
+                }
                 android_back_key_down = false;
                 android_back_chord_used = false;
                 android_back_fast_forward_latched = false;
+                android_back_long_press_used = false;
+                android_back_down_ticks = 0;
                 continue;
             }
 #endif

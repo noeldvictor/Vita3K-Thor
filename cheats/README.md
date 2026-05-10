@@ -11,6 +11,7 @@ Vita3K Thor detects VitaCheat-style `.psv` files named by title ID:
 - app shared storage `cheats/PCSE00000.psv`
 - app shared storage `cheats/db/PCSE00000.psv`
 - `ux0/vitacheat/db/PCSE00000.psv`
+- on Android, common shared-storage and SD-card roots such as `/sdcard/cheats/psvita/PCSE00000.psv`, `/storage/<card>/cheats/psvita/PCSE00000.psv`, `/storage/<card>/VitaCheat/db/PCSE00000.psv`, and `/storage/<card>/Roms/psvita/cheats/PCSE00000.psv`
 
 When a matching file exists, the game shows a `C` cheat badge in the app list.
 
@@ -48,6 +49,6 @@ The emulator runtime still reads `.psv` files directly for now; the JSON output 
 
 ## Current Gaps
 
-- Cheat toggles are not exposed in the in-game UI yet; `_V1` means enabled and `_V0` means off.
+- VitaCheat files are not bundled with the repository unless their license/source permits redistribution; most users need to supply their own title-ID-named `.psv` files.
 - Multi-level pointer, condition, increment/decrement, copy/fill, and button-conditional code types need per-game validation before enabling.
 - Do not commit public cheat databases unless their license/source clearly allows redistribution here.

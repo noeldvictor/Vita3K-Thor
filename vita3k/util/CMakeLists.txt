@@ -3,6 +3,7 @@ add_library(
 	STATIC
 	src/arm.cpp
 	src/byte.cpp
+	src/cheat_paths.cpp
 	src/float_to_half.cpp
 	src/fs_utils.cpp
 	src/hash.cpp

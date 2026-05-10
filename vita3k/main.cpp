@@ -41,6 +41,7 @@
 #include <renderer/shaders.h>
 #include <renderer/state.h>
 #include <shader/spirv_recompiler.h>
+#include <util/cheat_paths.h>
 #include <util/fs.h>
 #include <util/log.h>
 #include <util/string_utils.h>
@@ -224,30 +225,6 @@ static bool vita_cheat_pointer_header(const uint32_t code_type, uint8_t &width, 
     return level > 0;
 }
 
-static std::optional<fs::path> find_vitacheat_file(const EmuEnvState &emuenv) {
-    if (emuenv.io.title_id.empty())
-        return std::nullopt;
-
-    const std::vector<fs::path> roots = {
-        emuenv.base_path / "cheats",
-        emuenv.shared_path / "cheats",
-        emuenv.pref_path / "ux0/vitacheat/db",
-        emuenv.pref_path / "ux0/vitacheat"
-    };
-
-    for (const auto &root : roots) {
-        const auto direct = root / fmt::format("{}.psv", emuenv.io.title_id);
-        if (fs::exists(direct))
-            return direct;
-
-        const auto db = root / "db" / fmt::format("{}.psv", emuenv.io.title_id);
-        if (fs::exists(db))
-            return db;
-    }
-
-    return std::nullopt;
-}
-
 static std::array<Address, MODULE_INFO_NUM_SEGMENTS> get_main_module_segment_bases(const EmuEnvState &emuenv, const int32_t main_module_id) {
     std::array<Address, MODULE_INFO_NUM_SEGMENTS> bases{};
     const auto module = emuenv.kernel.loaded_modules.find(main_module_id);
@@ -268,7 +245,7 @@ static RuntimeCheats load_runtime_cheats(const EmuEnvState &emuenv, const int32_
     if (!emuenv.cfg.cheats_enabled)
         return runtime;
 
-    const auto source = find_vitacheat_file(emuenv);
+    const auto source = cheat_paths::find_vitacheat_file(emuenv.base_path, emuenv.shared_path, emuenv.pref_path, emuenv.io.title_id);
     if (!source.has_value())
         return runtime;
 
@@ -629,6 +606,12 @@ static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &
     if (ImGui::CollapsingHeader("Cheats", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (runtime_cheats.source.empty()) {
             ImGui::TextWrapped("No matching VitaCheat file loaded for this title.");
+            if (ImGui::TreeNode("Searched paths")) {
+                const auto candidates = cheat_paths::get_vitacheat_candidate_files(emuenv.base_path, emuenv.shared_path, emuenv.pref_path, emuenv.io.title_id);
+                for (const auto &candidate : candidates)
+                    ImGui::TextDisabled("%s", fs_utils::path_to_utf8(candidate).c_str());
+                ImGui::TreePop();
+            }
         } else {
             ImGui::Text("File: %s", fs_utils::path_to_utf8(runtime_cheats.source).c_str());
             ImGui::Text("Enabled writes: %u  Code patches: %u  Pointer writes: %u  Unsupported lines: %u",
