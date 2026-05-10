@@ -29,23 +29,52 @@ These notes are for work in Vita3K Thor Experiment, a personal Android-focused V
 
 - Existing Vita3K custom drivers live under Android internal storage in the `driver/` directory and are selected through `custom_driver_name`.
 - Turnip driver download UX should use K11MCH1/AdrenoToolsDrivers as the visible source and should install standard ZIP assets through the same custom-driver extraction path as manual installs.
+- The picker should let the user refresh GitHub releases, see which ZIP is recommended for AYN Thor / Adreno 740, download ZIPs, install and select a ZIP, select an already-installed driver, and delete cached downloaded ZIPs.
+- Keep downloaded Turnip ZIPs in app-local `driver_downloads/` only. Do not commit or externalize driver ZIPs.
 - After installing a driver from the picker, select it immediately in the GPU settings and remind users that emulation must reboot for the renderer change to apply.
 - Extract only safe relative ZIP entries; never allow absolute paths or `..` traversal from downloaded archives.
 - If a downloaded driver is already installed, selecting the existing copy is acceptable and should not be treated as a fatal error.
+- The Thor recommendation is a convenience heuristic, not a compatibility guarantee. Prefer recent Turnip ZIPs that appear Gmem/a7xx-friendly; deprioritize debug/beta/a8xx-specific assets.
 
 ## Build Notes
 
-- Android CI-style builds stage assets before Gradle:
+- Local Windows Android builds need Java 21, Android SDK/NDK 27.3.13750724, and vcpkg with the arm64 Android Vita3K dependencies. The known-good local toolchain paths are:
+
+```powershell
+$env:JAVA_HOME='C:\Users\leanerdesigner\Documents\SteamPortableTools\toolchains\jdk-21.0.11+10'
+$env:ANDROID_HOME='C:\Users\leanerdesigner\Documents\SteamPortableTools\toolchains\android-sdk'
+$env:ANDROID_SDK_ROOT=$env:ANDROID_HOME
+$env:ANDROID_NDK_HOME='C:\Users\leanerdesigner\Documents\SteamPortableTools\toolchains\android-sdk\ndk\27.3.13750724'
+$env:VCPKG_ROOT='C:\Users\leanerdesigner\Documents\SteamPortableTools\toolchains\vcpkg'
+$env:Path="$env:JAVA_HOME\bin;$env:VCPKG_ROOT;$env:ANDROID_HOME\platform-tools;$env:Path"
+```
+
+- Bootstrap and install vcpkg deps if needed:
+
+```powershell
+& "$env:VCPKG_ROOT\bootstrap-vcpkg.bat"
+& "$env:VCPKG_ROOT\vcpkg.exe" install boost-system boost-filesystem boost-program-options boost-icl boost-variant openssl zlib --triplet=arm64-android
+```
+
+- Stage assets before Gradle:
 
 ```powershell
 Copy-Item -Recurse -Force data android/assets
 Copy-Item -Recurse -Force lang android/assets
 Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
-.\gradlew.bat assembleReldebug
+.\gradlew.bat --stacktrace --configuration-cache --build-cache --parallel --configure-on-demand :android:assembleReldebug
 ```
 
+- Expected reldebug APK: `android/build/outputs/apk/reldebug/android-reldebug.apk`.
+- On Windows, `cmake/vcpkg_android.cmake` must normalize `ANDROID_NDK_HOME` and `VCPKG_ROOT` with `file(TO_CMAKE_PATH ...)`; raw backslashes can break generated CMake files with invalid `\U` escapes.
 - If local Android SDK, NDK, Java, vcpkg, or signing setup is missing, do not claim an APK was built.
 - For C++ changes, run the lightest practical checks first, such as `git diff --check` and a targeted configure/build when the local toolchain is available.
+
+## Playing Without Install
+
+- Current Vita3K behavior does not support true direct play from an external `.vpk`, `.zip`, or game folder without staging/installing into Vita3K storage first.
+- The `content-path` command-line path is an install-and-run convenience path for `.vpk`/`.zip` archives or content folders.
+- The `--installed-path` / `-r` path runs an already-installed app path from Vita3K storage. A future no-install-like UX would need a new staging, cache, or mount feature and must not bypass ownership or license expectations.
 
 ## ADB Thor Testing
 

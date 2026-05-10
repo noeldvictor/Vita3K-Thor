@@ -103,7 +103,9 @@ struct TurnipDriverAsset {
     std::string tag_name;
     std::string asset_name;
     std::string download_url;
+    std::string recommendation_note;
     uint64_t size = 0;
+    bool recommended = false;
 };
 
 struct TurnipDriverFetchResult {
@@ -113,7 +115,10 @@ struct TurnipDriverFetchResult {
 
 struct TurnipDriverInstallResult {
     std::string driver_name;
+    std::string archive_path;
     std::string error;
+    bool downloaded_only = false;
+    bool zip_deleted = false;
 };
 
 static std::vector<TurnipDriverAsset> turnip_driver_assets;
@@ -127,6 +132,7 @@ static std::string pending_custom_driver_selection;
 static std::atomic<float> turnip_driver_download_progress = 0.f;
 static std::atomic<uint64_t> turnip_driver_download_remaining = 0;
 static net_utils::ProgressState turnip_driver_progress_state;
+static bool turnip_driver_delete_zip_after_install = false;
 
 static std::string to_lower_copy(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -320,19 +326,24 @@ static std::vector<TurnipDriverAsset> parse_turnip_driver_assets(const std::stri
         if (release_name.empty())
             release_name = tag_name;
 
-        const std::string release_label = to_lower_copy(release_name + " " + tag_name);
         const auto asset_objects = split_json_objects(json_array_value(release_object, "assets"));
         for (const auto &asset_object : asset_objects) {
             const std::string asset_name = json_string_value(asset_object, "name");
             const std::string download_url = json_string_value(asset_object, "browser_download_url");
-            const std::string asset_label = to_lower_copy(asset_name + " " + release_label);
+            const std::string asset_name_label = to_lower_copy(asset_name);
 
-            const bool looks_like_turnip = asset_label.find("turnip") != std::string::npos
-                || asset_label.find("mesa") != std::string::npos;
+            const bool looks_like_turnip = asset_name_label.find("turnip") != std::string::npos
+                || asset_name_label.find("mesa") != std::string::npos;
             if (asset_name.empty() || download_url.empty() || !ends_with_case_insensitive(asset_name, ".zip") || !looks_like_turnip)
                 continue;
 
-            assets.push_back({ release_name, tag_name, asset_name, download_url, json_uint_value(asset_object, "size") });
+            TurnipDriverAsset asset;
+            asset.release_name = release_name;
+            asset.tag_name = tag_name;
+            asset.asset_name = asset_name;
+            asset.download_url = download_url;
+            asset.size = json_uint_value(asset_object, "size");
+            assets.push_back(std::move(asset));
         }
     }
 
@@ -355,6 +366,76 @@ static std::string format_driver_size(uint64_t size) {
     return fmt::format("{:.1f} MB", static_cast<double>(size) / (1024.0 * 1024.0));
 }
 
+static int turnip_driver_recommendation_score(const TurnipDriverAsset &asset) {
+    const std::string label = to_lower_copy(asset.release_name + " " + asset.tag_name + " " + asset.asset_name);
+    int score = 0;
+
+    if (label.find("turnip") != std::string::npos)
+        score += 100;
+    if (label.find("gmem") != std::string::npos)
+        score += 35;
+    if (label.find("a7") != std::string::npos || label.find("adreno") != std::string::npos)
+        score += 15;
+    if (label.find("autotuner") != std::string::npos)
+        score += 8;
+    if (label.find("sysmem") != std::string::npos)
+        score -= 8;
+    if (label.find("a8xx") != std::string::npos || label.find("8xx") != std::string::npos)
+        score -= 60;
+    if (label.find("debug") != std::string::npos || label.find("beta") != std::string::npos)
+        score -= 20;
+
+    return score;
+}
+
+static void mark_recommended_turnip_driver(std::vector<TurnipDriverAsset> &assets) {
+    if (assets.empty())
+        return;
+
+    size_t best_index = 0;
+    int best_score = turnip_driver_recommendation_score(assets.front());
+    for (size_t i = 1; i < assets.size(); ++i) {
+        const int score = turnip_driver_recommendation_score(assets[i]);
+        if (score > best_score) {
+            best_index = i;
+            best_score = score;
+        }
+    }
+
+    assets[best_index].recommended = true;
+    assets[best_index].recommendation_note = "Recommended for AYN Thor / Adreno 740: latest Turnip ZIP with a Gmem/a7xx-friendly preference when available.";
+}
+
+static fs::path turnip_driver_download_dir() {
+    return fs::path(SDL_GetAndroidInternalStoragePath()) / "driver_downloads";
+}
+
+static std::string turnip_driver_driver_name(const TurnipDriverAsset &asset) {
+    return fs::path(sanitize_download_file_name(asset.asset_name)).stem().string();
+}
+
+static fs::path turnip_driver_archive_path(const TurnipDriverAsset &asset) {
+    return turnip_driver_download_dir() / sanitize_download_file_name(asset.asset_name);
+}
+
+static fs::path turnip_driver_install_path(const TurnipDriverAsset &asset) {
+    return fs::path(SDL_GetAndroidInternalStoragePath()) / "driver" / turnip_driver_driver_name(asset);
+}
+
+static bool turnip_driver_zip_is_cached(const TurnipDriverAsset &asset) {
+    const auto archive_path = turnip_driver_archive_path(asset);
+    if (!fs::exists(archive_path) || !fs::is_regular_file(archive_path))
+        return false;
+
+    const auto cached_size = fs::file_size(archive_path);
+    return cached_size > 0 && (asset.size == 0 || cached_size == asset.size);
+}
+
+static bool turnip_driver_is_installed(const TurnipDriverAsset &asset) {
+    const auto driver_path = turnip_driver_install_path(asset);
+    return fs::exists(driver_path) && fs::is_directory(driver_path) && !fs::is_empty(driver_path);
+}
+
 static void start_turnip_driver_fetch() {
     if (turnip_driver_fetch_pending)
         return;
@@ -372,6 +453,7 @@ static void start_turnip_driver_fetch() {
             if (assets.empty())
                 return { {}, "No Turnip ZIP assets were found in the latest releases." };
 
+            mark_recommended_turnip_driver(assets);
             return { std::move(assets), {} };
         } catch (const std::exception &e) {
             return { {}, fmt::format("Driver release refresh failed: {}", e.what()) };
@@ -381,10 +463,11 @@ static void start_turnip_driver_fetch() {
     });
 }
 
-static void start_turnip_driver_install(const TurnipDriverAsset &asset) {
+static void start_turnip_driver_transfer(const TurnipDriverAsset &asset, bool install_after_download) {
     if (turnip_driver_install_pending)
         return;
 
+    const bool delete_zip_after_install = turnip_driver_delete_zip_after_install;
     {
         std::lock_guard<std::mutex> lock(turnip_driver_progress_state.mutex);
         turnip_driver_progress_state.download = true;
@@ -393,40 +476,51 @@ static void start_turnip_driver_install(const TurnipDriverAsset &asset) {
     turnip_driver_progress_state.cv.notify_all();
     turnip_driver_download_progress = 0.f;
     turnip_driver_download_remaining = 0;
-    turnip_driver_status_message = fmt::format("Downloading {}...", asset.asset_name);
+    turnip_driver_status_message = turnip_driver_zip_is_cached(asset)
+        ? fmt::format("Using cached {}...", asset.asset_name)
+        : fmt::format("Downloading {}...", asset.asset_name);
     turnip_driver_install_pending = true;
-    turnip_driver_install_future = std::async(std::launch::async, [asset]() -> TurnipDriverInstallResult {
+    turnip_driver_install_future = std::async(std::launch::async, [asset, install_after_download, delete_zip_after_install]() -> TurnipDriverInstallResult {
         try {
-            fs::path download_dir = fs::path(SDL_GetAndroidInternalStoragePath()) / "driver_downloads";
+            fs::path download_dir = turnip_driver_download_dir();
             fs::create_directories(download_dir);
-            const fs::path archive_path = download_dir / sanitize_download_file_name(asset.asset_name);
-            if (fs::exists(archive_path))
-                fs::remove(archive_path);
+            const fs::path archive_path = turnip_driver_archive_path(asset);
 
-            const auto progress_callback = [](float progress, uint64_t remaining_time) -> net_utils::ProgressState * {
-                turnip_driver_download_progress = progress;
-                turnip_driver_download_remaining = remaining_time;
-                return &turnip_driver_progress_state;
-            };
-
-            if (!net_utils::download_file(asset.download_url, archive_path.string(), progress_callback)) {
+            if (!turnip_driver_zip_is_cached(asset)) {
                 if (fs::exists(archive_path))
                     fs::remove(archive_path);
-                return { {}, fmt::format("Failed to download {}.", asset.asset_name) };
+
+                const auto progress_callback = [](float progress, uint64_t remaining_time) -> net_utils::ProgressState * {
+                    turnip_driver_download_progress = progress;
+                    turnip_driver_download_remaining = remaining_time;
+                    return &turnip_driver_progress_state;
+                };
+
+                if (!net_utils::download_file(asset.download_url, archive_path.string(), progress_callback)) {
+                    if (fs::exists(archive_path))
+                        fs::remove(archive_path);
+                    return { {}, archive_path.string(), fmt::format("Failed to download {}.", asset.asset_name) };
+                }
             }
 
+            if (!install_after_download)
+                return { {}, archive_path.string(), {}, true };
+
             const std::string driver_name = app::add_custom_driver_from_path(archive_path.string());
-            if (fs::exists(archive_path))
+            bool zip_deleted = false;
+            if (delete_zip_after_install && fs::exists(archive_path)) {
                 fs::remove(archive_path);
+                zip_deleted = true;
+            }
 
             if (driver_name.empty())
-                return { {}, fmt::format("Downloaded {}, but Vita3K could not install it.", asset.asset_name) };
+                return { {}, archive_path.string(), fmt::format("Downloaded {}, but Vita3K could not install it.", asset.asset_name) };
 
-            return { driver_name, {} };
+            return { driver_name, archive_path.string(), {}, false, zip_deleted };
         } catch (const std::exception &e) {
-            return { {}, fmt::format("Driver install failed: {}", e.what()) };
+            return { {}, {}, fmt::format("Driver transfer failed: {}", e.what()) };
         } catch (...) {
-            return { {}, "Driver install failed." };
+            return { {}, {}, "Driver transfer failed." };
         }
     });
 }
@@ -459,9 +553,12 @@ static void update_turnip_driver_tasks() {
         turnip_driver_install_pending = false;
         if (!result.error.empty()) {
             turnip_driver_status_message = result.error;
+        } else if (result.downloaded_only) {
+            turnip_driver_status_message = fmt::format("Downloaded ZIP: {}", result.archive_path);
         } else {
             pending_custom_driver_selection = result.driver_name;
-            turnip_driver_status_message = fmt::format("Installed and selected {}. Reboot emulation to apply it.", result.driver_name);
+            turnip_driver_status_message = fmt::format("Installed and selected {}. ZIP {}. Reboot emulation to apply it.",
+                result.driver_name, result.zip_deleted ? "deleted" : "kept");
         }
     }
 }
@@ -504,7 +601,8 @@ static void draw_turnip_driver_download_popup() {
         std::vector<const char *> label_ptrs;
         label_ptrs.reserve(turnip_driver_assets.size());
         for (const auto &asset : turnip_driver_assets) {
-            labels.push_back(fmt::format("{} / {} ({})", asset.release_name, asset.asset_name, format_driver_size(asset.size)));
+            labels.push_back(fmt::format("{}{} / {} ({})",
+                asset.recommended ? "[Recommended] " : "", asset.release_name, asset.asset_name, format_driver_size(asset.size)));
             label_ptrs.push_back(labels.back().c_str());
         }
 
@@ -515,17 +613,54 @@ static void draw_turnip_driver_download_popup() {
         ImGui::Combo("Driver", &selected_turnip_driver, label_ptrs.data(), static_cast<int>(label_ptrs.size()));
 
         const auto &asset = turnip_driver_assets[selected_turnip_driver];
+        const bool zip_cached = turnip_driver_zip_is_cached(asset);
+        const bool driver_installed = turnip_driver_is_installed(asset);
+        const auto archive_path = turnip_driver_archive_path(asset);
+        const std::string archive_state = zip_cached ? archive_path.string() : "not downloaded";
         ImGui::TextWrapped("Selected: %s", asset.asset_name.c_str());
         ImGui::TextWrapped("Release: %s", asset.release_name.c_str());
+        if (asset.recommended)
+            ImGui::TextWrapped("%s", asset.recommendation_note.c_str());
+        ImGui::TextWrapped("ZIP: %s", archive_state.c_str());
+        ImGui::TextWrapped("Installed driver: %s", driver_installed ? turnip_driver_driver_name(asset).c_str() : "not installed");
         ImGui::TextWrapped("Source: %s", asset.download_url.c_str());
         ImGui::Spacing();
 
         if (turnip_driver_install_pending)
             ImGui::BeginDisabled();
 
-        if (ImGui::Button("Download, install, and select")) {
-            start_turnip_driver_install(asset);
+        if (ImGui::Button(zip_cached ? "Install cached ZIP and select" : "Download, install, and select")) {
+            start_turnip_driver_transfer(asset, true);
         }
+
+        ImGui::SameLine();
+        if (zip_cached)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("Download ZIP only")) {
+            start_turnip_driver_transfer(asset, false);
+        }
+        if (zip_cached)
+            ImGui::EndDisabled();
+
+        if (zip_cached) {
+            ImGui::SameLine();
+            if (ImGui::Button("Delete downloaded ZIP")) {
+                if (fs::remove(archive_path))
+                    turnip_driver_status_message = fmt::format("Deleted ZIP: {}", archive_path.string());
+                else
+                    turnip_driver_status_message = fmt::format("Could not delete ZIP: {}", archive_path.string());
+            }
+        }
+
+        if (driver_installed) {
+            ImGui::SameLine();
+            if (ImGui::Button("Select installed driver")) {
+                pending_custom_driver_selection = turnip_driver_driver_name(asset);
+                turnip_driver_status_message = fmt::format("Selected {}. Reboot emulation to apply it.", pending_custom_driver_selection);
+            }
+        }
+
+        ImGui::Checkbox("Delete ZIP after install", &turnip_driver_delete_zip_after_install);
 
         if (turnip_driver_install_pending)
             ImGui::EndDisabled();
