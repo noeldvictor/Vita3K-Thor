@@ -30,6 +30,8 @@
 #include <include/environment.h>
 #include <io/state.h>
 #include <kernel/state.h>
+#include <mem/functions.h>
+#include <mem/ptr.h>
 #include <modules/module_parent.h>
 #include <packages/functions.h>
 #include <packages/license.h>
@@ -39,6 +41,7 @@
 #include <renderer/shaders.h>
 #include <renderer/state.h>
 #include <shader/spirv_recompiler.h>
+#include <util/fs.h>
 #include <util/log.h>
 #include <util/string_utils.h>
 
@@ -69,9 +72,290 @@
 #include <SDL3/SDL_main.h>
 
 #include <algorithm>
+#include <array>
+#include <cerrno>
+#include <cctype>
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
+#include <limits>
+#include <optional>
+#include <sstream>
 #include <thread>
+#include <vector>
+
+namespace {
+
+struct RuntimeCheatWrite {
+    Address address = 0;
+    uint32_t value = 0;
+    uint8_t width = 0;
+    int relative_segment = -1;
+    uint32_t line = 0;
+    bool warned_invalid = false;
+};
+
+struct RuntimeCheat {
+    std::string name;
+    bool enabled = false;
+    std::vector<RuntimeCheatWrite> writes;
+    uint32_t unsupported_lines = 0;
+};
+
+struct RuntimeCheats {
+    fs::path source;
+    std::array<Address, MODULE_INFO_NUM_SEGMENTS> segment_bases{};
+    std::vector<RuntimeCheat> cheats;
+};
+
+static std::string trim_copy(std::string value) {
+    const auto begin = std::find_if_not(value.begin(), value.end(), [](const unsigned char c) {
+        return std::isspace(c);
+    });
+    const auto end = std::find_if_not(value.rbegin(), value.rend(), [](const unsigned char c) {
+        return std::isspace(c);
+    }).base();
+
+    if (begin >= end)
+        return {};
+
+    return std::string(begin, end);
+}
+
+static std::optional<uint32_t> parse_hex_word(std::string token) {
+    token = trim_copy(token);
+    if (!token.empty() && token.front() == '$')
+        token.erase(token.begin());
+    if ((token.size() > 2) && (token[0] == '0') && ((token[1] == 'x') || (token[1] == 'X')))
+        token.erase(0, 2);
+    if (token.empty())
+        return std::nullopt;
+
+    errno = 0;
+    char *end = nullptr;
+    const auto value = std::strtoul(token.c_str(), &end, 16);
+    if ((errno != 0) || !end || (*end != '\0') || (value > std::numeric_limits<uint32_t>::max()))
+        return std::nullopt;
+
+    return static_cast<uint32_t>(value);
+}
+
+static std::vector<std::string> split_fields(const std::string &line) {
+    std::istringstream stream(line);
+    std::vector<std::string> fields;
+    std::string field;
+    while (stream >> field)
+        fields.push_back(field);
+    return fields;
+}
+
+static bool vita_cheat_write_width(const uint32_t code_type, uint8_t &width) {
+    switch (code_type) {
+    case 0x0000:
+        width = 1;
+        return true;
+    case 0x0100:
+        width = 2;
+        return true;
+    case 0x0200:
+        width = 4;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static std::optional<fs::path> find_vitacheat_file(const EmuEnvState &emuenv) {
+    if (emuenv.io.title_id.empty())
+        return std::nullopt;
+
+    const std::vector<fs::path> roots = {
+        emuenv.base_path / "cheats",
+        emuenv.shared_path / "cheats",
+        emuenv.pref_path / "ux0/vitacheat/db",
+        emuenv.pref_path / "ux0/vitacheat"
+    };
+
+    for (const auto &root : roots) {
+        const auto direct = root / fmt::format("{}.psv", emuenv.io.title_id);
+        if (fs::exists(direct))
+            return direct;
+
+        const auto db = root / "db" / fmt::format("{}.psv", emuenv.io.title_id);
+        if (fs::exists(db))
+            return db;
+    }
+
+    return std::nullopt;
+}
+
+static std::array<Address, MODULE_INFO_NUM_SEGMENTS> get_main_module_segment_bases(const EmuEnvState &emuenv, const int32_t main_module_id) {
+    std::array<Address, MODULE_INFO_NUM_SEGMENTS> bases{};
+    const auto module = emuenv.kernel.loaded_modules.find(main_module_id);
+    if ((module == emuenv.kernel.loaded_modules.end()) || !module->second)
+        return bases;
+
+    for (size_t index = 0; index < bases.size(); index++) {
+        const auto &segment = module->second->info.segments[index];
+        if (segment.memsz != 0)
+            bases[index] = segment.vaddr.address();
+    }
+
+    return bases;
+}
+
+static RuntimeCheats load_runtime_cheats(const EmuEnvState &emuenv, const int32_t main_module_id) {
+    RuntimeCheats runtime;
+    if (!emuenv.cfg.cheats_enabled)
+        return runtime;
+
+    const auto source = find_vitacheat_file(emuenv);
+    if (!source.has_value())
+        return runtime;
+
+    runtime.source = *source;
+    runtime.segment_bases = get_main_module_segment_bases(emuenv, main_module_id);
+
+    fs::ifstream file(*source);
+    if (!file) {
+        LOG_WARN("Could not open VitaCheat file {}", *source);
+        runtime.source.clear();
+        return runtime;
+    }
+
+    RuntimeCheat *current = nullptr;
+    int current_relative_segment = -1;
+    uint32_t line_number = 0;
+    uint32_t unsupported_lines = 0;
+
+    std::string line;
+    while (std::getline(file, line)) {
+        line_number++;
+        line = trim_copy(line);
+        if (line.empty() || line.starts_with("#") || line.starts_with("//"))
+            continue;
+
+        if (line.starts_with("_V0") || line.starts_with("_V1")) {
+            auto name = trim_copy(line.substr(3));
+            if (name.empty())
+                name = fmt::format("Cheat {}", runtime.cheats.size() + 1);
+
+            runtime.cheats.push_back({ name, line.starts_with("_V1") });
+            current = &runtime.cheats.back();
+            current_relative_segment = -1;
+            continue;
+        }
+
+        if (!line.starts_with("$"))
+            continue;
+
+        if (!current) {
+            runtime.cheats.push_back({ "Loose VitaCheat codes", true });
+            current = &runtime.cheats.back();
+        }
+
+        const auto fields = split_fields(line);
+        if (fields.size() < 3) {
+            current->unsupported_lines++;
+            unsupported_lines++;
+            continue;
+        }
+
+        const auto code_type = parse_hex_word(fields[0]);
+        const auto address = parse_hex_word(fields[1]);
+        const auto value = parse_hex_word(fields[2]);
+        if (!code_type.has_value() || !address.has_value() || !value.has_value()) {
+            current->unsupported_lines++;
+            unsupported_lines++;
+            continue;
+        }
+
+        if (*code_type == 0xB200) {
+            if ((*address < MODULE_INFO_NUM_SEGMENTS) && (*value == 0)) {
+                current_relative_segment = static_cast<int>(*address);
+            } else {
+                current->unsupported_lines++;
+                unsupported_lines++;
+            }
+            continue;
+        }
+
+        uint8_t width = 0;
+        if (!vita_cheat_write_width(*code_type, width)) {
+            current->unsupported_lines++;
+            unsupported_lines++;
+            continue;
+        }
+
+        current->writes.push_back({ *address, *value, width, current_relative_segment, line_number });
+    }
+
+    uint32_t enabled_writes = 0;
+    for (const auto &cheat : runtime.cheats) {
+        if (cheat.enabled)
+            enabled_writes += static_cast<uint32_t>(cheat.writes.size());
+    }
+
+    LOG_INFO("Loaded VitaCheat file {} for {} with {} enabled static writes; {} unsupported lines skipped",
+        *source, emuenv.io.title_id, enabled_writes, unsupported_lines);
+    return runtime;
+}
+
+static bool valid_cheat_range(const MemState &mem, const Address address, const uint8_t width) {
+    if ((width == 0) || (address > (std::numeric_limits<Address>::max() - width)))
+        return false;
+
+    return is_valid_addr_range(mem, address, address + width);
+}
+
+static std::optional<Address> resolve_cheat_address(const MemState &mem, const RuntimeCheats &runtime, const RuntimeCheatWrite &write) {
+    if (valid_cheat_range(mem, write.address, write.width))
+        return write.address;
+
+    if ((write.relative_segment < 0) || (static_cast<size_t>(write.relative_segment) >= runtime.segment_bases.size()))
+        return std::nullopt;
+
+    const Address base = runtime.segment_bases[write.relative_segment];
+    if ((base == 0) || (write.address > (std::numeric_limits<Address>::max() - base)))
+        return std::nullopt;
+
+    const Address relative_address = base + write.address;
+    if (!valid_cheat_range(mem, relative_address, write.width))
+        return std::nullopt;
+
+    return relative_address;
+}
+
+static void apply_runtime_cheats(EmuEnvState &emuenv, RuntimeCheats &runtime) {
+    if (runtime.source.empty())
+        return;
+
+    for (auto &cheat : runtime.cheats) {
+        if (!cheat.enabled)
+            continue;
+
+        for (auto &write : cheat.writes) {
+            const auto address = resolve_cheat_address(emuenv.mem, runtime, write);
+            if (!address.has_value()) {
+                if (!write.warned_invalid) {
+                    LOG_WARN("Skipping invalid VitaCheat write at {}:{} for {}", runtime.source, write.line, emuenv.io.title_id);
+                    write.warned_invalid = true;
+                }
+                continue;
+            }
+
+            uint32_t value = write.value;
+            if (write.width == 1)
+                value &= 0xFF;
+            else if (write.width == 2)
+                value &= 0xFFFF;
+
+            std::memcpy(Ptr<uint8_t>(*address).get(emuenv.mem), &value, write.width);
+        }
+    }
+}
+
+} // namespace
 
 #ifdef __ANDROID__
 static void set_current_game_id(const std::string_view game_id) {
@@ -557,6 +841,7 @@ int main(int argc, char *argv[]) {
         if (err != Success)
             return err;
     }
+    auto runtime_cheats = load_runtime_cheats(emuenv, main_module_id);
     SDL_SetWindowTitle(emuenv.window.get(), fmt::format("{} | {} ({}) | Please wait, loading...", window_title, emuenv.current_app_title, emuenv.io.title_id).c_str());
 
     while (handle_events(emuenv, gui) && (emuenv.frame_count == 0) && !emuenv.load_exec) {
@@ -564,6 +849,7 @@ int main(int argc, char *argv[]) {
         ZoneScopedN("Game loading"); // Tracy - Track game loading loop scope
 #endif
         wait_for_frame_done();
+        apply_runtime_cheats(emuenv, runtime_cheats);
 
         // Driver acto!
         renderer::process_batches(*emuenv.renderer.get(), emuenv.renderer->features, emuenv.mem, emuenv.cfg);
@@ -589,6 +875,8 @@ int main(int argc, char *argv[]) {
 #endif
         if (emuenv.kernel.is_threads_paused())
             wait_for_frame_done();
+
+        apply_runtime_cheats(emuenv, runtime_cheats);
 
         // Driver acto!
         renderer::process_batches(*emuenv.renderer.get(), emuenv.renderer->features, emuenv.mem, emuenv.cfg);

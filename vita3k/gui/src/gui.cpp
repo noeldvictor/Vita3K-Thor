@@ -181,22 +181,32 @@ static void append_virtual_cartridge_apps(GuiState &gui, EmuEnvState &emuenv) {
             continue;
 
         try {
-            for (const auto &entry : fs::recursive_directory_iterator(scan_root)) {
-                const auto path = entry.path();
-                const auto extension = string_utils::tolower(path.extension().string());
-
-                std::optional<App> app;
-                if (fs::is_regular_file(path) && ((extension == ".zip") || (extension == ".vpk"))) {
-                    app = app_from_cartridge_archive(emuenv, path);
-                } else if (fs::is_regular_file(path) && (string_utils::tolower(path.filename().string()) == "param.sfo") && (path.parent_path().filename() == "sce_sys")) {
-                    app = app_from_cartridge_directory(emuenv, path.parent_path().parent_path());
-                }
-
+            const auto add_app = [&](std::optional<App> app) {
                 if (!app.has_value() || indexed_paths.contains(app->path))
-                    continue;
+                    return;
 
                 indexed_paths.insert(app->path);
                 gui.app_selector.user_apps.push_back(*app);
+            };
+
+            for (const auto &entry : fs::directory_iterator(scan_root)) {
+                const auto path = entry.path();
+                const auto extension = string_utils::tolower(path.extension().string());
+
+                if (fs::is_regular_file(path) && ((extension == ".zip") || (extension == ".vpk"))) {
+                    add_app(app_from_cartridge_archive(emuenv, path));
+                } else if (fs::is_regular_file(path) && (string_utils::tolower(path.filename().string()) == "param.sfo") && (path.parent_path().filename() == "sce_sys")) {
+                    add_app(app_from_cartridge_directory(emuenv, path.parent_path().parent_path()));
+                } else if (fs::is_directory(path)) {
+                    add_app(app_from_cartridge_directory(emuenv, path));
+
+                    for (const auto &child : fs::directory_iterator(path)) {
+                        const auto child_path = child.path();
+                        const auto child_extension = string_utils::tolower(child_path.extension().string());
+                        if (fs::is_regular_file(child_path) && ((child_extension == ".zip") || (child_extension == ".vpk")))
+                            add_app(app_from_cartridge_archive(emuenv, child_path));
+                    }
+                }
             }
         } catch (const fs::filesystem_error &e) {
             LOG_WARN("Could not scan virtual cartridge directory {}: {}", scan_root, e.what());

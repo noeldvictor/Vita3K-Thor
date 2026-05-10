@@ -773,11 +773,18 @@ static void toggle_fast_forward(EmuEnvState &emuenv) {
 }
 
 static void request_save_state(EmuEnvState &emuenv) {
-    show_runtime_toast("Save state hotkey captured; save-state backend is not implemented yet.");
+    const auto title_id = emuenv.io.title_id.empty() ? std::string("unknown-title") : emuenv.io.title_id;
+    const fs::path state_dir = emuenv.shared_path / "states" / title_id;
+    fs::create_directories(state_dir);
+    LOG_INFO("Save-state slot 0 requested for {} at {}", title_id, state_dir / "slot0.state");
+    show_runtime_toast(fmt::format("Save state slot 0 reserved for {}; backend not implemented yet.", title_id));
 }
 
 static void request_load_state(EmuEnvState &emuenv) {
-    show_runtime_toast("Load state hotkey captured; save-state backend is not implemented yet.");
+    const auto title_id = emuenv.io.title_id.empty() ? std::string("unknown-title") : emuenv.io.title_id;
+    const fs::path state_dir = emuenv.shared_path / "states" / title_id;
+    LOG_INFO("Load-state slot 0 requested for {} at {}", title_id, state_dir / "slot0.state");
+    show_runtime_toast(fmt::format("Load state slot 0 reserved for {}; backend not implemented yet.", title_id));
 }
 
 static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &event) {

@@ -14,6 +14,29 @@ Vita3K Thor detects VitaCheat-style `.psv` files named by title ID:
 
 When a matching file exists, the game shows a `C` cheat badge in the app list.
 
+## Runtime Support
+
+Runtime cheat support is intentionally fail-closed. Vita3K Thor currently applies only enabled `_V1` VitaCheat sections with these static write formats:
+
+- `$0000 address value` for 8-bit writes
+- `$0100 address value` for 16-bit writes
+- `$0200 address value` for 32-bit writes
+- `$B200 00000000 00000000` through `$B200 00000003 00000000` to make later writes relative to a main-module segment
+
+Unsupported VitaCheat code types, malformed lines, pointer chains, conditions, block writes, and database-specific extensions are skipped and logged. Disabled `_V0` sections are detected but not applied.
+
+Cheat application is controlled by `cheats-enabled` in the emulator config.
+
+## Conversion Tool
+
+Use `tools/convert_vitacheat.py` to convert `.psv` files into reviewable JSON metadata:
+
+```powershell
+python tools/convert_vitacheat.py C:\path\to\PCSE00000.psv -o cheats\converted
+```
+
+The emulator runtime still reads `.psv` files directly for now; the JSON output is for review, auditing unsupported codes, and future UI work.
+
 ## Import Rules
 
 - Only add cheats for legally owned offline single-player games.
@@ -21,6 +44,8 @@ When a matching file exists, the game shows a `C` cheat badge in the app list.
 - Do not vendor public cheat databases unless their license/source clearly allows redistribution in this repository.
 - Prefer conversion tooling and source attribution notes over copying unlicensed `.psv` collections.
 
-## Current State
+## Current Gaps
 
-Detection and badges are implemented. Runtime application of VitaCheat code types still needs a fail-closed parser, address validation, and emulator memory-write integration.
+- Cheat toggles are not exposed in the in-game UI yet; `_V1` means enabled and `_V0` means off.
+- Pointer, condition, increment/decrement, copy/fill, and button-conditional code types need per-game validation before enabling.
+- Do not commit public cheat databases unless their license/source clearly allows redistribution here.
