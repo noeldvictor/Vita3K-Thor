@@ -24,6 +24,7 @@
 
 #include <memory>
 #include <optional>
+#include <cstdint>
 #include <vector>
 
 struct GuiState;
@@ -52,6 +53,14 @@ struct ContentInfo {
 };
 
 bool handle_events(EmuEnvState &emuenv, GuiState &gui);
+bool runtime_osd_is_open();
+bool runtime_quick_state_slot_valid(const EmuEnvState &emuenv);
+uint64_t runtime_quick_state_slot_bytes();
+void runtime_osd_set_open(EmuEnvState &emuenv, bool open);
+void runtime_toggle_fast_forward(EmuEnvState &emuenv);
+void runtime_request_save_state(EmuEnvState &emuenv);
+void runtime_request_load_state(EmuEnvState &emuenv);
+void runtime_take_screenshot(EmuEnvState &emuenv);
 
 std::vector<ContentInfo> install_archive(EmuEnvState &emuenv, GuiState *gui, const fs::path &archive_path, const std::function<void(ArchiveContents)> &progress_callback = nullptr);
 ContentInfo mount_archive_as_cartridge(EmuEnvState &emuenv, const fs::path &archive_path, const std::function<void(ArchiveContents)> &progress_callback = nullptr);

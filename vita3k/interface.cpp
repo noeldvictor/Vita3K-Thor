@@ -727,7 +727,7 @@ static void update_live_area_last_app_frame(EmuEnvState &emuenv, GuiState &gui) 
     gui.live_area_last_app_frame = ImGui_Texture(gui.imgui_state.get(), frame.data(), width, height);
 }
 
-static void take_screenshot(EmuEnvState &emuenv) {
+void runtime_take_screenshot(EmuEnvState &emuenv) {
     if (emuenv.cfg.screenshot_format == None)
         return;
 
@@ -789,6 +789,10 @@ struct QuickStateSlot {
 };
 
 static QuickStateSlot quick_state_slot0;
+static bool runtime_osd_open = false;
+static bool runtime_osd_auto_paused = false;
+static bool android_back_key_down = false;
+static bool android_back_chord_used = false;
 
 static bool memory_page_is_allocated(const MemState &mem, const uint32_t page) {
     const uint32_t word = mem.allocator.words[page >> 5];
@@ -936,14 +940,47 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
 
 } // namespace
 
-static void toggle_fast_forward(EmuEnvState &emuenv) {
+bool runtime_osd_is_open() {
+    return runtime_osd_open;
+}
+
+bool runtime_quick_state_slot_valid(const EmuEnvState &emuenv) {
+    return quick_state_slot0.valid && (quick_state_slot0.title_id == emuenv.io.title_id);
+}
+
+uint64_t runtime_quick_state_slot_bytes() {
+    return quick_state_slot0.byte_count;
+}
+
+void runtime_osd_set_open(EmuEnvState &emuenv, bool open) {
+    if (open == runtime_osd_open)
+        return;
+
+    runtime_osd_open = open;
+    if (open) {
+        runtime_osd_auto_paused = false;
+        if (!emuenv.kernel.is_threads_paused()) {
+            emuenv.kernel.pause_threads();
+            runtime_osd_auto_paused = true;
+        }
+        LOG_INFO("Runtime OSD opened");
+        return;
+    }
+
+    if (runtime_osd_auto_paused && emuenv.kernel.is_threads_paused())
+        emuenv.kernel.resume_threads();
+    runtime_osd_auto_paused = false;
+    LOG_INFO("Runtime OSD closed");
+}
+
+void runtime_toggle_fast_forward(EmuEnvState &emuenv) {
     const bool enable = emuenv.display.speed_percent.load() == 100;
     const uint32_t configured_speed = static_cast<uint32_t>(std::clamp(emuenv.cfg.fast_forward_speed_percent, 101, 1000));
     emuenv.display.speed_percent.store(enable ? configured_speed : 100);
     LOG_INFO("Fast forward {}", enable ? fmt::format("{}%", configured_speed) : "off");
 }
 
-static void request_save_state(EmuEnvState &emuenv) {
+void runtime_request_save_state(EmuEnvState &emuenv) {
     const auto title_id = emuenv.io.title_id.empty() ? std::string("unknown-title") : emuenv.io.title_id;
     const fs::path state_dir = emuenv.shared_path / "states" / title_id;
     fs::create_directories(state_dir);
@@ -956,7 +993,7 @@ static void request_save_state(EmuEnvState &emuenv) {
     }
 }
 
-static void request_load_state(EmuEnvState &emuenv) {
+void runtime_request_load_state(EmuEnvState &emuenv) {
     const auto title_id = emuenv.io.title_id.empty() ? std::string("unknown-title") : emuenv.io.title_id;
     const fs::path state_dir = emuenv.shared_path / "states" / title_id;
     if (restore_quick_state(emuenv, quick_state_slot0)) {
@@ -970,10 +1007,23 @@ static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &
     static bool fast_forward_latched = false;
     static bool save_state_latched = false;
     static bool load_state_latched = false;
+    static bool back_press_candidate = false;
+    static bool back_chord_used = false;
 
     if (event.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
-        if ((event.gbutton.button == SDL_GAMEPAD_BUTTON_BACK) || (event.gbutton.button == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER))
+        if (event.gbutton.button == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)
             fast_forward_latched = false;
+        if (event.gbutton.button == SDL_GAMEPAD_BUTTON_BACK) {
+            fast_forward_latched = false;
+            if (back_press_candidate && !back_chord_used) {
+                if (!emuenv.io.title_id.empty())
+                    runtime_osd_set_open(emuenv, !runtime_osd_is_open());
+                back_press_candidate = false;
+                return true;
+            }
+            back_press_candidate = false;
+            back_chord_used = false;
+        }
         return false;
     }
 
@@ -986,7 +1036,15 @@ static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &
     if (!gamepad)
         return false;
 
-    const bool select_down = SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_BACK);
+    const bool select_down = SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_BACK) || android_back_key_down;
+    if ((event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) && (event.gbutton.button == SDL_GAMEPAD_BUTTON_BACK)) {
+        if (emuenv.io.title_id.empty())
+            return false;
+        back_press_candidate = true;
+        back_chord_used = false;
+        return true;
+    }
+
     if (!select_down) {
         save_state_latched = false;
         load_state_latched = false;
@@ -997,7 +1055,9 @@ static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &
         const bool r1_down = SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
         if (r1_down && !fast_forward_latched) {
             fast_forward_latched = true;
-            toggle_fast_forward(emuenv);
+            back_chord_used = true;
+            android_back_chord_used = true;
+            runtime_toggle_fast_forward(emuenv);
             return true;
         }
     }
@@ -1007,12 +1067,16 @@ static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &
         constexpr Sint16 axis_release = 8000;
         if (event.gaxis.value > axis_threshold && !save_state_latched) {
             save_state_latched = true;
-            request_save_state(emuenv);
+            back_chord_used = true;
+            android_back_chord_used = true;
+            runtime_request_save_state(emuenv);
             return true;
         }
         if (event.gaxis.value < -axis_threshold && !load_state_latched) {
             load_state_latched = true;
-            request_load_state(emuenv);
+            back_chord_used = true;
+            android_back_chord_used = true;
+            runtime_request_load_state(emuenv);
             return true;
         }
         if (std::abs(event.gaxis.value) < axis_release) {
@@ -1180,8 +1244,14 @@ bool handle_events(EmuEnvState &emuenv, GuiState &gui) {
             if (ImGui::GetIO().WantTextInput || gui.is_key_locked || emuenv.drop_inputs || gui.gate_animation.state != GateAnimationState::None)
                 continue;
 #ifdef __ANDROID__
-            if (event.key.scancode == SDL_SCANCODE_AC_BACK)
+            if (event.key.scancode == SDL_SCANCODE_AC_BACK) {
+                if (!emuenv.io.title_id.empty()) {
+                    android_back_key_down = true;
+                    android_back_chord_used = false;
+                    continue;
+                }
                 sce_ctrl_btn = SCE_CTRL_PSBUTTON;
+            }
 #else
             // toggle gui state
             if (allow_switch_state && (event.key.scancode == emuenv.cfg.keyboard_gui_toggle_gui || event.key.scancode == emuenv.cfg.keyboard_gui_toggle_gui_alt))
@@ -1193,7 +1263,7 @@ bool handle_events(EmuEnvState &emuenv, GuiState &gui) {
             if ((event.key.scancode == emuenv.cfg.keyboard_toggle_texture_replacement || event.key.scancode == emuenv.cfg.keyboard_toggle_texture_replacement_alt) && !gui.is_key_capture_dropped)
                 toggle_texture_replacement(emuenv);
             if ((event.key.scancode == emuenv.cfg.keyboard_take_screenshot || event.key.scancode == emuenv.cfg.keyboard_take_screenshot_alt) && !gui.is_key_capture_dropped)
-                take_screenshot(emuenv);
+                runtime_take_screenshot(emuenv);
             if ((event.key.scancode == emuenv.cfg.keyboard_pinch_modifier || event.key.scancode == emuenv.cfg.keyboard_pinch_modifier_alt || event.key.scancode == emuenv.cfg.keyboard_alternate_pinch_in || event.key.scancode == emuenv.cfg.keyboard_alternate_pinch_in_alt || event.key.scancode == emuenv.cfg.keyboard_alternate_pinch_out || event.key.scancode == emuenv.cfg.keyboard_alternate_pinch_out_alt) && !gui.is_key_capture_dropped)
                 pinch_modifier(true);
 
@@ -1203,6 +1273,8 @@ bool handle_events(EmuEnvState &emuenv, GuiState &gui) {
             if ((event.key.scancode == emuenv.cfg.keyboard_alternate_pinch_out || event.key.scancode == emuenv.cfg.keyboard_alternate_pinch_out_alt) && !gui.is_key_capture_dropped)
                 pinch_automove(pinch_amount);
 #endif
+            if (runtime_osd_is_open())
+                continue;
             if (sce_ctrl_btn != 0) {
                 if (last_buttons.contains(sce_ctrl_btn)) {
                     continue;
@@ -1215,6 +1287,17 @@ bool handle_events(EmuEnvState &emuenv, GuiState &gui) {
         }
         case SDL_EVENT_KEY_UP:
             gui.is_key_locked = false;
+#ifdef __ANDROID__
+            if (event.key.scancode == SDL_SCANCODE_AC_BACK) {
+                if (android_back_key_down && !android_back_chord_used && !emuenv.io.title_id.empty())
+                    runtime_osd_set_open(emuenv, !runtime_osd_is_open());
+                android_back_key_down = false;
+                android_back_chord_used = false;
+                continue;
+            }
+#endif
+            if (runtime_osd_is_open())
+                continue;
             if (event.key.scancode == emuenv.cfg.keyboard_pinch_modifier || event.key.scancode == emuenv.cfg.keyboard_pinch_modifier_alt || event.key.scancode == emuenv.cfg.keyboard_alternate_pinch_in || event.key.scancode == emuenv.cfg.keyboard_alternate_pinch_in_alt || event.key.scancode == emuenv.cfg.keyboard_alternate_pinch_out || event.key.scancode == emuenv.cfg.keyboard_alternate_pinch_out_alt) {
                 pinch_modifier(false);
                 pinch_automove(0);
@@ -1231,6 +1314,8 @@ bool handle_events(EmuEnvState &emuenv, GuiState &gui) {
 
         case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
             if (handle_runtime_gamepad_hotkey(emuenv, event))
+                continue;
+            if (runtime_osd_is_open())
                 continue;
 
             if (!emuenv.kernel.is_threads_paused() && (event.gbutton.button == SDL_GAMEPAD_BUTTON_TOUCHPAD))
@@ -1254,11 +1339,15 @@ bool handle_events(EmuEnvState &emuenv, GuiState &gui) {
 
         case SDL_EVENT_GAMEPAD_BUTTON_UP:
             handle_runtime_gamepad_hotkey(emuenv, event);
+            if (runtime_osd_is_open())
+                continue;
             gui.is_key_locked = false;
             break;
 
         case SDL_EVENT_GAMEPAD_AXIS_MOTION:
             if (handle_runtime_gamepad_hotkey(emuenv, event))
+                continue;
+            if (runtime_osd_is_open())
                 continue;
             break;
 

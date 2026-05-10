@@ -520,6 +520,127 @@ static void draw_runtime_status_overlay(const EmuEnvState &emuenv, const Runtime
     ImGui::GetForegroundDrawList()->AddText(pos, IM_COL32(255, 230, 128, 235), status.c_str());
 }
 
+static void refresh_runtime_cheat_counts(RuntimeCheats &runtime_cheats) {
+    runtime_cheats.enabled_write_count = 0;
+    runtime_cheats.code_patch_write_count = 0;
+    runtime_cheats.pointer_write_count = 0;
+
+    for (const auto &cheat : runtime_cheats.cheats) {
+        if (!cheat.enabled)
+            continue;
+
+        runtime_cheats.enabled_write_count += static_cast<uint32_t>(cheat.writes.size());
+        for (const auto &write : cheat.writes) {
+            if (write.kind == RuntimeCheatWriteKind::PointerLevel1)
+                runtime_cheats.pointer_write_count++;
+            if (write.code_patch)
+                runtime_cheats.code_patch_write_count++;
+        }
+    }
+}
+
+static uint32_t runtime_cheat_unsupported_count(const RuntimeCheats &runtime_cheats) {
+    uint32_t count = 0;
+    for (const auto &cheat : runtime_cheats.cheats)
+        count += cheat.unsupported_lines;
+    return count;
+}
+
+static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &runtime_cheats, const int32_t main_module_id) {
+    if (!runtime_osd_is_open())
+        return;
+
+    const ImVec2 viewport_pos(emuenv.logical_viewport_pos.x, emuenv.logical_viewport_pos.y);
+    const ImVec2 viewport_size(emuenv.logical_viewport_size.x, emuenv.logical_viewport_size.y);
+    const float width = std::min(760.f, std::max(360.f, viewport_size.x - 48.f));
+    const float height = std::min(620.f, std::max(360.f, viewport_size.y - 48.f));
+    ImGui::SetNextWindowPos(ImVec2(viewport_pos.x + (viewport_size.x - width) * 0.5f, viewport_pos.y + (viewport_size.y - height) * 0.5f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
+
+    constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
+    bool open = true;
+    if (!ImGui::Begin("Thor OSD", &open, flags)) {
+        ImGui::End();
+        if (!open)
+            runtime_osd_set_open(emuenv, false);
+        return;
+    }
+
+    ImGui::Text("%s", emuenv.current_app_title.c_str());
+    ImGui::Text("Title ID: %s", emuenv.io.title_id.c_str());
+    ImGui::Text("Speed: %u%%", emuenv.display.speed_percent.load());
+#ifdef __ANDROID__
+    ImGui::Text("Driver: %s", emuenv.cfg.current_config.custom_driver_name.empty() ? "system" : emuenv.cfg.current_config.custom_driver_name.c_str());
+#endif
+    ImGui::Text("Quickstate slot 0: %s", runtime_quick_state_slot_valid(emuenv) ? fmt::format("{} MiB", runtime_quick_state_slot_bytes() / (1024 * 1024)).c_str() : "empty");
+    ImGui::Separator();
+
+    if (ImGui::Button("Resume", ImVec2(150.f, 0.f)))
+        runtime_osd_set_open(emuenv, false);
+    ImGui::SameLine();
+    if (ImGui::Button(emuenv.kernel.is_threads_paused() ? "Resume Threads" : "Pause", ImVec2(150.f, 0.f))) {
+        if (emuenv.kernel.is_threads_paused())
+            emuenv.kernel.resume_threads();
+        else
+            emuenv.kernel.pause_threads();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Fast Forward", ImVec2(150.f, 0.f)))
+        runtime_toggle_fast_forward(emuenv);
+
+    if (ImGui::Button("Save State 0", ImVec2(150.f, 0.f)))
+        runtime_request_save_state(emuenv);
+    ImGui::SameLine();
+    if (ImGui::Button("Load State 0", ImVec2(150.f, 0.f)))
+        runtime_request_load_state(emuenv);
+    ImGui::SameLine();
+    if (ImGui::Button("Screenshot", ImVec2(150.f, 0.f)))
+        runtime_take_screenshot(emuenv);
+
+    if (ImGui::Button("Settings", ImVec2(150.f, 0.f))) {
+        gui.configuration_menu.settings_dialog = true;
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled();
+    ImGui::Button("Reset Game", ImVec2(150.f, 0.f));
+    ImGui::SameLine();
+    ImGui::Button("Close Game", ImVec2(150.f, 0.f));
+    ImGui::EndDisabled();
+
+    ImGui::Separator();
+    if (ImGui::CollapsingHeader("Cheats", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (runtime_cheats.source.empty()) {
+            ImGui::TextWrapped("No matching VitaCheat file loaded for this title.");
+        } else {
+            ImGui::Text("File: %s", fs_utils::path_to_utf8(runtime_cheats.source).c_str());
+            ImGui::Text("Enabled writes: %u  Code patches: %u  Pointer writes: %u  Unsupported lines: %u",
+                runtime_cheats.enabled_write_count,
+                runtime_cheats.code_patch_write_count,
+                runtime_cheats.pointer_write_count,
+                runtime_cheat_unsupported_count(runtime_cheats));
+
+            if (ImGui::Button("Reload Cheat File"))
+                runtime_cheats = load_runtime_cheats(emuenv, main_module_id);
+
+            ImGui::Separator();
+            for (size_t index = 0; index < runtime_cheats.cheats.size(); index++) {
+                auto &cheat = runtime_cheats.cheats[index];
+                const auto label = fmt::format("{}##cheat{}", cheat.name, index);
+                if (ImGui::Checkbox(label.c_str(), &cheat.enabled)) {
+                    refresh_runtime_cheat_counts(runtime_cheats);
+                    LOG_INFO("{} cheat '{}' for {}", cheat.enabled ? "Enabled" : "Disabled", cheat.name, emuenv.io.title_id);
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("%zu writes, %u unsupported", cheat.writes.size(), cheat.unsupported_lines);
+            }
+        }
+    }
+
+    if (!open)
+        runtime_osd_set_open(emuenv, false);
+    ImGui::End();
+}
+
 } // namespace
 
 #ifdef __ANDROID__
@@ -1073,6 +1194,7 @@ int main(int argc, char *argv[]) {
         if (emuenv.display.imgui_render) {
             gui::draw_ui(gui, emuenv);
         }
+        draw_runtime_osd(gui, emuenv, runtime_cheats, main_module_id);
 
         gui::draw_end(gui);
         emuenv.renderer->swap_window(emuenv.window.get());
