@@ -101,6 +101,7 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 ## Runtime OSD
 
 - The game-running OSD opens from a short Back/Select press, including Android `AC_BACK` key events on AYN Thor. Do not let it steal existing chord shortcuts: `Select + R1`, `Select + right-stick down`, and `Select + right-stick up` must keep working without opening the OSD.
+- AYN Thor/Odin controller input may expose Back/Select through multiple Android paths (`KEY_BACK`, `KEY_APPSELECT`, `BTN_SELECT`, and SDL gamepad Back). When debugging OSD behavior, capture `getevent -lp`, SDL/logcat event traces, and before/after screenshots before changing bindings.
 - Opening the OSD pauses guest threads by default. Closing/resuming from the OSD resumes guest threads unless the user explicitly changed pause state in the OSD.
 - OSD feedback should replace toast feedback for runtime actions. Fast-forward, save/load quickstate, cheat toggles, and pause/resume should update OSD/overlay status and logs.
 - OSD first-level actions currently include Resume, Pause/Resume, Save State slot 0, Load State slot 0, Fast Forward toggle, Screenshot, Settings, and disabled placeholders for Reset Game and Close Game.
@@ -108,6 +109,19 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - The status area shows title ID, current speed percentage, selected custom driver on Android, quickstate slot status, and whether a matching cheat file was loaded.
 - Keep the OSD usable with controller only: D-pad/left stick navigates, Cross/A confirms, Circle/B cancels, Back/Select closes. It should also work with touch/mouse when available. ImGui navigation must remain enabled, and the SDL backend must use real SDL3 gamepad instance IDs/player index instead of assuming gamepad index `0`.
 - Keep OSD rendering lightweight and in the existing ImGui path. Do not open the Vita Live Area or normal settings dialog just to perform runtime actions.
+
+## Graphics Debugging And Profiling
+
+- Always confirm the foreground Android package before attributing a screenshot to Vita3K. `adb shell dumpsys window` should identify whether the visible issue belongs to `org.vita3k.emulator.debug`, Cocoon, RPCSX, or another frontend.
+- For Vita3K graphics bugs, capture a timestamped report with screenshot, title ID, renderer, selected custom driver, resolution multiplier, texture/surface settings, logcat tail, and whether the issue is in the launcher/OSD or in-game Vita rendering.
+- Prefer targeted emulator dumps over guessing: add per-title toggles for GXM call trace, display frame info, surface cache state, shader/GXP translation info, pipeline state, texture upload metadata, and optional frame screenshots.
+- Android profiling should start with non-invasive captures: logcat, `dumpsys SurfaceFlinger`, `dumpsys gfxinfo`, Perfetto/simpleperf when available, and renderer timing counters. Do not clear app data or remove game content just to profile.
+- Ghidra is appropriate for legally dumped personal Vita executables/modules when emulator behavior needs to be compared against a game's imported Vita APIs. Use Vita-aware loaders/NID databases, keep findings as notes, and do not commit commercial game binaries or decrypted content.
+
+## Frontend Direction
+
+- The long-term Android UX should move toward emulator-native library patterns like Azahar/Dolphin: a controller-first game grid/list, per-game settings, clean driver selection, compatibility/status badges, and an in-game OSD for runtime actions.
+- Vita3K's current frontend is mostly C++/ImGui running inside the SDL surface, so an Android-native launcher rewrite is a larger architecture change than editing XML resources. Treat it as a phased project: first fix layout density and controller behavior, then split out a native Android/Compose launcher if we choose that direction.
 
 ## ADB Thor Testing
 
