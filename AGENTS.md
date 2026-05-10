@@ -101,6 +101,7 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 ## ADB Thor Testing
 
 - When an APK is built and an AYN Thor is connected, push/install it to the Thor with ADB for real-device testing.
+- After every Android-affecting commit/push with a successful APK build, also install the latest APK to the connected Android/AYN Thor with `adb install -r` unless no device is connected or the build failed. Record the result in `reports/`.
 - Start with `adb devices` and verify the connected device is the user's AYN Thor before installing.
 - Prefer non-destructive installs such as `adb install -r path\to\apk`. Do not uninstall the existing app or clear Vita3K data unless the user explicitly accepts data loss.
 - For debug/reldebug APKs, expect the `.debug` package slot unless the build config says otherwise.
