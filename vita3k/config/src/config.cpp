@@ -91,6 +91,7 @@ static void check_members(Config &self, const Config &rhs) {
     self.app_args = rhs.app_args;
     self.load_app_list = rhs.load_app_list;
     self.cartridge_mode = rhs.cartridge_mode;
+    self.thor_renderer_trace = rhs.thor_renderer_trace;
     self.self_path = rhs.self_path;
 }
 
@@ -301,6 +302,8 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths)
         ->group("Logging");
     config->add_flag("--log-uniforms,-U", command_line.log_uniforms, "Log Uniforms")
         ->group("Logging");
+    config->add_flag("--thor-render-trace", command_line.thor_renderer_trace, "Enable Thor renderer GXM trace logging at startup")
+        ->default_val(false)->group("Logging");
     // clang-format on
 
     // Parse the inputs

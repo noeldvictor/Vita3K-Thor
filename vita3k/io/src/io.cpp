@@ -41,10 +41,13 @@
 #include <algorithm>
 #include <cassert>
 #include <ctime>
+#include <functional>
 #include <iostream>
 #include <iterator>
+#include <mutex>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -69,6 +72,7 @@ constexpr bool log_file_op = true;
 constexpr bool log_file_read = false;
 constexpr bool log_file_seek = false;
 constexpr bool log_file_stat = false;
+constexpr std::uint64_t archive_memory_file_limit = 64ull * 1024ull * 1024ull;
 
 namespace vfs {
 
@@ -338,6 +342,97 @@ static bool read_archive_file(const IOState::ArchiveMount &mount, const std::str
     mz_zip_reader_end(&zip);
     fclose(archive_file);
     return extracted;
+}
+
+static fs::path archive_cache_path(const fs::path &pref_path, const IOState &io, const std::string &relative_path) {
+    fs::path safe_relative_path;
+    std::string segment;
+    std::stringstream stream(relative_path);
+    while (std::getline(stream, segment, '/')) {
+        if (segment.empty() || (segment == "."))
+            continue;
+        if (segment == "..")
+            return {};
+
+        safe_relative_path /= fs_utils::utf8_to_path(segment);
+    }
+
+    if (safe_relative_path.empty())
+        return {};
+
+    const auto key_source = io.app0_archive.archive_path.generic_string() + "|" + io.app0_archive.content_root;
+    const auto archive_key = fmt::format("{:016X}", static_cast<std::uint64_t>(std::hash<std::string>{}(key_source)));
+    const auto title_id = io.title_id.empty() ? std::string("unknown-title") : io.title_id;
+    return pref_path / "cache" / "cartridge_archive" / title_id / archive_key / safe_relative_path;
+}
+
+static bool cached_archive_file_ready(const fs::path &cache_path, const std::uint64_t expected_size) {
+    boost::system::error_code error;
+    if (!fs::exists(cache_path, error) || error)
+        return false;
+
+    return fs::file_size(cache_path, error) == expected_size && !error;
+}
+
+static bool extract_archive_file_to_cache(const IOState::ArchiveMount &mount, const IOState::ArchiveMount::Entry &entry, const fs::path &cache_path) {
+    static std::mutex cache_mutex;
+    const std::lock_guard<std::mutex> guard(cache_mutex);
+
+    if (cached_archive_file_ready(cache_path, entry.size))
+        return true;
+
+    boost::system::error_code error;
+    fs::create_directories(cache_path.parent_path(), error);
+    if (error) {
+        LOG_ERROR("Failed to create cartridge cache directory {}: {}", cache_path.parent_path(), error.message());
+        return false;
+    }
+
+    const auto temp_path = fs_utils::path_concat(cache_path, ".tmp");
+    fs::remove(temp_path, error);
+
+    FILE *archive_file = FOPEN(mount.archive_path.c_str(), "rb");
+    if (!archive_file) {
+        LOG_ERROR("Failed to open archive {}", mount.archive_path);
+        return false;
+    }
+
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_cfile(&zip, archive_file, 0, 0)) {
+        LOG_ERROR("miniz error reading archive {}: {}", mount.archive_path, miniz_get_error(&zip));
+        fclose(archive_file);
+        return false;
+    }
+
+    LOG_INFO("Extracting large archive member {} ({} MiB) to cartridge cache {}", entry.archive_name, entry.size / (1024 * 1024), cache_path);
+    const bool extracted = mz_zip_reader_extract_file_to_file(&zip, entry.archive_name.c_str(), fs_utils::path_to_utf8(temp_path).c_str(), 0);
+    if (!extracted)
+        LOG_ERROR("miniz error extracting {} from {} to {}: {}", entry.archive_name, mount.archive_path, cache_path, miniz_get_error(&zip));
+
+    mz_zip_reader_end(&zip);
+    fclose(archive_file);
+
+    if (!extracted) {
+        fs::remove(temp_path, error);
+        return false;
+    }
+
+    if (!cached_archive_file_ready(temp_path, entry.size)) {
+        LOG_ERROR("Cartridge cache file {} has unexpected size after extracting {}", temp_path, entry.archive_name);
+        fs::remove(temp_path, error);
+        return false;
+    }
+
+    fs::remove(cache_path, error);
+    error.clear();
+    fs::rename(temp_path, cache_path, error);
+    if (error) {
+        LOG_ERROR("Failed to move cartridge cache file {} to {}: {}", temp_path, cache_path, error.message());
+        fs::remove(temp_path, error);
+        return false;
+    }
+
+    return true;
 }
 
 static std::vector<std::string> list_archive_dir(const IOState::ArchiveMount &mount, const std::string &relative_path) {
@@ -782,7 +877,9 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
 
     const auto app_relative = current_app_relative_path(io, device, translated_path);
     if (app_relative.has_value() && vfs::current_app_archive_mounted(io)) {
-        if (!vfs::current_app_file_exists(io, *app_relative)) {
+        const auto archive_relative = vfs::normalize_archive_path(*app_relative);
+        const auto archive_entry = vfs::find_archive_entry(io.app0_archive, archive_relative);
+        if (!archive_entry || archive_entry->directory) {
             if (vfs::current_app_directory_exists(io, *app_relative))
                 LOG_ERROR("Cannot open archive directory as file: {}", path);
             else
@@ -790,11 +887,24 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
             return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
         }
 
+        const auto normalized_path = device::construct_normalized_path(device, translated_path);
+        if (archive_entry->size > archive_memory_file_limit) {
+            const auto cache_path = vfs::archive_cache_path(pref_path, io, archive_relative);
+            if (cache_path.empty() || !vfs::extract_archive_file_to_cache(io.app0_archive, *archive_entry, cache_path))
+                return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
+
+            FileStats f{ path, normalized_path, cache_path, flags };
+            const auto fd = io.next_fd++;
+            io.std_files.emplace(fd, f);
+
+            LOG_TRACE_IF(log_file_op, "{}: Opening cached archive file {} ({}) from {}, fd: {}", export_name, path, normalized_path, cache_path, log_hex(fd));
+            return fd;
+        }
+
         vfs::FileBuffer buffer;
         if (!vfs::read_current_app_file(buffer, io, pref_path, *app_relative))
             return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
 
-        const auto normalized_path = device::construct_normalized_path(device, translated_path);
         FileStats f{ path, normalized_path, construct_io_path(io, device, translated_path, pref_path), flags, buffer };
         const auto fd = io.next_fd++;
         io.std_files.emplace(fd, f);

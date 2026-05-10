@@ -109,6 +109,7 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - OSD feedback should replace toast feedback for runtime actions. Fast-forward, save/load quickstate, cheat toggles, and pause/resume should update OSD/overlay status and logs.
 - OSD first-level actions currently include Resume, Pause/Resume, Save State slot 0, Load State slot 0, Fast Forward toggle, Screenshot, Renderer Trace, Settings, and disabled placeholders for Reset Game and Close Game.
 - Renderer Trace is a runtime diagnostic switch. When enabled it emits `ThorRenderTrace` logcat lines for Vulkan scene setup and the first 32 draws per scene, including render target, color/depth surface addresses, formats, depth/stencil state, shader hashes, texture counts, mapping mode, surface sync state, and driver flags.
+- For ADB-only render/crash investigations, launch with `--thor-render-trace` to enable the same renderer trace at startup, or use `tools/thor_adb_debug_capture.ps1 -GamePath <zip> -RenderTrace` to clear logcat, launch, capture screenshot/logcat/crash-buffer/window/meminfo artifacts, and write a timestamped Markdown report under `reports/`.
 - The Cheats panel lists detected cheats for the current title, shows enabled/disabled state, allows toggling individual cheats, shows unsupported-code counts, and provides a reload-cheat-file action.
 - The status area shows title ID, current speed percentage, selected custom driver on Android, quickstate slot status, and whether a matching cheat file was loaded.
 - Keep the OSD usable with controller only: D-pad/left stick navigates, Cross/A confirms, Circle/B cancels, Back/Select closes. It should also work with touch/mouse when available. ImGui navigation must remain enabled, and the SDL backend must use real SDL3 gamepad instance IDs/player index instead of assuming gamepad index `0`.
@@ -136,6 +137,7 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - For debug/reldebug APKs, expect the `.debug` package slot unless the build config says otherwise.
 - After installing, launch through ADB or the device UI, then capture proof with screenshots, `logcat`, selected driver, renderer settings, and any game/title ID tested.
 - Save durable Markdown test notes in `reports/semantic-topic_YYYYMMDD_HHMMSS.md`; use short lowercase kebab-case topics, keep the timestamp at the end, and keep bulky raw logs/screenshots out of git unless the user asks to commit them.
+- Prefer `tools/thor_adb_debug_capture.ps1` for repeatable crash/render captures. It should be the first tool for suspected renderer hangs, Android kills, or game-specific startup crashes because it captures normal logcat, crash buffer, current window focus, meminfo, and a screenshot together.
 
 ## Reporting Thor Results
 

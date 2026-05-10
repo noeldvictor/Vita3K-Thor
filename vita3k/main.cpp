@@ -870,6 +870,10 @@ int main(int argc, char *argv[]) {
         app::error_dialog("Emulated environment initialization failed.", emuenv.window.get());
         return 1;
     }
+    if (cfg.thor_renderer_trace && emuenv.renderer) {
+        emuenv.renderer->renderer_trace_gxm_state = true;
+        LOG_INFO("Thor renderer GXM trace enabled from command line");
+    }
 
     if (emuenv.cfg.controller_binds.empty() || (emuenv.cfg.controller_binds.size() != 15))
         gui::reset_controller_binding(emuenv);

@@ -87,3 +87,10 @@ fastlane/readme.md
 
 # Local imported databases and scratch analysis
 tmp/
+
+# Generated ADB capture artifacts; keep durable summaries as Markdown reports.
+reports/*.png
+reports/*logcat*.txt
+reports/*crashbuffer*.txt
+reports/*meminfo*.txt
+reports/*window*.txt

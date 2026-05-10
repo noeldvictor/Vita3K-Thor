@@ -45,6 +45,7 @@ struct Config {
     bool console = false;
     bool load_app_list = false;
     bool cartridge_mode = false;
+    bool thor_renderer_trace = false;
 
     fs::path get_pref_path() const {
         return fs_utils::utf8_to_path(pref_path);
