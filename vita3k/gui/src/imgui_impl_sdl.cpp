@@ -24,11 +24,14 @@
 
 #include <SDL3/SDL_clipboard.h>
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_keycode.h>
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_timer.h>
 #include <imgui_internal.h>
+
+#include <string_view>
 
 #if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IOS) && !defined(__amigaos4__)
 #define SDL_HAS_CAPTURE_AND_GLOBAL_MOUSE 1
@@ -246,6 +249,8 @@ bool ImGui_ImplSdl_ProcessEvent(ImGui_State *state, SDL_Event *event) {
     }
 }
 
+static void ImGui_ImplSDL3_CloseOwnedGamepad(ImGui_State *state);
+
 IMGUI_API ImGui_State *ImGui_ImplSdl_Init(renderer::State *renderer, SDL_Window *window) {
     ImGui_State *state;
 
@@ -319,6 +324,8 @@ IMGUI_API ImGui_State *ImGui_ImplSdl_Init(renderer::State *renderer, SDL_Window 
     return state;
 }
 IMGUI_API void ImGui_ImplSdl_Shutdown(ImGui_State *state) {
+    ImGui_ImplSDL3_CloseOwnedGamepad(state);
+
     switch (state->renderer->current_backend) {
     case renderer::Backend::OpenGL:
         return ImGui_ImplSdlGL3_Shutdown(dynamic_cast<ImGui_GLState &>(*state));
@@ -384,6 +391,61 @@ static void ImGui_ImplSDL3_UpdateMouseCursor(ImGui_State *state) {
     }
 }
 
+static void ImGui_ImplSDL3_CloseOwnedGamepad(ImGui_State *state) {
+    if (!state->nav_gamepad)
+        return;
+
+    SDL_CloseGamepad(state->nav_gamepad);
+    state->nav_gamepad = nullptr;
+    state->nav_gamepad_id = 0;
+}
+
+static bool ImGui_ImplSDL3_IsFilteredGamepad(const SDL_JoystickID gamepad_id) {
+#ifdef __ANDROID__
+    const char *controller_name = SDL_GetGamepadNameForID(gamepad_id);
+    if (controller_name != nullptr && (std::string_view(controller_name).starts_with("uinput-") || std::string_view(controller_name).starts_with("gf_")))
+        return true;
+#endif
+    return false;
+}
+
+static SDL_Gamepad *ImGui_ImplSDL3_GetGamepad(ImGui_State *state) {
+    if (state->nav_gamepad) {
+        if (SDL_GamepadConnected(state->nav_gamepad))
+            return state->nav_gamepad;
+        ImGui_ImplSDL3_CloseOwnedGamepad(state);
+    }
+
+    if (SDL_Gamepad *gamepad = SDL_GetGamepadFromPlayerIndex(0))
+        return gamepad;
+
+    int num_gamepads = 0;
+    SDL_JoystickID *gamepads = SDL_GetGamepads(&num_gamepads);
+    if (!gamepads)
+        return nullptr;
+
+    SDL_Gamepad *gamepad = nullptr;
+    for (int gamepad_index = 0; gamepad_index < num_gamepads; gamepad_index++) {
+        const SDL_JoystickID gamepad_id = gamepads[gamepad_index];
+        if (ImGui_ImplSDL3_IsFilteredGamepad(gamepad_id))
+            continue;
+
+        gamepad = SDL_GetGamepadFromID(gamepad_id);
+        if (!gamepad) {
+            gamepad = SDL_OpenGamepad(gamepad_id);
+            if (gamepad) {
+                state->nav_gamepad = gamepad;
+                state->nav_gamepad_id = gamepad_id;
+            }
+        }
+        if (gamepad)
+            break;
+    }
+
+    SDL_free(gamepads);
+    return gamepad;
+}
+
 static void ImGui_ImplSDL3_UpdateGamepads(ImGui_State *state) {
     ImGuiIO &io = ImGui::GetIO();
     if ((io.ConfigFlags & ImGuiConfigFlags_NavEnableGamepad) == 0)
@@ -391,7 +453,7 @@ static void ImGui_ImplSDL3_UpdateGamepads(ImGui_State *state) {
 
     // Get gamepad
     io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
-    SDL_Gamepad *game_controller = SDL_OpenGamepad(0);
+    SDL_Gamepad *game_controller = ImGui_ImplSDL3_GetGamepad(state);
     if (!game_controller)
         return;
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;

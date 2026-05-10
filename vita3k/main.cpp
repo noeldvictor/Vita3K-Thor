@@ -556,6 +556,7 @@ static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &
     const float height = std::min(620.f, std::max(360.f, viewport_size.y - 48.f));
     ImGui::SetNextWindowPos(ImVec2(viewport_pos.x + (viewport_size.x - width) * 0.5f, viewport_pos.y + (viewport_size.y - height) * 0.5f), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
+    ImGui::SetNextWindowFocus();
 
     constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
     bool open = true;
@@ -565,6 +566,13 @@ static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &
             runtime_osd_set_open(emuenv, false);
         return;
     }
+    const bool window_appearing = ImGui::IsWindowAppearing();
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight)) {
+        runtime_osd_set_open(emuenv, false);
+        ImGui::End();
+        return;
+    }
 
     ImGui::Text("%s", emuenv.current_app_title.c_str());
     ImGui::Text("Title ID: %s", emuenv.io.title_id.c_str());
@@ -572,11 +580,14 @@ static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &
 #ifdef __ANDROID__
     ImGui::Text("Driver: %s", emuenv.cfg.current_config.custom_driver_name.empty() ? "system" : emuenv.cfg.current_config.custom_driver_name.c_str());
 #endif
-    ImGui::Text("Quickstate slot 0: %s", runtime_quick_state_slot_valid(emuenv) ? fmt::format("{} MiB", runtime_quick_state_slot_bytes() / (1024 * 1024)).c_str() : "empty");
+    const std::string quick_state_status = runtime_quick_state_slot_valid(emuenv) ? fmt::format("{} MiB", runtime_quick_state_slot_bytes() / (1024 * 1024)) : "empty";
+    ImGui::Text("Quickstate slot 0: %s", quick_state_status.c_str());
     ImGui::Separator();
 
     if (ImGui::Button("Resume", ImVec2(150.f, 0.f)))
         runtime_osd_set_open(emuenv, false);
+    if (window_appearing)
+        ImGui::SetItemDefaultFocus();
     ImGui::SameLine();
     if (ImGui::Button(emuenv.kernel.is_threads_paused() ? "Resume Threads" : "Pause", ImVec2(150.f, 0.f))) {
         if (emuenv.kernel.is_threads_paused())

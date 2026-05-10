@@ -106,7 +106,7 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - OSD first-level actions currently include Resume, Pause/Resume, Save State slot 0, Load State slot 0, Fast Forward toggle, Screenshot, Settings, and disabled placeholders for Reset Game and Close Game.
 - The Cheats panel lists detected cheats for the current title, shows enabled/disabled state, allows toggling individual cheats, shows unsupported-code counts, and provides a reload-cheat-file action.
 - The status area shows title ID, current speed percentage, selected custom driver on Android, quickstate slot status, and whether a matching cheat file was loaded.
-- Keep the OSD usable with controller only: D-pad/left stick navigates, Cross/A confirms, Circle/B cancels, Back/Select closes. It should also work with touch/mouse when available.
+- Keep the OSD usable with controller only: D-pad/left stick navigates, Cross/A confirms, Circle/B cancels, Back/Select closes. It should also work with touch/mouse when available. ImGui navigation must remain enabled, and the SDL backend must use real SDL3 gamepad instance IDs/player index instead of assuming gamepad index `0`.
 - Keep OSD rendering lightweight and in the existing ImGui path. Do not open the Vita Live Area or normal settings dialog just to perform runtime actions.
 
 ## ADB Thor Testing

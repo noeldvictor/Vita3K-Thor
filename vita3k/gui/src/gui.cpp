@@ -1023,6 +1023,7 @@ void pre_init(GuiState &gui, EmuEnvState &emuenv) {
     if (ImGui::GetCurrentContext() == NULL) {
         ImGui::CreateContext();
     }
+    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     gui.imgui_state.reset(ImGui_ImplSdl_Init(emuenv.renderer.get(), emuenv.window.get()));
 
     assert(gui.imgui_state);

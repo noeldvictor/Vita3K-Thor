@@ -25,6 +25,7 @@
 
 struct SDL_Window;
 struct SDL_Cursor;
+struct SDL_Gamepad;
 
 namespace renderer {
 struct State;
@@ -37,6 +38,8 @@ struct ImGui_State {
     uint64_t time = 0;
     int mouse_buttons_down = 0;
     SDL_Cursor *mouse_cursors[ImGuiMouseCursor_COUNT] = {};
+    SDL_Gamepad *nav_gamepad = nullptr;
+    uint32_t nav_gamepad_id = 0;
     int pending_mouse_leave_frame = 0;
     bool mouse_can_use_global_state = false;
 
