@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">Vita3K Thor Experiment</title>
+  <desc id="desc">Banner for a personal Vita3K Android fork for AYN Thor testing.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1020"/>
+      <stop offset="0.52" stop-color="#102a43"/>
+      <stop offset="1" stop-color="#052e2b"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#56ccf2"/>
+      <stop offset="0.5" stop-color="#a3e635"/>
+      <stop offset="1" stop-color="#f97316"/>
+    </linearGradient>
+    <filter id="soft-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="360" rx="34" fill="url(#bg)"/>
+  <path d="M72 286 C220 224 314 338 484 263 C641 194 717 108 872 154 C1016 197 1060 109 1130 76" fill="none" stroke="url(#accent)" stroke-width="18" stroke-linecap="round" opacity="0.85"/>
+  <g filter="url(#soft-shadow)">
+    <rect x="80" y="70" width="1040" height="220" rx="28" fill="#07111f" opacity="0.72"/>
+    <text x="600" y="156" text-anchor="middle" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="72" font-weight="800" fill="#f8fafc">Vita3K Thor Experiment</text>
+    <text x="600" y="218" text-anchor="middle" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="30" font-weight="600" fill="#b6e7ff">Personal Android fork for AYN Thor testing</text>
+    <text x="600" y="258" text-anchor="middle" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="22" fill="#d9f99d">renderer, input, proof logs, legally owned content only</text>
+  </g>
+</svg>

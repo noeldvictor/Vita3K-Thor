@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="118" viewBox="0 0 920 118" role="img" aria-labelledby="title desc">
+  <title id="title">No support. Fork it and own the result.</title>
+  <desc id="desc">A badge warning that this repository is a personal experiment with no support promises.</desc>
+  <rect x="3" y="3" width="914" height="112" rx="18" fill="#12090a" stroke="#ef4444" stroke-width="6"/>
+  <path d="M30 59 H890" stroke="#f97316" stroke-width="2" stroke-dasharray="10 10" opacity="0.45"/>
+  <text x="460" y="52" text-anchor="middle" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="34" font-weight="900" fill="#fee2e2">NO SUPPORT</text>
+  <text x="460" y="86" text-anchor="middle" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="24" font-weight="700" fill="#fed7aa">Fork it, test it, patch it, own the result.</text>
+</svg>

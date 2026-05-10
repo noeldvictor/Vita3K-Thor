@@ -1,82 +1,126 @@
-# Vita3K
+# Vita3K Thor Experiment
 
-[![C/C++ CI](https://github.com/Vita3K/Vita3K/actions/workflows/c-cpp.yml/badge.svg)](https://github.com/Vita3K/Vita3K/actions/workflows/c-cpp.yml)
-[![Release](https://img.shields.io/github/v/release/Vita3K/Vita3K-builds?include_prereleases)](https://github.com/Vita3K/Vita3K/releases)
-[![Vita3K discord server](https://img.shields.io/discord/408916678911459329?color=5865F2&label=Vita3K%20&logo=discord&logoColor=white)](https://discord.gg/6aGwQzh)
+<p align="center">
+  <img src="docs/media/branding/vita3k-thor-experiment-banner.svg" alt="Vita3K Thor Experiment banner">
+</p>
 
-## Introduction
+<p align="center">
+  <img src="docs/media/branding/no-support-fork-it.svg" alt="No support. Fork it and own the result.">
+</p>
 
-Vita3K is an experimental PlayStation Vita emulator for Windows, Linux, macOS and Android.
+This is a personal Android fork of [Vita3K](https://github.com/Vita3K/Vita3K) for the AYN Thor. It is tuned around handheld testing, renderer/input experiments, and local proof logs. It is not upstream Vita3K, not an official release channel, and not trying to be a general-purpose support project.
 
-* [Website](https://vita3k.org/) (information for users)
-* [Wiki](https://github.com/Vita3K/Vita3K/wiki) (information for developers)
-* [Discord server](https://discord.gg/MaWhJVH) (recommended)
+> [!WARNING]
+> This fork is vibe coded with AI assistance. That is intentional and disclosed. If AI-assisted code, docs, or generated assets bother you, this repo is not for you. Use upstream Vita3K or another fork.
 
-## Compatibility
+> [!CAUTION]
+> Personal-use experiment. No guarantee of stability, compatibility, correctness, performance, support, or future updates. No games, license files, firmware, keys, or copyrighted game content are included. Use your own legally dumped content and homebrew.
 
-The emulator currently runs most homebrew programs and commercial games.
+## What This Is
 
-- [Homebrew compatibility page](https://vita3k.org/compatibility-homebrew.html)
-- [Commercial compatibility page](https://vita3k.org/compatibility.html)
+- Android-focused Vita3K fork for AYN Thor Base/Pro/Max testing.
+- A place for Thor renderer, graphics-driver, input, touch, scaling, and suspend/resume experiments.
+- Built around Android `arm64-v8a` APK checks, not desktop release packaging.
+- Uses upstream Vita3K documentation as the baseline for emulator setup and build expectations.
+- Uses Thor proof logs, screenshots, and short videos when a game or setting is called working.
 
-## Gallery
+## Target Hardware
 
-|               **Persona 4 Golden** by Atlus                   |                     **A Rose in the Twilight** by Nippon Ichi Software                         |
-| :-----------------------------------------------------------: | :--------------------------------------------------------------------------------------------: |
-| ![Persona 4 Golden screenshot](./_readme/screenshots/P4G.png) | ![A Rose in the Twilight screenshot](./_readme/screenshots/A%20Rose%20in%20the%20Twilight.png) |
+Optimization work assumes AYN Thor Base/Pro/Max hardware: Snapdragon 8 Gen 2, Adreno 740, active cooling, LPDDR5X, and UFS4 storage. Thor Lite is a different Snapdragon 865 / Adreno 650 target and should not drive defaults unless explicitly called out.
 
-|                  **Alone with You** by Benjamin Rivers                     |                 **VA-11 HALL-A** by Sukeban Games                    |
-| :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![Alone with You screenshot](./_readme/screenshots/Alone%20With%20You.png) | ![VA-11 HALL-A screenshot](./_readme/screenshots/VA-11%20HALL-A.png) |
+## What This Is Not
 
-|              **Fruit Ninja** by Halfbrick Studios                  |                **Jetpack Joyride** by Halfbrick Studios                    |
-| :----------------------------------------------------------------: | :------------------------------------------------------------------------: |
-| ![Fruit Ninja Screenshot](./_readme/screenshots/Fruit%20Ninja.png) | ![Jetpack Joyride Screenshot](./_readme/screenshots/Jetpack%20Joyride.png) |
+- Not upstream Vita3K.
+- Not a supported emulator distribution.
+- Not a compatibility reporting project.
+- Not a place to request games, licenses, firmware, keys, copyrighted files, or piracy help.
+- Not a promise that any game, renderer setting, controller mapping, or performance tweak will work for your copy of a game.
 
-## License
+## Support And Issues
 
-Vita3K is licensed under the **GPLv2** license. This is largely dictated by external dependencies, most notably Unicorn.
+Do not open issues expecting support for this experiment. Fork it, test it, patch it, and own the result. If the AI/vibe-coded nature of this fork is a problem, look elsewhere.
 
-## Downloads
+The upstream Vita3K project has its own rules, standards, and support expectations. Do not send Thor-experiment problems to upstream Vita3K.
 
-You can download the latest builds from [here](https://github.com/Vita3K/Vita3K/releases/tag/continuous).
+## Where This Fork Diverges
 
-* Windows
-  * Requirements:
-    * [Microsoft Visual C++ 2015-2022 Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe)
-* Linux
-  * Arch based:
-    * [vita3k-bin](https://aur.archlinux.org/packages/vita3k-bin)<sup><small>AUR</small></sup>
-    * [vita3k-git](https://aur.archlinux.org/packages/vita3k-git)<sup><small>AUR</small></sup>
-  * Requirements:
-    * xdg-desktop-portal
-* [Android](https://github.com/Vita3K/Vita3K-Android/releases/)
-    * [Adreno drivers](https://github.com/K11MCH1/AdrenoToolsDrivers/releases/)
-* Others
-  * [Download Artifact](https://github.com/Vita3K/Vita3K/actions?query=event%3Apush+is%3Asuccess+branch%3Amaster)
-  * [Old builds](https://github.com/Vita3K/Vita3K-builds/releases)
+This fork should keep its differences from stock Vita3K visible and testable:
 
-## Building
+- README and repo branding identify this as the `Vita3K Thor Experiment`.
+- Writable fork remote is `git@github.com:noeldvictor/Vita3K-Thor.git`.
+- Android testing targets the existing `android/` Gradle project and `arm64-v8a` native build path.
+- Thor test APKs should prefer debug-friendly builds while renderer and input experiments are still moving.
+- Compatibility claims should include commit, APK/build type, renderer, graphics driver, title ID, settings, screenshots, and logs.
+- Thor-only behavior should be guarded behind settings, build flags, device detection, or clearly named code paths.
+- The Android app label and package id are intentionally unchanged unless a future patch says otherwise.
+- Broad Vita3K fixes should stay clean enough to propose upstream separately.
+- No game files, firmware, license files, or commercial content should be committed here.
 
-Please see [`building.md`](./building.md).
+## Questions This Fork Should Answer
 
-## Running
-Check our [quickstart guide](https://vita3k.org/quickstart) to make sure your computer meets the minimum requirements to run Vita3K.  
-Don't forget to have your graphics driver up to date and to install the [Visual C++ 2015-2022 Redistributable](https://aka.ms/vs/17/release/VC_redist.x64.exe) if you are a Windows user.  
+- Which Vita3K Android renderer and graphics-driver settings behave best on AYN Thor?
+- Which games are useful Thor canaries for fast regression testing?
+- Can physical controls, front touch, rear touch, analog input, audio, save/load, and suspend/resume all survive real handheld use?
+- Which performance changes are general Vita3K improvements, and which ones should stay Thor-only?
+- What proof is enough before calling a game or setting working: screenshot, logcat, frame pacing, controller proof, save proof, or all of them?
 
-## Bugs and issues
-The project is in an early stage, so please be mindful when opening new issues. Expect crashes, glitches, low compatibility and poor performance.
+## Thor Screenshot
 
-## Thanks
-Thanks go out to people who offered advice or otherwise made this project possible, such as Davee, korruptor, Rinnegatamante, ScHlAuChi, Simon Kilroy, TheFlow, xerpi, xyz, Yifan Lu and many others.
+No live Thor screenshot is checked in yet. When one is added, use a real device screenshot from this fork and make clear that no games are bundled with this repository.
 
-## Donations
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/vita3k)
-<br>
-Thank you to the supporters and to all those who support us on our [ko-fi](https://ko-fi.com/vita3K).
-* Among them, those who subscribed to the Nibble Tier and upper: **j0hnnybrav0, Mored4u, TacoOblivion, Undeadbob and uplush**
+Suggested path:
 
-## Note
-The purpose of this emulator is not to enable illegal activity. You can dump games from a Vita by using [NoNpDrm](https://github.com/TheOfficialFloW/NoNpDrm) or [FAGDec](https://github.com/CelesteBlue-dev/PSVita-RE-tools/tree/master/FAGDec/build). You can get homebrew programs from [VitaDB](https://www.rinnegatamante.eu/vitadb/#/).
+```text
+docs/media/screenshots/vita3k-thor-android.png
+```
 
-PlayStation, PlayStation Vita and PlayStation Network are all registered trademarks of Sony Interactive Entertainment Inc. This emulator is not related to or endorsed by Sony, or derived from confidential materials belonging to Sony.
+## Build Locally
+
+This fork is currently aimed at Android/AYN Thor APK experiments:
+
+```powershell
+git submodule update --init --recursive
+Copy-Item -Recurse -Force data android/assets
+Copy-Item -Recurse -Force lang android/assets
+Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
+.\gradlew.bat assembleReldebug
+```
+
+APK output:
+
+```text
+android/build/outputs/apk/reldebug/android-reldebug.apk
+```
+
+Desktop builds still follow the upstream-style instructions in [`building.md`](./building.md).
+
+## Content And Firmware
+
+Vita3K-Thor does not include PlayStation Vita games, firmware, licenses, keys, or copyrighted game content. Use legally dumped content and homebrew only.
+
+Useful upstream/user resources:
+
+- [Vita3K quickstart](https://vita3k.org/quickstart)
+- [Vita3K compatibility list](https://vita3k.org/compatibility.html)
+- [Vita3K homebrew compatibility list](https://vita3k.org/compatibility-homebrew.html)
+- [VitaDB homebrew](https://www.rinnegatamante.eu/vitadb/#/)
+
+## Remotes
+
+- Writable fork: `git@github.com:noeldvictor/Vita3K-Thor.git`
+- Upstream reference: `https://github.com/Vita3K/Vita3K`
+
+Clone this fork with SSH:
+
+```sh
+git clone --recursive git@github.com:noeldvictor/Vita3K-Thor.git
+cd Vita3K-Thor
+```
+
+## Upstream Credit
+
+Vita3K is an open-source PlayStation Vita emulator. This fork exists because upstream Vita3K and many emulator contributors did the real foundational work.
+
+This repository remains under the upstream license terms. See [`COPYING.txt`](./COPYING.txt).
+
+PlayStation, PlayStation Vita, and PlayStation Network are registered trademarks of Sony Interactive Entertainment Inc. This fork is not related to or endorsed by Sony, Vita3K upstream, or any commercial game publisher.
