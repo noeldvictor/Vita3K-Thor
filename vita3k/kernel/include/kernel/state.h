@@ -141,6 +141,7 @@ struct KernelState {
     uint64_t start_tick;
     SceRtcTick base_tick;
     Ptr<SceProcessParam> process_param;
+    std::atomic<uint32_t> speed_percent{ 100 };
 
     Debugger debugger;
 

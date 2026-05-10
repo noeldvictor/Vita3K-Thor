@@ -27,6 +27,7 @@
 #include <util/lock_and_find.h>
 
 #include <chrono>
+#include <algorithm>
 #include <thread>
 
 #include <util/tracy.h>
@@ -36,6 +37,16 @@ inline static uint64_t get_current_time() {
     return std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::high_resolution_clock::now().time_since_epoch())
         .count();
+}
+
+static uint64_t speed_to_guest_us(const EmuEnvState &emuenv, const uint64_t host_us) {
+    const uint64_t speed_percent = std::max<uint32_t>(emuenv.kernel.speed_percent.load(), 1);
+    return (host_us * speed_percent) / 100;
+}
+
+static uint64_t speed_to_host_us(const EmuEnvState &emuenv, const uint64_t guest_us) {
+    const uint64_t speed_percent = std::max<uint32_t>(emuenv.kernel.speed_percent.load(), 1);
+    return std::max<uint64_t>(1, (guest_us * 100) / speed_percent);
 }
 
 EXPORT(int, __sceKernelCreateLwMutex, Ptr<SceKernelLwMutexWork> workarea, const char *name, unsigned int attr, Ptr<SceKernelCreateLwMutex_opt> opt) {
@@ -1048,11 +1059,11 @@ EXPORT(int, sceKernelCreateThreadForUser, const char *name, SceKernelThreadEntry
     return thread->id;
 }
 
-static int delay_thread(SceUInt delay_us) {
+static int delay_thread(EmuEnvState &emuenv, SceUInt delay_us) {
     if (delay_us == 0)
         return SCE_KERNEL_ERROR_INVALID_ARGUMENT;
 
-    std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
+    std::this_thread::sleep_for(std::chrono::microseconds(speed_to_host_us(emuenv, delay_us)));
 
     return SCE_KERNEL_OK;
 }
@@ -1063,22 +1074,23 @@ static int delay_thread_cb(EmuEnvState &emuenv, SceUID thread_id, SceUInt delay_
     auto end = std::chrono::high_resolution_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
-    if (delay_us > elapsed.count()) // If we spent less time than requested processing callbacks, sleep the remaining time
-        return delay_thread(delay_us - elapsed.count());
+    const uint64_t elapsed_guest_us = speed_to_guest_us(emuenv, static_cast<uint64_t>(elapsed.count()));
+    if (delay_us > elapsed_guest_us) // If we spent less time than requested processing callbacks, sleep the remaining time
+        return delay_thread(emuenv, static_cast<SceUInt>(delay_us - elapsed_guest_us));
     else // Else return directly
         return SCE_KERNEL_OK;
 }
 
 EXPORT(int, sceKernelDelayThread, SceUInt delay) {
     TRACY_FUNC(sceKernelDelayThread, delay);
-    return delay_thread(delay);
+    return delay_thread(emuenv, delay);
 }
 
 EXPORT(int, sceKernelDelayThread200, SceUInt delay) {
     TRACY_FUNC(sceKernelDelayThread200, delay);
     if (delay < 201)
         delay = 201;
-    return delay_thread(delay);
+    return delay_thread(emuenv, delay);
 }
 
 EXPORT(int, sceKernelDelayThreadCB, SceUInt delay) {

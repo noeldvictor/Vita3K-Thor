@@ -793,6 +793,7 @@ static bool runtime_osd_open = false;
 static bool runtime_osd_auto_paused = false;
 static bool android_back_key_down = false;
 static bool android_back_chord_used = false;
+static bool android_back_fast_forward_latched = false;
 
 static bool memory_page_is_allocated(const MemState &mem, const uint32_t page) {
     const uint32_t word = mem.allocator.words[page >> 5];
@@ -976,7 +977,16 @@ void runtime_osd_set_open(EmuEnvState &emuenv, bool open) {
 void runtime_toggle_fast_forward(EmuEnvState &emuenv) {
     const bool enable = emuenv.display.speed_percent.load() == 100;
     const uint32_t configured_speed = static_cast<uint32_t>(std::clamp(emuenv.cfg.fast_forward_speed_percent, 101, 1000));
-    emuenv.display.speed_percent.store(enable ? configured_speed : 100);
+    const uint32_t speed_percent = enable ? configured_speed : 100;
+    emuenv.display.speed_percent.store(speed_percent);
+    emuenv.kernel.speed_percent.store(speed_percent);
+    {
+        const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
+        for (auto &[_, timer] : emuenv.kernel.timers) {
+            const std::lock_guard<std::mutex> timer_lock(timer->mutex);
+            timer->condvar.notify_all();
+        }
+    }
     LOG_INFO("Fast forward {}", enable ? fmt::format("{}%", configured_speed) : "off");
 }
 
@@ -1003,17 +1013,44 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
     }
 }
 
+static SDL_GamepadButton runtime_configured_button(const EmuEnvState &emuenv, const SDL_GamepadButton default_button) {
+    const auto index = static_cast<size_t>(default_button);
+    if (index < emuenv.cfg.controller_binds.size())
+        return static_cast<SDL_GamepadButton>(emuenv.cfg.controller_binds[index]);
+    return default_button;
+}
+
+static bool runtime_button_matches(const SDL_GamepadButton button, const SDL_GamepadButton configured_button, const SDL_GamepadButton default_button) {
+    return (button == configured_button) || (button == default_button);
+}
+
+static bool runtime_gamepad_button_down(SDL_Gamepad *gamepad, const SDL_GamepadButton configured_button, const SDL_GamepadButton default_button) {
+    return SDL_GetGamepadButton(gamepad, configured_button)
+        || ((configured_button != default_button) && SDL_GetGamepadButton(gamepad, default_button));
+}
+
+static bool runtime_any_gamepad_button_down(EmuEnvState &emuenv, const SDL_GamepadButton configured_button, const SDL_GamepadButton default_button) {
+    const std::lock_guard<std::mutex> guard(emuenv.ctrl.mutex);
+    for (const auto &[_, controller] : emuenv.ctrl.controllers) {
+        if (controller.controller && runtime_gamepad_button_down(controller.controller.get(), configured_button, default_button))
+            return true;
+    }
+    return false;
+}
+
 static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &event) {
     static bool fast_forward_latched = false;
     static bool save_state_latched = false;
     static bool load_state_latched = false;
     static bool back_press_candidate = false;
     static bool back_chord_used = false;
+    const SDL_GamepadButton select_button = runtime_configured_button(emuenv, SDL_GAMEPAD_BUTTON_BACK);
+    const SDL_GamepadButton r1_button = runtime_configured_button(emuenv, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
 
     if (event.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
-        if (event.gbutton.button == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)
+        if (runtime_button_matches(static_cast<SDL_GamepadButton>(event.gbutton.button), r1_button, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER))
             fast_forward_latched = false;
-        if (event.gbutton.button == SDL_GAMEPAD_BUTTON_BACK) {
+        if (runtime_button_matches(static_cast<SDL_GamepadButton>(event.gbutton.button), select_button, SDL_GAMEPAD_BUTTON_BACK)) {
             fast_forward_latched = false;
             if (back_press_candidate && !back_chord_used) {
                 if (!emuenv.io.title_id.empty())
@@ -1036,10 +1073,18 @@ static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &
     if (!gamepad)
         return false;
 
-    const bool select_down = SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_BACK) || android_back_key_down;
-    if ((event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) && (event.gbutton.button == SDL_GAMEPAD_BUTTON_BACK)) {
+    const bool select_down = runtime_gamepad_button_down(gamepad, select_button, SDL_GAMEPAD_BUTTON_BACK) || android_back_key_down;
+    const bool r1_down = runtime_gamepad_button_down(gamepad, r1_button, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+    if ((event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) && runtime_button_matches(static_cast<SDL_GamepadButton>(event.gbutton.button), select_button, SDL_GAMEPAD_BUTTON_BACK)) {
         if (emuenv.io.title_id.empty())
             return false;
+        if (r1_down && !fast_forward_latched) {
+            fast_forward_latched = true;
+            back_chord_used = true;
+            android_back_chord_used = true;
+            runtime_toggle_fast_forward(emuenv);
+            return true;
+        }
         back_press_candidate = true;
         back_chord_used = false;
         return true;
@@ -1052,7 +1097,6 @@ static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &
     }
 
     if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
-        const bool r1_down = SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
         if (r1_down && !fast_forward_latched) {
             fast_forward_latched = true;
             back_chord_used = true;
@@ -1248,6 +1292,12 @@ bool handle_events(EmuEnvState &emuenv, GuiState &gui) {
                 if (!emuenv.io.title_id.empty()) {
                     android_back_key_down = true;
                     android_back_chord_used = false;
+                    const SDL_GamepadButton r1_button = runtime_configured_button(emuenv, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+                    if (!android_back_fast_forward_latched && runtime_any_gamepad_button_down(emuenv, r1_button, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) {
+                        android_back_fast_forward_latched = true;
+                        android_back_chord_used = true;
+                        runtime_toggle_fast_forward(emuenv);
+                    }
                     continue;
                 }
                 sce_ctrl_btn = SCE_CTRL_PSBUTTON;
@@ -1293,6 +1343,7 @@ bool handle_events(EmuEnvState &emuenv, GuiState &gui) {
                     runtime_osd_set_open(emuenv, !runtime_osd_is_open());
                 android_back_key_down = false;
                 android_back_chord_used = false;
+                android_back_fast_forward_latched = false;
                 continue;
             }
 #endif

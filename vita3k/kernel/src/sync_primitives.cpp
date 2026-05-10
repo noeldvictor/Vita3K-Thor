@@ -23,6 +23,8 @@
 #include <util/lock_and_find.h>
 #include <util/log.h>
 
+#include <algorithm>
+
 static constexpr bool LOG_SYNC_PRIMITIVES = false;
 
 // ***********
@@ -77,7 +79,17 @@ inline static int find_condvar(CondvarPtr &condvar_out, CondvarPtrs **condvars_o
 
 // TODO: Write remaining time to timeout ptr when it's successfully signaled
 // Assumes primitive_lock is locked and thread_lock is unlocked
-inline static int handle_timeout(const ThreadStatePtr &thread, std::unique_lock<std::mutex> &thread_lock,
+inline static uint64_t kernel_speed_to_host_us(const KernelState &kernel, const uint64_t guest_us) {
+    const uint64_t speed_percent = std::max<uint32_t>(kernel.speed_percent.load(), 1);
+    return std::max<uint64_t>(1, (guest_us * 100) / speed_percent);
+}
+
+inline static uint64_t kernel_speed_to_guest_us(const KernelState &kernel, const uint64_t host_us) {
+    const uint64_t speed_percent = std::max<uint32_t>(kernel.speed_percent.load(), 1);
+    return (host_us * speed_percent) / 100;
+}
+
+inline static int handle_timeout(const KernelState &kernel, const ThreadStatePtr &thread, std::unique_lock<std::mutex> &thread_lock,
     std::unique_lock<std::mutex> &primitive_lock, WaitingThreadQueuePtr &queue,
     const ThreadDataQueueInterator<WaitingThreadData> &data_it, const char *export_name,
     SceUInt *const timeout) {
@@ -85,7 +97,7 @@ inline static int handle_timeout(const ThreadStatePtr &thread, std::unique_lock<
         bool status = false;
         auto start = std::chrono::steady_clock::now();
         if (*timeout > 0) {
-            status = thread->status_cond.wait_for(primitive_lock, std::chrono::microseconds{ *timeout }, [&] { return thread->status == ThreadStatus::run; });
+            status = thread->status_cond.wait_for(primitive_lock, std::chrono::microseconds{ kernel_speed_to_host_us(kernel, *timeout) }, [&] { return thread->status == ThreadStatus::run; });
         }
 
         if (!status) {
@@ -100,11 +112,12 @@ inline static int handle_timeout(const ThreadStatePtr &thread, std::unique_lock<
             return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
         } else {
             auto end = std::chrono::steady_clock::now();
-            uint32_t real_timeout = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
-            if (real_timeout > *timeout) {
+            uint64_t real_timeout = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+            const uint64_t guest_timeout = kernel_speed_to_guest_us(kernel, real_timeout);
+            if (guest_timeout > *timeout) {
                 *timeout = 0;
             } else {
-                *timeout = *timeout - real_timeout;
+                *timeout = static_cast<SceUInt>(*timeout - guest_timeout);
             }
         }
     } else {
@@ -195,7 +208,7 @@ SceInt32 simple_event_waitorpoll(KernelState &kernel, const char *export_name, S
         const auto data_it = event->waiting_threads->push(data);
         thread_lock.unlock();
 
-        const int err = handle_timeout(thread, thread_lock, event_lock, event->waiting_threads, data_it, export_name, timeout);
+        const int err = handle_timeout(kernel, thread, thread_lock, event_lock, event->waiting_threads, data_it, export_name, timeout);
         if (err < 0) {
             // set it only if a timeout occurs
             // otherwise set in simple_event_setorpulse
@@ -364,9 +377,9 @@ SceUID timer_find(KernelState &kernel, const char *export_name, const char *pNam
     return RET_ERROR(SCE_KERNEL_ERROR_UID_CANNOT_FIND_BY_NAME);
 }
 
-static void timer_schedule_event(TimerPtr &timer) {
+static void timer_schedule_event(KernelState &kernel, TimerPtr &timer) {
     uint64_t curr_time = get_current_time();
-    timer->next_event = curr_time + timer->event_interval;
+    timer->next_event = curr_time + kernel_speed_to_host_us(kernel, timer->event_interval);
 
     timer->condvar.notify_all();
 }
@@ -392,7 +405,7 @@ SceInt32 timer_set(KernelState &kernel, const char *export_name, SceUID thread_i
     timer->event_interval = *interval;
 
     if (timer->is_started)
-        timer_schedule_event(timer);
+        timer_schedule_event(kernel, timer);
 
     return SCE_KERNEL_OK;
 }
@@ -428,7 +441,8 @@ SceInt32 timer_waitorpoll(KernelState &kernel, const char *export_name, SceUID t
     auto set_next_event = [&]() {
         if (timer->is_repeat) {
             // the event repeats every timer->event_interval, go to the next one after current_time
-            timer->next_event += ((current_time - timer->next_event - 1) / timer->event_interval + 1) * timer->event_interval;
+            const uint64_t host_interval = kernel_speed_to_host_us(kernel, timer->event_interval);
+            timer->next_event += ((current_time - timer->next_event - 1) / host_interval + 1) * host_interval;
         } else {
             timer->next_event = std::numeric_limits<uint64_t>::max();
         }
@@ -515,7 +529,7 @@ SceInt32 timer_start(KernelState &kernel, const char *export_name, SceUID thread
     timer->time = get_current_time();
 
     if (timer->event_interval != 0)
-        timer_schedule_event(timer);
+        timer_schedule_event(kernel, timer);
 
     return SCE_KERNEL_OK;
 }
@@ -662,7 +676,7 @@ inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char
         const auto data_it = mutex->waiting_threads->push(data);
         thread_lock.unlock();
 
-        int res = handle_timeout(thread, thread_lock, mutex_lock, mutex->waiting_threads, data_it, export_name, timeout);
+        int res = handle_timeout(kernel, thread, thread_lock, mutex_lock, mutex->waiting_threads, data_it, export_name, timeout);
 
         if (weight == SyncWeight::Light) {
             mutex->workarea.get(mem)->lockCount = mutex->lock_count;
@@ -881,7 +895,7 @@ SceInt32 rwlock_lock(KernelState &kernel, MemState &mem, const char *export_name
         const auto data_it = rwlock->waiting_threads->push(data);
         thread_lock.unlock();
 
-        return handle_timeout(thread, thread_lock, rwlock_lock, rwlock->waiting_threads, data_it, export_name, timeout);
+        return handle_timeout(kernel, thread, thread_lock, rwlock_lock, rwlock->waiting_threads, data_it, export_name, timeout);
     }
 }
 
@@ -1059,7 +1073,7 @@ SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thr
         const auto data_it = semaphore->waiting_threads->push(data);
         thread_lock.unlock();
 
-        auto res = handle_timeout(thread, thread_lock, semaphore_lock, semaphore->waiting_threads, data_it, export_name, pTimeout);
+        auto res = handle_timeout(kernel, thread, thread_lock, semaphore_lock, semaphore->waiting_threads, data_it, export_name, pTimeout);
         if (was_canceled)
             res = SCE_KERNEL_ERROR_WAIT_CANCEL;
         return res;
@@ -1253,7 +1267,7 @@ int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, Sc
     const auto data_it = condvar->waiting_threads->push(data);
     thread_lock.unlock();
 
-    if (auto error = handle_timeout(thread, thread_lock, condition_variable_lock, condvar->waiting_threads, data_it, export_name, timeout))
+    if (auto error = handle_timeout(kernel, thread, thread_lock, condition_variable_lock, condvar->waiting_threads, data_it, export_name, timeout))
         return error;
 
     condition_variable_lock.unlock();
@@ -1464,7 +1478,7 @@ static int eventflag_waitorpoll(KernelState &kernel, const char *export_name, Sc
         const auto data_it = event->waiting_threads->push(data);
         thread_lock.unlock();
 
-        int err = handle_timeout(thread, thread_lock, event_lock, event->waiting_threads, data_it, export_name, timeout);
+        int err = handle_timeout(kernel, thread, thread_lock, event_lock, event->waiting_threads, data_it, export_name, timeout);
         if (err < 0 && outBits) {
             // set it only if a timeout occurs
             // otherwise set in eventflag_set
