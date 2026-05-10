@@ -64,6 +64,7 @@ struct DisplayState {
     std::atomic<bool> abort{ false };
     std::atomic<bool> imgui_render{ true };
     std::atomic<bool> fullscreen{ false };
+    std::atomic<uint32_t> speed_percent{ 100 };
     std::atomic<std::uint64_t> vblank_count{ 0 };
     std::vector<DisplayStateVBlankWaitInfo> vblank_wait_infos;
     std::atomic<uint64_t> last_setframe_vblank_count = 0;

@@ -21,6 +21,7 @@
 
 #include <gui/imgui_impl_sdl.h>
 #include <gui/state.h>
+#include <miniz.h>
 #include <renderer/state.h>
 
 #include <boost/algorithm/string/trim.hpp>
@@ -43,11 +44,165 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <cstdio>
 #include <fstream>
+#include <memory>
+#include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
 namespace gui {
+
+static constexpr uint32_t APPS_CACHE_VERSION = 2;
+
+static size_t write_archive_to_buffer(void *pOpaque, mz_uint64 file_ofs, const void *pBuf, size_t n) {
+    vfs::FileBuffer *const buffer = static_cast<vfs::FileBuffer *>(pOpaque);
+    assert(file_ofs == buffer->size());
+    const uint8_t *const first = static_cast<const uint8_t *>(pBuf);
+    const uint8_t *const last = &first[n];
+    buffer->insert(buffer->end(), first, last);
+
+    return n;
+}
+
+static bool is_game_card_category(const std::string &category) {
+    return category.find("gd") != std::string::npos || category.find("gc") != std::string::npos;
+}
+
+static bool has_cheats_for_title(const EmuEnvState &emuenv, const std::string &title_id) {
+    if (title_id.empty())
+        return false;
+
+    const std::array<fs::path, 4> roots = {
+        emuenv.base_path / "cheats",
+        emuenv.shared_path / "cheats",
+        emuenv.pref_path / "ux0/vitacheat/db",
+        emuenv.pref_path / "ux0/vitacheat"
+    };
+
+    for (const auto &root : roots) {
+        if (fs::exists(root / (title_id + ".psv")) || fs::exists(root / "db" / (title_id + ".psv")))
+            return true;
+    }
+
+    return false;
+}
+
+static std::optional<App> app_from_param(const EmuEnvState &emuenv, const vfs::FileBuffer &param_sfo, const fs::path &source_path, const std::string &source_root) {
+    sfo::SfoAppInfo app_info;
+    sfo::get_param_info(app_info, param_sfo, emuenv.cfg.sys_lang);
+    if (app_info.app_title_id.empty() || !is_game_card_category(app_info.app_category))
+        return std::nullopt;
+
+    App app{
+        app_info.app_version,
+        app_info.app_category,
+        app_info.app_content_id,
+        app_info.app_addcont,
+        app_info.app_savedata,
+        app_info.app_parental_level,
+        app_info.app_short_title,
+        app_info.app_title,
+        app_info.app_title_id,
+        fs_utils::path_to_utf8(source_path)
+    };
+    app.source_path = fs_utils::path_to_utf8(source_path);
+    app.source_root = source_root;
+    app.virtual_cartridge = true;
+    app.cheats_available = has_cheats_for_title(emuenv, app.title_id);
+    return app;
+}
+
+static std::optional<App> app_from_cartridge_directory(EmuEnvState &emuenv, const fs::path &content_path) {
+    vfs::FileBuffer param_sfo;
+    if (!fs_utils::read_data(content_path / "sce_sys/param.sfo", param_sfo))
+        return std::nullopt;
+
+    return app_from_param(emuenv, param_sfo, content_path.generic_path(), {});
+}
+
+static std::optional<App> app_from_cartridge_archive(EmuEnvState &emuenv, const fs::path &archive_path) {
+    std::unique_ptr<FILE, int (*)(FILE *)> archive_file(FOPEN(archive_path.c_str(), "rb"), fclose);
+    if (!archive_file)
+        return std::nullopt;
+
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_cfile(&zip, archive_file.get(), 0, 0))
+        return std::nullopt;
+
+    std::optional<App> app;
+    const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < num_files && !app.has_value(); i++) {
+        mz_zip_archive_file_stat file_stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &file_stat))
+            continue;
+
+        const std::string filename = file_stat.m_filename;
+        if (!filename.ends_with("sce_sys/param.sfo"))
+            continue;
+
+        vfs::FileBuffer param_sfo;
+        if (!mz_zip_reader_extract_file_to_callback(&zip, filename.c_str(), &write_archive_to_buffer, &param_sfo, 0))
+            continue;
+
+        auto root = filename;
+        root.erase(root.find("sce_sys/param.sfo"));
+        app = app_from_param(emuenv, param_sfo, archive_path.generic_path(), root);
+    }
+
+    mz_zip_reader_end(&zip);
+    return app;
+}
+
+static void refresh_cheat_badges(GuiState &gui, EmuEnvState &emuenv) {
+    for (auto &app : gui.app_selector.user_apps)
+        app.cheats_available = has_cheats_for_title(emuenv, app.title_id);
+}
+
+static void append_virtual_cartridge_apps(GuiState &gui, EmuEnvState &emuenv) {
+    if (!emuenv.cfg.scan_virtual_cartridges)
+        return;
+
+    gui.app_selector.user_apps.erase(std::remove_if(gui.app_selector.user_apps.begin(), gui.app_selector.user_apps.end(), [](const App &app) {
+        return app.virtual_cartridge;
+    }), gui.app_selector.user_apps.end());
+
+    std::set<std::string> indexed_paths;
+    for (const auto &app : gui.app_selector.user_apps)
+        indexed_paths.insert(app.path);
+
+    for (const auto &dir_utf8 : emuenv.cfg.virtual_cartridge_dirs) {
+        const auto scan_root = fs_utils::utf8_to_path(dir_utf8);
+        if (!fs::exists(scan_root))
+            continue;
+
+        try {
+            for (const auto &entry : fs::recursive_directory_iterator(scan_root)) {
+                const auto path = entry.path();
+                const auto extension = string_utils::tolower(path.extension().string());
+
+                std::optional<App> app;
+                if (fs::is_regular_file(path) && ((extension == ".zip") || (extension == ".vpk"))) {
+                    app = app_from_cartridge_archive(emuenv, path);
+                } else if (fs::is_regular_file(path) && (string_utils::tolower(path.filename().string()) == "param.sfo") && (path.parent_path().filename() == "sce_sys")) {
+                    app = app_from_cartridge_directory(emuenv, path.parent_path().parent_path());
+                }
+
+                if (!app.has_value() || indexed_paths.contains(app->path))
+                    continue;
+
+                indexed_paths.insert(app->path);
+                gui.app_selector.user_apps.push_back(*app);
+            }
+        } catch (const fs::filesystem_error &e) {
+            LOG_WARN("Could not scan virtual cartridge directory {}: {}", scan_root, e.what());
+        }
+    }
+}
 
 void draw_info_message(GuiState &gui, EmuEnvState &emuenv) {
     if (emuenv.io.title_id.empty() && emuenv.cfg.display_info_message) {
@@ -488,7 +643,7 @@ static bool get_user_apps(GuiState &gui, EmuEnvState &emuenv) {
         // Check version of cache
         uint32_t versionInFile;
         apps_cache.read((char *)&versionInFile, sizeof(uint32_t));
-        if (versionInFile != 1) {
+        if (versionInFile != APPS_CACHE_VERSION) {
             LOG_WARN("Current version of cache: {}, is outdated, recreate it.", versionInFile);
             return false;
         }
@@ -525,10 +680,15 @@ static bool get_user_apps(GuiState &gui, EmuEnvState &emuenv) {
             app.title = read();
             app.title_id = read();
             app.path = read();
+            app.source_path = read();
+            app.source_root = read();
+            apps_cache.read(reinterpret_cast<char *>(&app.virtual_cartridge), sizeof(app.virtual_cartridge));
 
             gui.app_selector.user_apps.push_back(app);
         }
 
+        append_virtual_cartridge_apps(gui, emuenv);
+        refresh_cheat_badges(gui, emuenv);
         init_apps_icon(gui, emuenv, gui.app_selector.user_apps);
         load_and_update_compat_user_apps(gui, emuenv);
     }
@@ -547,7 +707,7 @@ void save_apps_cache(GuiState &gui, EmuEnvState &emuenv) {
         apps_cache.write(reinterpret_cast<const char *>(&size), sizeof(size));
 
         // Write version of cache
-        const uint32_t versionInFile = 1;
+        const uint32_t versionInFile = APPS_CACHE_VERSION;
         apps_cache.write(reinterpret_cast<const char *>(&versionInFile), sizeof(uint32_t));
 
         // Write language of cache
@@ -573,6 +733,9 @@ void save_apps_cache(GuiState &gui, EmuEnvState &emuenv) {
             write(app.title);
             write(app.title_id);
             write(app.path);
+            write(app.source_path);
+            write(app.source_root);
+            apps_cache.write(reinterpret_cast<const char *>(&app.virtual_cartridge), sizeof(app.virtual_cartridge));
         }
         apps_cache.close();
     }
@@ -580,7 +743,8 @@ void save_apps_cache(GuiState &gui, EmuEnvState &emuenv) {
 
 static void init_app_custom_config(GuiState &gui, EmuEnvState &emuenv) {
     for (auto &app : gui.app_selector.user_apps) {
-        app.custom_config = fs::exists(emuenv.config_path / "config" / fmt::format("config_{}.xml", app.path));
+        app.custom_config = !app.virtual_cartridge && fs::exists(emuenv.config_path / "config" / fmt::format("config_{}.xml", app.path));
+        app.cheats_available = has_cheats_for_title(emuenv, app.title_id);
     }
 }
 
@@ -674,6 +838,7 @@ void init_user_app(GuiState &gui, EmuEnvState &emuenv, const std::string &app_pa
         else
             app->last_time = 0;
         app->custom_config = fs::exists(emuenv.config_path / "config" / fmt::format("config_{}.xml", app_path));
+        app->cheats_available = has_cheats_for_title(emuenv, app->title_id);
     }
 
     gui.app_selector.is_app_list_sorted = false;
@@ -711,7 +876,9 @@ void get_app_param(GuiState &gui, EmuEnvState &emuenv, const std::string &app_pa
         app_info.app_version = "0.00"; // Default Version
         app_info.app_category = "-"; // Default Category
     }
-    gui.app_selector.user_apps.push_back({ app_info.app_version, app_info.app_category, app_info.app_content_id, app_info.app_addcont, app_info.app_savedata, app_info.app_parental_level, app_info.app_short_title, app_info.app_title, app_info.app_title_id, app_path });
+    App app{ app_info.app_version, app_info.app_category, app_info.app_content_id, app_info.app_addcont, app_info.app_savedata, app_info.app_parental_level, app_info.app_short_title, app_info.app_title, app_info.app_title_id, app_path };
+    app.cheats_available = has_cheats_for_title(emuenv, app.title_id);
+    gui.app_selector.user_apps.push_back(app);
 }
 
 ImU32 get_selectable_color_pulse(const float max_alpha) {
@@ -742,6 +909,8 @@ void get_user_apps_title(GuiState &gui, EmuEnvState &emuenv) {
         }
     }
 
+    append_virtual_cartridge_apps(gui, emuenv);
+    refresh_cheat_badges(gui, emuenv);
     save_apps_cache(gui, emuenv);
 }
 

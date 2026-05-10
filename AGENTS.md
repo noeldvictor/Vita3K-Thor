@@ -73,6 +73,8 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 ## Playing Without Install
 
 - Vita3K Thor now has an experimental cartridge launch path for archives: use `--cartridge <path-to-vpk-or-zip>` to mount game content as a read-only virtual game card for the session instead of adding it to the installed app library.
+- Android builds scan `/sdcard/roms/psvita` and `/storage/emulated/0/roms/psvita` by default when `scan-virtual-cartridges` is enabled. Compatible `.zip`/`.vpk` archives and extracted folders containing `sce_sys/param.sfo` are listed as virtual cartridges in the app grid.
+- Virtual cartridge app entries must launch directly, not through Live Area, because the content is not installed under `ux0/app`.
 - On device, the visible launcher path is `File` -> `Play ZIP as Cartridge`; select a `.zip` or `.vpk`, wait for the virtual cartridge cache to mount, then press `Start Cartridge`.
 - Android file/front-end launching is supported through `ACTION_VIEW` and `ACTION_SEND` for `.zip`/`.vpk`-style archive intents. The Android bridge converts the incoming file/content URI into `-a true --cartridge <path>`.
 - If Android only provides a content URI without a raw filesystem path, copy the URI into app-local `cartridge_launch/` and launch the copied archive from there.
@@ -82,6 +84,15 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - The `--installed-path` / `-r` path runs an already-installed app path from Vita3K storage. A future no-install-like UX would need a new staging, cache, or mount feature and must not bypass ownership or license expectations.
 - Cartridge mode should stay read-only from the emulated app side. Do not let games create, delete, or rename files under the virtual card path.
 - The direct archive VFS currently reads each requested ZIP entry into memory when opened; this is real no-staging ZIP launch, but not yet compressed random-access streaming.
+
+## Cheats And Runtime Hotkeys
+
+- Cheats are offline single-player only. Do not add online cheating, anti-cheat bypass, DRM bypass, license bypass, or commercial cheat pack redistribution.
+- VitaCheat `.psv` files can be detected by title ID from repo/user cheat roots such as `cheats/<TITLEID>.psv`, `cheats/db/<TITLEID>.psv`, shared `cheats/`, or `ux0/vitacheat/db/`.
+- Only commit third-party cheat files when their license/source permits redistribution. Otherwise commit importer/conversion tooling and user instructions, not the database itself.
+- Games with detected cheat files show a `C` badge in the app list.
+- Runtime shortcuts reserved for Thor testing: `Select + R1` toggles 200% fast-forward, `Select + right-stick down` requests save state, and `Select + right-stick up` requests load state.
+- Save-state/load-state shortcuts are placeholders until CPU, memory, kernel thread, GPU/display, IO, and audio state serialization is implemented and validated together.
 
 ## ADB Thor Testing
 

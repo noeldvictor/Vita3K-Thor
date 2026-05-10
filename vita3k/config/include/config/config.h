@@ -19,6 +19,9 @@
 
 #include <util/system.h>
 
+#include <string>
+#include <vector>
+
 enum ModulesMode {
     AUTOMATIC,
     AUTO_MANUAL,
@@ -47,6 +50,14 @@ enum ScreenshotFormat {
     PNG,
 };
 
+inline std::vector<std::string> default_virtual_cartridge_dirs() {
+#ifdef __ANDROID__
+    return { "/sdcard/roms/psvita", "/storage/emulated/0/roms/psvita" };
+#else
+    return {};
+#endif
+}
+
 // clang-format off
 // Singular options produced in config file
 // Order is code(option_type, option_name, option_default, member_name)
@@ -65,6 +76,7 @@ enum ScreenshotFormat {
     code(bool, "show-gui", false, show_gui)                                                             \
     code(bool, "show-info-bar", false, show_info_bar)                                                   \
     code(bool, "apps-list-grid", false, apps_list_grid)                                                 \
+    code(bool, "scan-virtual-cartridges", true, scan_virtual_cartridges)                                \
     code(bool, "display-system-apps", true, display_system_apps)                                        \
     code(bool, "stretch_the_display_area", false, stretch_the_display_area)                             \
     code(bool, "fullscreen_hd_res_pixel_perfect", false, fullscreen_hd_res_pixel_perfect)               \
@@ -222,6 +234,7 @@ enum ScreenshotFormat {
 #define CONFIG_VECTOR(code)                                                                             \
     code(std::vector<short>, "controller-binds", std::vector<short>{}, controller_binds)                \
     code(std::vector<int>, "controller-led-color", std::vector<int>{}, controller_led_color)            \
+    code(std::vector<std::string>, "virtual-cartridge-dirs", default_virtual_cartridge_dirs(), virtual_cartridge_dirs) \
     code(std::vector<std::string>, "lle-modules", std::vector<std::string>{}, lle_modules)              \
     code(std::vector<uint64_t>, "ime-langs", std::vector<uint64_t>{4}, ime_langs)                       \
     code(std::vector<std::string>, "tracy-advanced-profiling-modules", std::vector<std::string>{}, tracy_advanced_profiling_modules)

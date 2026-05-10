@@ -139,6 +139,8 @@ void pre_load_app(GuiState &gui, EmuEnvState &emuenv, bool live_area, const std:
         update_last_time_app_used(gui, emuenv, app_path);
         open_path("https://Vita3k.org");
     } else {
+        if (const auto app = get_app_index(gui, app_path); app && app->virtual_cartridge)
+            live_area = false;
         if (live_area)
             open_live_area(gui, emuenv, app_path);
         else
@@ -873,6 +875,18 @@ void draw_home_screen(GuiState &gui, EmuEnvState &emuenv) {
                     ImGui::PushStyleColor(ImGuiCol_Text, GUI_COLOR_TEXT_TITLE);
                     ImGui::Button("CC", ImVec2(40.f * VIEWPORT_SCALE.x, 0.f));
                     ImGui::PopStyleColor();
+                }
+
+                if (app.cheats_available) {
+                    const auto badge_size = ImVec2(32.f * VIEWPORT_SCALE.x, 22.f * VIEWPORT_SCALE.y);
+                    const auto badge_pos = emuenv.cfg.apps_list_grid
+                        ? ImVec2(GRID_ICON_POS + ICON_SIZE.x - badge_size.x - (4.f * VIEWPORT_SCALE.x), POS_ICON.y + (4.f * VIEWPORT_SCALE.y))
+                        : ImVec2(POS_ICON.x + ICON_SIZE.x - badge_size.x, POS_ICON.y);
+                    const auto badge_screen_pos = ImVec2(ImGui::GetWindowPos().x + badge_pos.x - ImGui::GetScrollX(), ImGui::GetWindowPos().y + badge_pos.y - ImGui::GetScrollY());
+                    const auto badge_screen_max = ImVec2(badge_screen_pos.x + badge_size.x, badge_screen_pos.y + badge_size.y);
+                    ImGui::GetWindowDrawList()->AddRectFilled(badge_screen_pos, badge_screen_max, IM_COL32(255, 199, 67, 238), 4.f * VIEWPORT_SCALE.x);
+                    const auto text_size = ImGui::CalcTextSize("C");
+                    ImGui::GetWindowDrawList()->AddText(ImVec2(badge_screen_pos.x + (badge_size.x - text_size.x) / 2.f, badge_screen_pos.y + (badge_size.y - text_size.y) / 2.f), IM_COL32(24, 24, 24, 255), "C");
                 }
             } else if (!gui.is_nav_button && (current_selected_app == app.path)) {
                 // When the app is selected but not visible, reset the current selected app index.

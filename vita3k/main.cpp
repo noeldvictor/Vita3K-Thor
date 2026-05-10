@@ -68,6 +68,7 @@
 #include <SDL3/SDL_init.h>
 #include <SDL3/SDL_main.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <thread>
@@ -314,10 +315,12 @@ int main(int argc, char *argv[]) {
         // get the current time & get the time we worked for
         present = std::chrono::system_clock::now();
         std::chrono::duration<double, std::milli> work_time = present - later;
+        const double speed = std::max<uint32_t>(emuenv.display.speed_percent.load(), 1) / 100.0;
+        const double target_frame_time = frame_time / speed;
         // check if we are running faster than ~60fps (16.67ms)
-        if (work_time.count() < frame_time) {
+        if (work_time.count() < target_frame_time) {
             // sleep for delta time.
-            std::chrono::duration<double, std::milli> delta_ms(frame_time - work_time.count());
+            std::chrono::duration<double, std::milli> delta_ms(target_frame_time - work_time.count());
             auto delta_ms_duration = std::chrono::duration_cast<std::chrono::milliseconds>(delta_ms);
             std::this_thread::sleep_for(std::chrono::milliseconds(delta_ms_duration.count()));
         }
@@ -453,7 +456,30 @@ int main(int argc, char *argv[]) {
         return Success;
     }
 
-    const auto APP_INDEX = gui::get_app_index(gui, emuenv.io.app_path);
+    const auto selected_app_path = emuenv.io.app_path;
+    emuenv.app_path = selected_app_path;
+    const auto APP_INDEX = gui::get_app_index(gui, selected_app_path);
+    if (!APP_INDEX) {
+        LOG_ERROR("Selected app {} was not found in the application list.", selected_app_path);
+        return InvalidApplicationPath;
+    }
+
+    if (APP_INDEX->virtual_cartridge) {
+        ContentInfo mounted_content;
+        const auto source_path = fs_utils::utf8_to_path(APP_INDEX->source_path);
+        if (fs::is_directory(source_path))
+            mounted_content = mount_directory_as_cartridge(emuenv, source_path);
+        else
+            mounted_content = mount_archive_as_cartridge(emuenv, source_path);
+
+        if (!mounted_content.state) {
+            app::error_dialog(fmt::format("Failed to mount virtual cartridge {}", APP_INDEX->source_path), emuenv.window.get());
+            return InvalidApplicationPath;
+        }
+
+        emuenv.io.app_path = APP_INDEX->title_id;
+    }
+
     emuenv.app_info.app_version = APP_INDEX->app_ver;
     emuenv.app_info.app_category = APP_INDEX->category;
     emuenv.io.addcont = APP_INDEX->addcont;
@@ -483,7 +509,7 @@ int main(int argc, char *argv[]) {
 
     bgm_player::switch_bgm_state(true);
     gui::init_app_background(gui, emuenv, emuenv.io.app_path);
-    gui::update_last_time_app_used(gui, emuenv, emuenv.io.app_path);
+    gui::update_last_time_app_used(gui, emuenv, emuenv.app_path);
 
     if (!app::late_init(emuenv)) {
         app::error_dialog("Failed to initialize Vita3K", emuenv.window.get());

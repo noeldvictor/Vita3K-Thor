@@ -66,9 +66,13 @@ struct App {
     std::string title;
     std::string title_id;
     std::string path;
+    std::string source_path;
+    std::string source_root;
     time_t last_time{};
     compat::CompatibilityState compat = compat::UNKNOWN;
     bool custom_config = false;
+    bool virtual_cartridge = false;
+    bool cheats_available = false;
 };
 
 struct AppInfo {

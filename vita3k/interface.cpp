@@ -53,7 +53,10 @@
 
 #include <regex>
 
+#include <cstdlib>
+
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_system.h>
 #include <SDL3/SDL_video.h>
 
@@ -439,6 +442,32 @@ ContentInfo mount_archive_as_cartridge(EmuEnvState &emuenv, const fs::path &arch
     return {};
 }
 
+ContentInfo mount_directory_as_cartridge(EmuEnvState &emuenv, const fs::path &content_path) {
+    const auto param_sfo_path = content_path / "sce_sys/param.sfo";
+    vfs::FileBuffer param_sfo;
+    if (!fs_utils::read_data(param_sfo_path, param_sfo)) {
+        LOG_ERROR("Cartridge directory has no sce_sys/param.sfo: {}", content_path);
+        return {};
+    }
+
+    sfo::get_param_info(emuenv.app_info, param_sfo, emuenv.cfg.sys_lang);
+    if (!is_game_card_category(emuenv.app_info.app_category)) {
+        LOG_ERROR("Cartridge mode only supports game app content, got category {}", emuenv.app_info.app_category);
+        return {};
+    }
+
+    if (emuenv.app_info.app_title_id.find_first_of("/\\") != std::string::npos || !is_safe_archive_relative_path(fs::path(emuenv.app_info.app_title_id))) {
+        LOG_ERROR("Unsafe cartridge title id {}", emuenv.app_info.app_title_id);
+        return {};
+    }
+
+    vfs::unmount_current_app_archive(emuenv.io);
+    emuenv.io.app0_host_path = content_path.generic_path();
+
+    LOG_INFO("{} [{}] mounted directly from directory {}", emuenv.app_info.app_title, emuenv.app_info.app_title_id, content_path);
+    return { emuenv.app_info.app_title, emuenv.app_info.app_title_id, emuenv.app_info.app_category, emuenv.app_info.app_content_id, content_path.generic_string(), true };
+}
+
 static std::vector<fs::path> get_contents_path(const fs::path &path) {
     std::vector<fs::path> contents_path;
 
@@ -730,6 +759,85 @@ static void take_screenshot(EmuEnvState &emuenv) {
     }
 }
 
+static void show_runtime_toast(const std::string &message) {
+#ifdef __ANDROID__
+    SDL_ShowAndroidToast(message.c_str(), 0, -1, 0, 0);
+#endif
+    LOG_INFO("{}", message);
+}
+
+static void toggle_fast_forward(EmuEnvState &emuenv) {
+    const bool enable = emuenv.display.speed_percent.load() == 100;
+    emuenv.display.speed_percent.store(enable ? 200 : 100);
+    show_runtime_toast(enable ? "Fast forward 200%" : "Fast forward off");
+}
+
+static void request_save_state(EmuEnvState &emuenv) {
+    show_runtime_toast("Save state hotkey captured; save-state backend is not implemented yet.");
+}
+
+static void request_load_state(EmuEnvState &emuenv) {
+    show_runtime_toast("Load state hotkey captured; save-state backend is not implemented yet.");
+}
+
+static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &event) {
+    static bool fast_forward_latched = false;
+    static bool save_state_latched = false;
+    static bool load_state_latched = false;
+
+    if (event.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+        if ((event.gbutton.button == SDL_GAMEPAD_BUTTON_BACK) || (event.gbutton.button == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER))
+            fast_forward_latched = false;
+        return false;
+    }
+
+    SDL_Gamepad *gamepad = nullptr;
+    if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN)
+        gamepad = SDL_GetGamepadFromID(event.gbutton.which);
+    else if (event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION)
+        gamepad = SDL_GetGamepadFromID(event.gaxis.which);
+
+    if (!gamepad)
+        return false;
+
+    const bool select_down = SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_BACK);
+    if (!select_down) {
+        save_state_latched = false;
+        load_state_latched = false;
+        return false;
+    }
+
+    if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+        const bool r1_down = SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+        if (r1_down && !fast_forward_latched) {
+            fast_forward_latched = true;
+            toggle_fast_forward(emuenv);
+            return true;
+        }
+    }
+
+    if ((event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) && (event.gaxis.axis == SDL_GAMEPAD_AXIS_RIGHTY)) {
+        constexpr Sint16 axis_threshold = 16000;
+        constexpr Sint16 axis_release = 8000;
+        if (event.gaxis.value > axis_threshold && !save_state_latched) {
+            save_state_latched = true;
+            request_save_state(emuenv);
+            return true;
+        }
+        if (event.gaxis.value < -axis_threshold && !load_state_latched) {
+            load_state_latched = true;
+            request_load_state(emuenv);
+            return true;
+        }
+        if (std::abs(event.gaxis.value) < axis_release) {
+            save_state_latched = false;
+            load_state_latched = false;
+        }
+    }
+
+    return false;
+}
+
 bool handle_events(EmuEnvState &emuenv, GuiState &gui) {
     const auto allow_switch_state = !emuenv.io.title_id.empty() && !gui.vita_area.app_close && !gui.vita_area.home_screen && !gui.vita_area.user_management && !gui.configuration_menu.custom_settings_dialog && !gui.configuration_menu.settings_dialog && !gui.controls_menu.controls_dialog && gui::get_sys_apps_state(gui);
 
@@ -830,7 +938,7 @@ bool handle_events(EmuEnvState &emuenv, GuiState &gui) {
         case SDL_EVENT_QUIT:
             bgm_player::destroy_bgm_player();
             if (!emuenv.io.app_path.empty())
-                gui::update_time_app_used(gui, emuenv, emuenv.io.app_path);
+                gui::update_time_app_used(gui, emuenv, gui::get_app_index(gui, emuenv.io.app_path) ? emuenv.io.app_path : emuenv.app_path);
             if (emuenv.audio.adapter)
                 emuenv.audio.switch_state(true);
             emuenv.kernel.exit_delete_all_threads();
@@ -936,6 +1044,9 @@ bool handle_events(EmuEnvState &emuenv, GuiState &gui) {
             break;
 
         case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+            if (handle_runtime_gamepad_hotkey(emuenv, event))
+                continue;
+
             if (!emuenv.kernel.is_threads_paused() && (event.gbutton.button == SDL_GAMEPAD_BUTTON_TOUCHPAD))
                 toggle_touchscreen();
 
@@ -956,7 +1067,13 @@ bool handle_events(EmuEnvState &emuenv, GuiState &gui) {
             break;
 
         case SDL_EVENT_GAMEPAD_BUTTON_UP:
+            handle_runtime_gamepad_hotkey(emuenv, event);
             gui.is_key_locked = false;
+            break;
+
+        case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+            if (handle_runtime_gamepad_hotkey(emuenv, event))
+                continue;
             break;
 
         case SDL_EVENT_GAMEPAD_TOUCHPAD_DOWN:

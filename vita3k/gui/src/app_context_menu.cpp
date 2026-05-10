@@ -567,7 +567,8 @@ static void update_last_time_app_used_helper(GuiState &gui, EmuEnvState &emuenv,
     else // Can't use emplace_back due to Clang 15 for macos
         gui.time_apps[emuenv.io.user_id].push_back({ app, last_time, 0 });
 
-    get_app_index(gui, app)->last_time = last_time;
+    if (auto app_index = get_app_index(gui, app))
+        app_index->last_time = last_time;
     if (gui.users[emuenv.io.user_id].sort_apps_type == LAST_TIME)
         gui.app_selector.is_app_list_sorted = false;
 

@@ -85,7 +85,7 @@ static void draw_emulation_menu(GuiState &gui, EmuEnvState &emuenv) {
         }
         ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.5f, 0.5f));
         if (ImGui::Selectable(app.title.c_str(), false, ImGuiSelectableFlags_SpanAllColumns, ImVec2(0, ICON_SIZE.y)))
-            pre_load_app(gui, emuenv, emuenv.cfg.show_live_area_screen, app.title_id);
+            pre_load_app(gui, emuenv, emuenv.cfg.show_live_area_screen, app.path);
         ImGui::PopStyleVar();
         ImGui::PopID();
         ImGui::PopStyleColor();

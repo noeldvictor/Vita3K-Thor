@@ -27,6 +27,8 @@
 #include <motion/functions.h>
 #include <touch/functions.h>
 
+#include <algorithm>
+
 // Code heavily influenced by PPSSSPP's SceDisplay.cpp
 
 static constexpr int TARGET_FPS = 60;
@@ -75,8 +77,10 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
                 }
             }
         }
+        const auto speed_percent = std::max<uint32_t>(display.speed_percent.load(), 1);
+        const auto target_micro_per_frame = std::max<int64_t>(1, (TARGET_MICRO_PER_FRAME * 100LL) / speed_percent);
         const auto time_ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-        const auto time_left = TARGET_MICRO_PER_FRAME - (time_ms % TARGET_MICRO_PER_FRAME);
+        const auto time_left = target_micro_per_frame - (time_ms % target_micro_per_frame);
         std::this_thread::sleep_for(std::chrono::microseconds(time_left));
     }
 }
