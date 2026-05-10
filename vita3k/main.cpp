@@ -529,35 +529,80 @@ static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &
 
     const ImVec2 viewport_pos(emuenv.logical_viewport_pos.x, emuenv.logical_viewport_pos.y);
     const ImVec2 viewport_size(emuenv.logical_viewport_size.x, emuenv.logical_viewport_size.y);
-    const float width = std::min(760.f, std::max(360.f, viewport_size.x - 48.f));
-    const float height = std::min(620.f, std::max(360.f, viewport_size.y - 48.f));
+    const float available_width = std::max(1.f, viewport_size.x - 16.f);
+    const float available_height = std::max(1.f, viewport_size.y - 16.f);
+    const float width = std::min(available_width, std::min(980.f, std::max(520.f, viewport_size.x * 0.88f)));
+    const float height = std::min(available_height, std::min(760.f, std::max(440.f, viewport_size.y * 0.88f)));
+    ImGui::GetBackgroundDrawList()->AddRectFilled(
+        viewport_pos,
+        ImVec2(viewport_pos.x + viewport_size.x, viewport_pos.y + viewport_size.y),
+        IM_COL32(0, 0, 0, 168));
     ImGui::SetNextWindowPos(ImVec2(viewport_pos.x + (viewport_size.x - width) * 0.5f, viewport_pos.y + (viewport_size.y - height) * 0.5f), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
     ImGui::SetNextWindowFocus();
+    ImGui::SetNextWindowBgAlpha(0.98f);
 
-    constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.f, 20.f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(16.f, 12.f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12.f, 12.f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 24.f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.05f, 0.055f, 0.065f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.09f, 0.11f, 0.96f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.86f, 0.90f, 0.98f, 0.35f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.96f, 0.97f, 0.99f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_TextDisabled, ImVec4(0.68f, 0.71f, 0.78f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.24f, 0.30f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.32f, 0.40f, 0.52f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.24f, 0.50f, 0.62f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.14f, 0.17f, 0.22f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.26f, 0.32f, 0.42f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.25f, 0.47f, 0.58f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.18f, 0.23f, 0.30f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.30f, 0.39f, 0.50f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.24f, 0.50f, 0.62f, 1.0f));
+
+    const auto end_osd_window = []() {
+        ImGui::SetWindowFontScale(1.f);
+        ImGui::End();
+        ImGui::PopStyleColor(14);
+        ImGui::PopStyleVar(6);
+    };
+
+    constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoResize;
     bool open = true;
     if (!ImGui::Begin("Thor OSD", &open, flags)) {
-        ImGui::End();
+        end_osd_window();
         if (!open)
             runtime_osd_set_open(emuenv, false);
         return;
     }
+    ImGui::SetWindowFontScale(1.22f);
     const bool window_appearing = ImGui::IsWindowAppearing();
 
     if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight)) {
         runtime_osd_set_open(emuenv, false);
-        ImGui::End();
+        end_osd_window();
         return;
     }
 
-    ImGui::Text("%s", emuenv.current_app_title.c_str());
+    const uint32_t current_speed = emuenv.display.speed_percent.load();
+    const uint32_t configured_speed = static_cast<uint32_t>(std::clamp(emuenv.cfg.fast_forward_speed_percent, 101, 1000));
+    const std::string quick_state_status = runtime_quick_state_slot_valid(emuenv) ? fmt::format("{} MiB", runtime_quick_state_slot_bytes() / (1024 * 1024)) : "empty";
+
+    ImGui::BeginChild("##runtime_status", ImVec2(0.f, 158.f), true);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.92f, 0.58f, 1.0f));
+    ImGui::TextWrapped("%s", emuenv.current_app_title.empty() ? "Running game" : emuenv.current_app_title.c_str());
+    ImGui::PopStyleColor();
     ImGui::Text("Title ID: %s", emuenv.io.title_id.c_str());
-    ImGui::Text("Speed: %u%%", emuenv.display.speed_percent.load());
+    ImGui::SameLine();
+    ImGui::Text("Speed: %u%%", current_speed);
+    ImGui::SameLine();
+    ImGui::Text("Preset: %u%%", configured_speed);
 #ifdef __ANDROID__
     ImGui::Text("Driver: %s", emuenv.cfg.current_config.custom_driver_name.empty() ? "system" : emuenv.cfg.current_config.custom_driver_name.c_str());
 #endif
-    const std::string quick_state_status = runtime_quick_state_slot_valid(emuenv) ? fmt::format("{} MiB", runtime_quick_state_slot_bytes() / (1024 * 1024)) : "empty";
     ImGui::Text("Quickstate slot 0: %s", quick_state_status.c_str());
     if (emuenv.renderer) {
         bool renderer_trace = emuenv.renderer->renderer_trace_gxm_state;
@@ -566,40 +611,69 @@ static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &
             LOG_INFO("{} Thor renderer GXM trace", renderer_trace ? "Enabled" : "Disabled");
         }
     }
+    ImGui::EndChild();
+
+    const float content_width = ImGui::GetContentRegionAvail().x;
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const ImVec2 action_button(std::max(128.f, (content_width - spacing * 2.f) / 3.f), 52.f);
+    const ImVec2 speed_button(std::max(84.f, (content_width - spacing * 3.f) / 4.f), 52.f);
+
+    ImGui::TextUnformatted("Fast Forward");
+    const auto draw_speed_preset = [&](const char *label, const uint32_t speed_percent) {
+        const bool active = speed_percent == 100 ? current_speed == 100 : current_speed == speed_percent;
+        if (active) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.48f, 0.36f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.16f, 0.62f, 0.46f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.18f, 0.70f, 0.52f, 1.0f));
+        }
+        if (ImGui::Button(label, speed_button)) {
+            if (speed_percent > 100)
+                emuenv.cfg.fast_forward_speed_percent = static_cast<int>(speed_percent);
+            runtime_set_speed_percent(emuenv, speed_percent);
+        }
+        if (active)
+            ImGui::PopStyleColor(3);
+    };
+
+    draw_speed_preset("Off", 100);
+    ImGui::SameLine();
+    draw_speed_preset("2x", 200);
+    ImGui::SameLine();
+    draw_speed_preset("3x", 300);
+    ImGui::SameLine();
+    draw_speed_preset("4x", 400);
+
     ImGui::Separator();
 
-    if (ImGui::Button("Resume", ImVec2(150.f, 0.f)))
+    if (ImGui::Button("Resume", action_button))
         runtime_osd_set_open(emuenv, false);
     if (window_appearing)
         ImGui::SetItemDefaultFocus();
     ImGui::SameLine();
-    if (ImGui::Button(emuenv.kernel.is_threads_paused() ? "Resume Threads" : "Pause", ImVec2(150.f, 0.f))) {
+    if (ImGui::Button(emuenv.kernel.is_threads_paused() ? "Resume Threads" : "Pause", action_button)) {
         if (emuenv.kernel.is_threads_paused())
             emuenv.kernel.resume_threads();
         else
             emuenv.kernel.pause_threads();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Fast Forward", ImVec2(150.f, 0.f)))
-        runtime_toggle_fast_forward(emuenv);
-
-    if (ImGui::Button("Save State 0", ImVec2(150.f, 0.f)))
-        runtime_request_save_state(emuenv);
-    ImGui::SameLine();
-    if (ImGui::Button("Load State 0", ImVec2(150.f, 0.f)))
-        runtime_request_load_state(emuenv);
-    ImGui::SameLine();
-    if (ImGui::Button("Screenshot", ImVec2(150.f, 0.f)))
-        runtime_take_screenshot(emuenv);
-
-    if (ImGui::Button("Settings", ImVec2(150.f, 0.f))) {
+    if (ImGui::Button("Settings", action_button)) {
         gui.configuration_menu.settings_dialog = true;
     }
+
+    if (ImGui::Button("Save State 0", action_button))
+        runtime_request_save_state(emuenv);
     ImGui::SameLine();
+    if (ImGui::Button("Load State 0", action_button))
+        runtime_request_load_state(emuenv);
+    ImGui::SameLine();
+    if (ImGui::Button("Screenshot", action_button))
+        runtime_take_screenshot(emuenv);
+
     ImGui::BeginDisabled();
-    ImGui::Button("Reset Game", ImVec2(150.f, 0.f));
+    ImGui::Button("Reset Game", action_button);
     ImGui::SameLine();
-    ImGui::Button("Close Game", ImVec2(150.f, 0.f));
+    ImGui::Button("Close Game", action_button);
     ImGui::EndDisabled();
 
     ImGui::Separator();
@@ -639,7 +713,7 @@ static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &
 
     if (!open)
         runtime_osd_set_open(emuenv, false);
-    ImGui::End();
+    end_osd_window();
 }
 
 } // namespace

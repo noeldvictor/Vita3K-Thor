@@ -1101,10 +1101,8 @@ void runtime_osd_set_open(EmuEnvState &emuenv, bool open) {
     LOG_INFO("Runtime OSD closed");
 }
 
-void runtime_toggle_fast_forward(EmuEnvState &emuenv) {
-    const bool enable = emuenv.display.speed_percent.load() == 100;
-    const uint32_t configured_speed = static_cast<uint32_t>(std::clamp(emuenv.cfg.fast_forward_speed_percent, 101, 1000));
-    const uint32_t speed_percent = enable ? configured_speed : 100;
+void runtime_set_speed_percent(EmuEnvState &emuenv, uint32_t speed_percent) {
+    speed_percent = std::clamp(speed_percent, 100u, 1000u);
     emuenv.display.speed_percent.store(speed_percent);
     emuenv.kernel.set_speed_percent(speed_percent);
     {
@@ -1114,6 +1112,14 @@ void runtime_toggle_fast_forward(EmuEnvState &emuenv) {
             timer->condvar.notify_all();
         }
     }
+    LOG_INFO("Runtime speed set to {}%", speed_percent);
+}
+
+void runtime_toggle_fast_forward(EmuEnvState &emuenv) {
+    const bool enable = emuenv.display.speed_percent.load() == 100;
+    const uint32_t configured_speed = static_cast<uint32_t>(std::clamp(emuenv.cfg.fast_forward_speed_percent, 101, 1000));
+    const uint32_t speed_percent = enable ? configured_speed : 100;
+    runtime_set_speed_percent(emuenv, speed_percent);
     LOG_INFO("Fast forward {}", enable ? fmt::format("{}%", configured_speed) : "off");
 }
 

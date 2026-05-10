@@ -54,10 +54,10 @@ This fork keeps its differences from stock Vita3K visible and testable:
 - Archive introspection understands common nonstandard Vita ZIP layouts, including `app/<TITLEID>`, `patch/<TITLEID>`, and `rePatch/<TITLEID>` overlays used by translated game packs.
 - Direct ZIP cartridge mode now caches very large deflated archive members, such as multi-gigabyte `.psarc` files, to app-local storage on first open instead of inflating them into RAM every time. This keeps large games like `PCSG00490`/Sora no Kiseki the 3rd Evolution from blowing up Android native heap during startup.
 - Android virtual-cartridge scanning includes common internal and removable SD card roots such as `/storage/<card>/Roms/psvita`.
-- The runtime OSD opens from short Back while a game is running, supports controller navigation, and exposes pause/resume, save/load quickstate slot 0, fast-forward, screenshots, renderer trace, and cheat toggles.
+- The runtime OSD opens from short Back while a game is running, supports controller navigation, uses a high-contrast readable in-game panel, and exposes pause/resume, save/load quickstate slot 0, fast-forward presets, screenshots, renderer trace, and cheat toggles.
 - Long Back maps to the Vita PS/Home path for returning to the LiveArea/home flow instead of opening the OSD.
 - Runtime hotkeys are tuned for Thor: `Select + R1` fast-forward toggle, `Select + right-stick down` save quickstate, and `Select + right-stick up` load quickstate.
-- Fast-forward defaults to 200% and adjusts display/vblank pacing plus guest kernel clock/wait timing together.
+- Fast-forward defaults to 200%, can be switched from the OSD between Off, 2x, 3x, and 4x, and adjusts display/vblank pacing plus guest kernel clock/wait timing together.
 - Experimental same-session quickstate support snapshots guest CPU contexts and allocated memory pages for slot 0. It is not yet a durable full emulator save-state format.
 - VitaCheat `.psv` files are detected by title ID from repo, app storage, emulated `ux0/vitacheat`, and Android SD-card cheat roots. The OSD can show loaded cheats and toggle individual entries, while unsupported VitaCheat code types fail closed.
 - `tools/sync_vitacheat_db.ps1` can clone/update a third-party VitaCheat database into ignored local scratch storage and push it to the Thor SD card without committing unlicensed cheat files.
