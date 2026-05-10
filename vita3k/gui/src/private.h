@@ -46,6 +46,7 @@ void draw_main_menu_bar(GuiState &gui, EmuEnvState &emuenv);
 void draw_firmware_install_dialog(GuiState &gui, EmuEnvState &emuenv);
 void draw_pkg_install_dialog(GuiState &gui, EmuEnvState &emuenv);
 void draw_archive_install_dialog(GuiState &gui, EmuEnvState &emuenv);
+void draw_archive_cartridge_dialog(GuiState &gui, EmuEnvState &emuenv);
 void draw_license_install_dialog(GuiState &gui, EmuEnvState &emuenv);
 void draw_threads_dialog(GuiState &gui, EmuEnvState &emuenv);
 void draw_thread_details_dialog(GuiState &gui, EmuEnvState &emuenv);

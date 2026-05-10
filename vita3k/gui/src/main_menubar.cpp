@@ -48,6 +48,12 @@ static void draw_file_menu(GuiState &gui, EmuEnvState &emuenv) {
         ImGui::MenuItem(lang["install_firmware"].c_str(), nullptr, &gui.file_menu.firmware_install_dialog);
         ImGui::MenuItem(lang["install_pkg"].c_str(), nullptr, &gui.file_menu.pkg_install_dialog);
         ImGui::MenuItem(lang["install_zip"].c_str(), nullptr, &gui.file_menu.archive_install_dialog);
+        const bool can_launch_cartridge = emuenv.io.app_path.empty() && emuenv.io.title_id.empty();
+        if (!can_launch_cartridge)
+            ImGui::BeginDisabled();
+        ImGui::MenuItem(lang["play_zip_cartridge"].c_str(), nullptr, &gui.file_menu.archive_cartridge_dialog);
+        if (!can_launch_cartridge)
+            ImGui::EndDisabled();
         ImGui::MenuItem(lang["install_license"].c_str(), nullptr, &gui.file_menu.license_install_dialog);
         ImGui::Separator();
         if (ImGui::MenuItem(lang["exit"].c_str())) {

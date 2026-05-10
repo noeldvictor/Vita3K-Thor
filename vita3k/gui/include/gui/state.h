@@ -130,6 +130,7 @@ struct FileMenuState {
     bool firmware_install_dialog = false;
     bool pkg_install_dialog = false;
     bool archive_install_dialog = false;
+    bool archive_cartridge_dialog = false;
     bool license_install_dialog = false;
 };
 

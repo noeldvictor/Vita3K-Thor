@@ -549,7 +549,7 @@ void draw_home_screen(GuiState &gui, EmuEnvState &emuenv) {
         gui.vita_area.information_bar = true;
 
     const auto config_dialog = gui.configuration_menu.custom_settings_dialog || gui.configuration_menu.settings_dialog || gui.controls_menu.controls_dialog;
-    const auto install_dialog = gui.file_menu.archive_install_dialog || gui.file_menu.firmware_install_dialog || gui.file_menu.pkg_install_dialog;
+    const auto install_dialog = gui.file_menu.archive_install_dialog || gui.file_menu.archive_cartridge_dialog || gui.file_menu.firmware_install_dialog || gui.file_menu.pkg_install_dialog;
     if (!config_dialog && !install_dialog && !gui.vita_area.app_close && !gui.vita_area.app_information && !gui.help_menu.about_dialog && !gui.help_menu.welcome_dialog && !gui.is_nav_button) {
         if (ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) || ImGui::IsAnyItemActive() || ImGui::IsAnyItemHovered())
             last_time["start"] = 0;

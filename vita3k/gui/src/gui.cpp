@@ -946,6 +946,8 @@ void draw_vita_area(GuiState &gui, EmuEnvState &emuenv) {
     // Draw install dialogs
     if (gui.file_menu.archive_install_dialog)
         draw_archive_install_dialog(gui, emuenv);
+    if (gui.file_menu.archive_cartridge_dialog)
+        draw_archive_cartridge_dialog(gui, emuenv);
     if (gui.file_menu.firmware_install_dialog)
         draw_firmware_install_dialog(gui, emuenv);
     if (gui.file_menu.license_install_dialog)

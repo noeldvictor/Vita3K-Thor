@@ -108,6 +108,7 @@ struct LangState {
             { "install_firmware", "Install Firmware" },
             { "install_pkg", "Install .pkg" },
             { "install_zip", "Install .zip, .vpk" },
+            { "play_zip_cartridge", "Play ZIP as Cartridge" },
             { "install_license", "Install License" },
             { "exit", "Exit" }
         };
@@ -429,6 +430,14 @@ struct LangState {
             { "failed_install_archive", "Failed to install {} archive(s) contents:" },
             { "not_compatible_content", "No compatible content found in {} archive(s):" },
             { "delete_archive", "Delete archive?" }
+        };
+        std::map<std::string, std::string> archive_cartridge = {
+            { "title", "Play ZIP as Cartridge" },
+            { "mounting", "Mounting virtual cartridge..." },
+            { "mounted", "Virtual cartridge ready:" },
+            { "failed", "Could not mount this archive as a virtual cartridge." },
+            { "start", "Start Cartridge" },
+            { "description", "This keeps the app out of the installed library and uses a session cartridge cache." }
         };
         std::map<std::string, std::string> license_install = {
             { "successed_install_license", "Successfully installed license." },

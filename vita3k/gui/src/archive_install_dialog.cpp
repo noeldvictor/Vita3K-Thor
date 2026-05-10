@@ -21,6 +21,7 @@
 #include <dialog/state.h>
 #include <gui/functions.h>
 #include <host/dialog/filesystem.h>
+#include <io/state.h>
 #include <packages/sfo.h>
 
 #include <util/string_utils.h>
@@ -304,6 +305,153 @@ void draw_archive_install_dialog(GuiState &gui, EmuEnvState &emuenv) {
         }
         }
     }
+    ImGui::ScrollWhenDragging();
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::End();
+}
+
+void draw_archive_cartridge_dialog(GuiState &gui, EmuEnvState &emuenv) {
+    static std::string title;
+    static fs::path archive_path{};
+    static ContentInfo content{};
+    static std::string status;
+    static std::atomic<float> progress(0.f);
+    static std::mutex mount_mutex;
+
+    enum class State {
+        UNDEFINED,
+        MOUNTING,
+        FINISHED
+    };
+    static State state = State::UNDEFINED;
+
+    std::lock_guard<std::mutex> lock(mount_mutex);
+
+    auto &lang = gui.lang.install_dialog.archive_cartridge;
+    auto &common = emuenv.common_dialog.lang.common;
+
+    const ImVec2 display_size(emuenv.logical_viewport_size.x, emuenv.logical_viewport_size.y);
+    const auto RES_SCALE = ImVec2(emuenv.gui_scale.x, emuenv.gui_scale.y);
+    const auto SCALE = ImVec2(RES_SCALE.x * emuenv.manual_dpi_scale, RES_SCALE.y * emuenv.manual_dpi_scale);
+    const auto BUTTON_SIZE = ImVec2(210.f * SCALE.x, 45.f * SCALE.y);
+    const auto WINDOW_SIZE = ImVec2(616.f * SCALE.x, 320.f * SCALE.y);
+    const auto PROGRESS_BAR_WIDTH = 502.f * SCALE.x;
+    const auto PROGRESS_BAR_POS = (WINDOW_SIZE.x / 2) - (PROGRESS_BAR_WIDTH / 2.f);
+
+    const auto reset_state = [&](const bool keep_mount) {
+        if (!keep_mount && content.state && !emuenv.io.app0_host_path.empty()) {
+            fs::remove_all(emuenv.io.app0_host_path);
+            emuenv.io.app0_host_path.clear();
+        }
+
+        archive_path.clear();
+        content = {};
+        status.clear();
+        progress = 0.f;
+        state = State::UNDEFINED;
+        gui.file_menu.archive_cartridge_dialog = false;
+    };
+
+    ImGui::SetNextWindowPos(ImVec2(emuenv.logical_viewport_pos.x, emuenv.logical_viewport_pos.y), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(display_size);
+    ImGui::Begin("archive_cartridge", &gui.file_menu.archive_cartridge_dialog, ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::SetNextWindowPos(ImVec2(emuenv.logical_viewport_pos.x + (display_size.x / 2.f) - (WINDOW_SIZE.x / 2.f), emuenv.logical_viewport_pos.y + (display_size.y / 2.f) - (WINDOW_SIZE.y / 2.f)), ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.f * SCALE.x);
+    ImGui::BeginChild("##archive_cartridge_child", WINDOW_SIZE, ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysAutoResize | ImGuiChildFlags_AutoResizeX | ImGuiChildFlags_AutoResizeY, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings);
+    const auto POS_BUTTON = (ImGui::GetWindowWidth() / 2.f) - (BUTTON_SIZE.x / 2.f);
+    ImGui::SetWindowFontScale(RES_SCALE.x);
+
+    title = lang["title"];
+    TextColoredCentered(GUI_COLOR_TEXT_MENUBAR, title.c_str());
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    switch (state) {
+    case State::UNDEFINED: {
+        host::dialog::filesystem::Result result = host::dialog::filesystem::Result::CANCEL;
+        std::vector<host::dialog::filesystem::FileFilter> file_filters = {
+            { "PlayStation Vita game archive", { "zip", "vpk" } },
+            { "PlayStation Vita commercial software package (NoNpDrm/FAGDec)", { "zip" } },
+            { "PlayStation Vita homebrew software package", { "vpk" } },
+        };
+
+        result = host::dialog::filesystem::open_file(archive_path, file_filters);
+        if (result == host::dialog::filesystem::Result::SUCCESS) {
+            progress = 0.f;
+            status = lang["mounting"];
+            state = State::MOUNTING;
+
+            std::thread mounting([&emuenv]() {
+                const auto progress_callback = [](const ArchiveContents &progress_value) {
+                    if (progress_value.progress.has_value())
+                        progress = *progress_value.progress;
+                };
+
+                const auto mounted_content = mount_archive_as_cartridge(emuenv, archive_path, progress_callback);
+                std::lock_guard<std::mutex> lock(mount_mutex);
+                content = mounted_content;
+                status = mounted_content.state ? "" : "Could not mount archive as cartridge.";
+                state = State::FINISHED;
+            });
+            mounting.detach();
+        } else {
+            if (result == host::dialog::filesystem::Result::ERROR)
+                LOG_CRITICAL("Error initializing file dialog: {}", host::dialog::filesystem::get_error());
+            reset_state(false);
+        }
+        break;
+    }
+    case State::MOUNTING: {
+        ImGui::SetCursorPos(ImVec2(58.f * SCALE.x, ImGui::GetCursorPosY() + (28.f * SCALE.y)));
+        ImGui::TextWrapped("%s", fs_utils::path_to_utf8(archive_path.filename()).c_str());
+        ImGui::SetCursorPos(ImVec2(58.f * SCALE.x, ImGui::GetCursorPosY() + (20.f * SCALE.y)));
+        ImGui::TextColored(GUI_COLOR_TEXT, "%s", status.c_str());
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, GUI_PROGRESS_BAR);
+        ImGui::SetCursorPos(ImVec2(PROGRESS_BAR_POS, ImGui::GetCursorPosY() + (24.f * SCALE.y)));
+        ImGui::ProgressBar(progress / 100.f, ImVec2(PROGRESS_BAR_WIDTH, 15.f * SCALE.y), "");
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (8.f * SCALE.y));
+        TextColoredCentered(GUI_COLOR_TEXT, std::to_string(static_cast<uint32_t>(progress)).append("%").c_str());
+        ImGui::PopStyleColor();
+        break;
+    }
+    case State::FINISHED: {
+        ImGui::SetCursorPos(ImVec2(58.f * SCALE.x, ImGui::GetCursorPosY() + (24.f * SCALE.y)));
+        if (content.state) {
+            ImGui::TextColored(GUI_COLOR_TEXT_TITLE, "%s", lang["mounted"].c_str());
+            ImGui::Spacing();
+            ImGui::TextWrapped("%s [%s]", content.title.c_str(), content.title_id.c_str());
+            ImGui::Spacing();
+            ImGui::TextWrapped("%s", lang["description"].c_str());
+        } else {
+            ImGui::TextColored(GUI_COLOR_TEXT_TITLE, "%s", lang["failed"].c_str());
+            ImGui::Spacing();
+            ImGui::TextWrapped("%s", status.c_str());
+        }
+
+        ImGui::SetCursorPos(ImVec2((WINDOW_SIZE.x / 2.f) - BUTTON_SIZE.x - (10.f * SCALE.x), WINDOW_SIZE.y - BUTTON_SIZE.y - (18.f * SCALE.y)));
+        if (ImGui::Button(common["cancel"].c_str(), BUTTON_SIZE))
+            reset_state(false);
+
+        if (content.state) {
+            ImGui::SameLine(0, 20.f * SCALE.x);
+            if (ImGui::Button(lang["start"].c_str(), BUTTON_SIZE)) {
+                emuenv.app_info.app_category = content.category;
+                emuenv.app_info.app_title_id = content.title_id;
+                emuenv.app_info.app_content_id = content.content_id;
+                emuenv.io.app_path = content.title_id;
+                init_user_app(gui, emuenv, content.title_id);
+                gui.vita_area.home_screen = false;
+                gui.vita_area.live_area_screen = false;
+                gui.vita_area.information_bar = false;
+                reset_state(true);
+            }
+        }
+        break;
+    }
+    }
+
     ImGui::ScrollWhenDragging();
     ImGui::EndChild();
     ImGui::PopStyleVar();
