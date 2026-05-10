@@ -437,7 +437,7 @@ struct LangState {
             { "mounted", "Virtual cartridge ready:" },
             { "failed", "Could not mount this archive as a virtual cartridge." },
             { "start", "Start Cartridge" },
-            { "description", "This keeps the app out of the installed library and uses a session cartridge cache." }
+            { "description", "This keeps the app out of the installed library and reads app0: directly from the selected archive." }
         };
         std::map<std::string, std::string> license_install = {
             { "successed_install_license", "Successfully installed license." },

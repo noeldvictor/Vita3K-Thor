@@ -28,6 +28,8 @@
 #include <util/preprocessor.h>
 #include <util/string_utils.h>
 
+#include <miniz.h>
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -36,10 +38,14 @@
 #include <unistd.h>
 #endif
 
+#include <algorithm>
 #include <cassert>
+#include <ctime>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <string>
+#include <vector>
 
 #if defined(__aarch64__) && defined(__APPLE__)
 #define stat64 stat
@@ -64,6 +70,153 @@ constexpr bool log_file_stat = false;
 
 namespace vfs {
 
+static size_t write_to_buffer(void *pOpaque, mz_uint64 file_ofs, const void *pBuf, size_t n) {
+    FileBuffer *const buffer = static_cast<FileBuffer *>(pOpaque);
+    assert(file_ofs == buffer->size());
+    const uint8_t *const first = static_cast<const uint8_t *>(pBuf);
+    const uint8_t *const last = &first[n];
+    buffer->insert(buffer->end(), first, last);
+
+    return n;
+}
+
+static const char *miniz_get_error(mz_zip_archive *zip) {
+    return mz_zip_get_error_string(mz_zip_get_last_error(zip));
+}
+
+static std::string normalize_archive_path(const fs::path &path) {
+    auto normalized = path.generic_path().string();
+    string_utils::replace(normalized, "\\", "/");
+
+    while (!normalized.empty() && normalized.front() == '/')
+        normalized.erase(normalized.begin());
+    while (!normalized.empty() && normalized.back() == '/')
+        normalized.pop_back();
+
+    return normalized;
+}
+
+static bool is_safe_archive_path(const std::string &path) {
+    if (path.empty())
+        return true;
+
+    const fs::path candidate{ path };
+    if (candidate.is_absolute())
+        return false;
+
+    for (const auto &part : candidate) {
+        const auto part_str = part.generic_string();
+        if (part_str == "..")
+            return false;
+    }
+
+    return true;
+}
+
+static std::string parent_path_of(const std::string &path) {
+    const auto slash = path.find_last_of('/');
+    if (slash == std::string::npos)
+        return {};
+
+    return path.substr(0, slash);
+}
+
+static std::string filename_of(const std::string &path) {
+    const auto slash = path.find_last_of('/');
+    if (slash == std::string::npos)
+        return path;
+
+    return path.substr(slash + 1);
+}
+
+static void add_archive_directory(IOState::ArchiveMount &mount, const std::string &dir) {
+    if (dir.empty()) {
+        mount.dir_children.try_emplace("");
+        return;
+    }
+
+    const auto parent = parent_path_of(dir);
+    add_archive_directory(mount, parent);
+
+    auto &parent_children = mount.dir_children[parent];
+    parent_children.insert(filename_of(dir));
+    mount.dir_children.try_emplace(dir);
+
+    if (!mount.entries.contains(dir)) {
+        mount.entries[dir] = { {}, 0, true };
+        mount.lower_to_path[string_utils::tolower(dir)] = dir;
+    }
+}
+
+static const IOState::ArchiveMount::Entry *find_archive_entry(const IOState::ArchiveMount &mount, const std::string &relative_path) {
+    const auto normalized = normalize_archive_path(relative_path);
+    if (normalized.empty()) {
+        static const IOState::ArchiveMount::Entry root_entry{ {}, 0, true };
+        return &root_entry;
+    }
+
+    const auto exact = mount.entries.find(normalized);
+    if (exact != mount.entries.end())
+        return &exact->second;
+
+    const auto lower = mount.lower_to_path.find(string_utils::tolower(normalized));
+    if (lower == mount.lower_to_path.end())
+        return nullptr;
+
+    const auto entry = mount.entries.find(lower->second);
+    return entry != mount.entries.end() ? &entry->second : nullptr;
+}
+
+static bool read_archive_file(const IOState::ArchiveMount &mount, const std::string &relative_path, FileBuffer &buf) {
+    const auto entry = find_archive_entry(mount, relative_path);
+    if (!entry || entry->directory)
+        return false;
+
+    FILE *archive_file = FOPEN(mount.archive_path.c_str(), "rb");
+    if (!archive_file) {
+        LOG_ERROR("Failed to open archive {}", mount.archive_path);
+        return false;
+    }
+
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_cfile(&zip, archive_file, 0, 0)) {
+        LOG_ERROR("miniz error reading archive {}: {}", mount.archive_path, miniz_get_error(&zip));
+        fclose(archive_file);
+        return false;
+    }
+
+    buf.clear();
+    const bool extracted = mz_zip_reader_extract_file_to_callback(&zip, entry->archive_name.c_str(), &write_to_buffer, &buf, 0);
+    if (!extracted)
+        LOG_ERROR("miniz error extracting {} from {}: {}", entry->archive_name, mount.archive_path, miniz_get_error(&zip));
+
+    mz_zip_reader_end(&zip);
+    fclose(archive_file);
+    return extracted;
+}
+
+static std::vector<std::string> list_archive_dir(const IOState::ArchiveMount &mount, const std::string &relative_path) {
+    const auto normalized = normalize_archive_path(relative_path);
+    std::vector<std::string> entries;
+
+    const auto dir = mount.dir_children.find(normalized);
+    if (dir == mount.dir_children.end()) {
+        const auto lower = mount.lower_to_path.find(string_utils::tolower(normalized));
+        if (lower == mount.lower_to_path.end())
+            return entries;
+
+        const auto lower_dir = mount.dir_children.find(lower->second);
+        if (lower_dir == mount.dir_children.end())
+            return entries;
+
+        entries.assign(lower_dir->second.begin(), lower_dir->second.end());
+        return entries;
+    }
+
+    entries.assign(dir->second.begin(), dir->second.end());
+    return entries;
+}
+
 static fs::path get_app_file_path(const IOState &io, const fs::path &pref_path, const fs::path &vfs_file_path) {
     if (!io.app0_host_path.empty())
         return (io.app0_host_path / vfs_file_path).generic_path();
@@ -81,7 +234,141 @@ bool read_app_file(FileBuffer &buf, const fs::path &pref_path, const std::string
 }
 
 bool read_current_app_file(FileBuffer &buf, const IOState &io, const fs::path &pref_path, const fs::path &vfs_file_path) {
+    if (io.app0_archive.mounted())
+        return read_archive_file(io.app0_archive, normalize_archive_path(vfs_file_path), buf);
+
     return fs_utils::read_data(get_app_file_path(io, pref_path, vfs_file_path), buf);
+}
+
+bool mount_current_app_archive(IOState &io, const fs::path &archive_path, const std::string &content_root) {
+    FILE *archive_file = FOPEN(archive_path.c_str(), "rb");
+    if (!archive_file) {
+        LOG_ERROR("Failed to open current app archive {}", archive_path);
+        return false;
+    }
+
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_cfile(&zip, archive_file, 0, 0)) {
+        LOG_ERROR("miniz error reading current app archive {}: {}", archive_path, miniz_get_error(&zip));
+        fclose(archive_file);
+        return false;
+    }
+
+    IOState::ArchiveMount mount;
+    mount.archive_path = archive_path;
+    mount.content_root = content_root;
+    add_archive_directory(mount, "");
+
+    const auto normalized_root = normalize_archive_path(content_root);
+    const auto root_prefix = normalized_root.empty() ? std::string{} : normalized_root + "/";
+    const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
+
+    for (mz_uint i = 0; i < num_files; i++) {
+        mz_zip_archive_file_stat file_stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &file_stat))
+            continue;
+
+        const std::string archive_name = file_stat.m_filename;
+        if (!root_prefix.empty() && !archive_name.starts_with(root_prefix))
+            continue;
+
+        auto relative_path = root_prefix.empty() ? archive_name : archive_name.substr(root_prefix.size());
+        relative_path = normalize_archive_path(relative_path);
+        if (!is_safe_archive_path(relative_path)) {
+            LOG_WARN("Skipping unsafe app archive entry {}", archive_name);
+            continue;
+        }
+
+        if (relative_path.empty())
+            continue;
+
+        const bool is_dir = mz_zip_reader_is_file_a_directory(&zip, i) || archive_name.ends_with("/");
+        const auto parent = parent_path_of(relative_path);
+        add_archive_directory(mount, parent);
+
+        mount.dir_children[parent].insert(filename_of(relative_path));
+        mount.entries[relative_path] = { archive_name, file_stat.m_uncomp_size, is_dir };
+        mount.lower_to_path[string_utils::tolower(relative_path)] = relative_path;
+
+        if (is_dir)
+            add_archive_directory(mount, relative_path);
+    }
+
+    mz_zip_reader_end(&zip);
+    fclose(archive_file);
+
+    if (!find_archive_entry(mount, "sce_sys/param.sfo")) {
+        LOG_ERROR("Current app archive {} has no sce_sys/param.sfo under {}", archive_path, content_root);
+        return false;
+    }
+
+    io.app0_archive = std::move(mount);
+    io.app0_host_path.clear();
+    LOG_INFO("Mounted app0 directly from archive {} root {}", archive_path, content_root);
+    return true;
+}
+
+void unmount_current_app_archive(IOState &io) {
+    io.app0_archive.clear();
+}
+
+bool current_app_archive_mounted(const IOState &io) {
+    return io.app0_archive.mounted();
+}
+
+bool current_app_file_exists(const IOState &io, const fs::path &vfs_file_path) {
+    if (io.app0_archive.mounted()) {
+        const auto entry = find_archive_entry(io.app0_archive, normalize_archive_path(vfs_file_path));
+        return entry && !entry->directory;
+    }
+
+    if (!io.app0_host_path.empty())
+        return fs::is_regular_file((io.app0_host_path / vfs_file_path).generic_path());
+
+    return false;
+}
+
+bool current_app_directory_exists(const IOState &io, const fs::path &vfs_dir_path) {
+    if (io.app0_archive.mounted()) {
+        const auto entry = find_archive_entry(io.app0_archive, normalize_archive_path(vfs_dir_path));
+        return entry && entry->directory;
+    }
+
+    if (!io.app0_host_path.empty())
+        return fs::is_directory((io.app0_host_path / vfs_dir_path).generic_path());
+
+    return false;
+}
+
+SceOff current_app_file_size(const IOState &io, const fs::path &vfs_file_path) {
+    if (io.app0_archive.mounted()) {
+        const auto entry = find_archive_entry(io.app0_archive, normalize_archive_path(vfs_file_path));
+        return entry && !entry->directory ? static_cast<SceOff>(entry->size) : 0;
+    }
+
+    if (!io.app0_host_path.empty()) {
+        const auto file_path = (io.app0_host_path / vfs_file_path).generic_path();
+        if (fs::is_regular_file(file_path))
+            return static_cast<SceOff>(fs::file_size(file_path));
+    }
+
+    return 0;
+}
+
+std::vector<std::string> list_current_app_directory(const IOState &io, const fs::path &vfs_dir_path) {
+    if (io.app0_archive.mounted())
+        return list_archive_dir(io.app0_archive, normalize_archive_path(vfs_dir_path));
+
+    std::vector<std::string> entries;
+    if (!io.app0_host_path.empty()) {
+        const auto dir_path = (io.app0_host_path / vfs_dir_path).generic_path();
+        if (fs::is_directory(dir_path)) {
+            for (const auto &entry : fs::directory_iterator(dir_path))
+                entries.push_back(entry.path().filename().generic_string());
+        }
+    }
+
+    return entries;
 }
 
 SceSize get_directory_used_size(const VitaIoDevice device, const std::string &vfs_path, const fs::path &pref_path) {
@@ -202,7 +489,7 @@ fs::path find_in_cache(IOState &io, const std::string &system_path) {
 }
 
 static bool is_current_app_path(const IOState &io, const VitaIoDevice device, const fs::path &translated_path) {
-    if (io.app0_host_path.empty() || device != VitaIoDevice::ux0)
+    if ((io.app0_host_path.empty() && !vfs::current_app_archive_mounted(io)) || device != VitaIoDevice::ux0)
         return false;
 
     const auto translated = translated_path.generic_path().string();
@@ -210,10 +497,25 @@ static bool is_current_app_path(const IOState &io, const VitaIoDevice device, co
     return translated == app0 || translated.starts_with(app0 + "/");
 }
 
+static std::optional<fs::path> current_app_relative_path(const IOState &io, const VitaIoDevice device, const fs::path &translated_path) {
+    if (!is_current_app_path(io, device, translated_path))
+        return std::nullopt;
+
+    const auto translated = translated_path.generic_path().string();
+    const auto app0 = fs::path(io.device_paths.app0).generic_path().string();
+    if (translated == app0)
+        return fs::path{};
+
+    return fs::path(translated.substr(app0.size() + 1)).generic_path();
+}
+
 static fs::path construct_io_path(const IOState &io, const VitaIoDevice device, const fs::path &translated_path, const fs::path &pref_path) {
     if (is_current_app_path(io, device, translated_path)) {
         const auto translated = translated_path.generic_path().string();
         const auto app0 = fs::path(io.device_paths.app0).generic_path().string();
+        if (vfs::current_app_archive_mounted(io))
+            return fs::path(io.app0_archive.archive_path.generic_string() + "#" + translated.substr(std::min(translated.size(), app0.size() + 1))).generic_path();
+
         if (translated == app0)
             return io.app0_host_path.generic_path();
 
@@ -222,6 +524,8 @@ static fs::path construct_io_path(const IOState &io, const VitaIoDevice device, 
 
     return device::construct_emulated_path(device, translated_path, pref_path, io.redirect_stdio);
 }
+
+static void fill_virtual_stat(SceIoStat *statp, bool directory, SceOff size);
 
 std::string translate_path(const char *path, VitaIoDevice &device, const IOState::DevicePaths &device_paths) {
     auto relative_path = device::remove_duplicate_device(path, device);
@@ -346,6 +650,29 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
     if (is_current_app_path(io, device, translated_path) && can_write(flags)) {
         LOG_ERROR("Cannot open read-only cartridge path for writing: {}", path);
         return IO_ERROR(SCE_ERROR_ERRNO_EOPNOTSUPP);
+    }
+
+    const auto app_relative = current_app_relative_path(io, device, translated_path);
+    if (app_relative.has_value() && vfs::current_app_archive_mounted(io)) {
+        if (!vfs::current_app_file_exists(io, *app_relative)) {
+            if (vfs::current_app_directory_exists(io, *app_relative))
+                LOG_ERROR("Cannot open archive directory as file: {}", path);
+            else
+                LOG_ERROR("Missing file in archive app0: {} ({})", path, app_relative->generic_string());
+            return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
+        }
+
+        vfs::FileBuffer buffer;
+        if (!vfs::read_current_app_file(buffer, io, pref_path, *app_relative))
+            return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
+
+        const auto normalized_path = device::construct_normalized_path(device, translated_path);
+        FileStats f{ path, normalized_path, construct_io_path(io, device, translated_path, pref_path), flags, buffer };
+        const auto fd = io.next_fd++;
+        io.std_files.emplace(fd, f);
+
+        LOG_TRACE_IF(log_file_op, "{}: Opening archive file {} ({}), fd: {}", export_name, path, normalized_path, log_hex(fd));
+        return fd;
     }
 
     auto system_path = construct_io_path(io, device, translated_path, pref_path);
@@ -532,6 +859,24 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &p
         }
 
         const auto translated_path = translate_path(file, device, io.device_paths);
+        const auto app_relative = current_app_relative_path(io, device, translated_path);
+        if (app_relative.has_value() && vfs::current_app_archive_mounted(io)) {
+            if (vfs::current_app_file_exists(io, *app_relative)) {
+                fill_virtual_stat(statp, false, vfs::current_app_file_size(io, *app_relative));
+                LOG_TRACE_IF(log_file_op && log_file_stat, "{}: Statting archive file: {} ({})", export_name, file, device::construct_normalized_path(device, translated_path));
+                return 0;
+            }
+
+            if (vfs::current_app_directory_exists(io, *app_relative)) {
+                fill_virtual_stat(statp, true, 0);
+                LOG_TRACE_IF(log_file_op && log_file_stat, "{}: Statting archive directory: {} ({})", export_name, file, device::construct_normalized_path(device, translated_path));
+                return 0;
+            }
+
+            LOG_ERROR("Missing archive path {} (target path: {})", app_relative->generic_string(), file);
+            return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
+        }
+
         file_path = construct_io_path(io, device, translated_path, pref_path);
 
         if (!fs::exists(file_path)) {
@@ -562,6 +907,12 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &p
         const auto fd_file = io.std_files.find(fd);
         if (fd_file == io.std_files.end())
             return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
+
+        if (fd_file->second.is_memory_file()) {
+            fill_virtual_stat(statp, false, fd_file->second.size());
+            LOG_TRACE_IF(log_file_op && log_file_stat, "{}: Statting archive fd: {}", export_name, log_hex(fd));
+            return 0;
+        }
 
         file_path = fd_file->second.get_system_location();
         LOG_TRACE_IF(log_file_op && log_file_stat, "{}: Statting fd: {}", export_name, log_hex(fd));
@@ -610,6 +961,25 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &p
     __RtcTicksToPspTime(&statp->st_ctime, creation_time_ticks);
 
     return 0;
+}
+
+static void fill_virtual_stat(SceIoStat *statp, const bool directory, const SceOff size) {
+    const auto now_ticks = RTC_OFFSET + static_cast<uint64_t>(std::time(nullptr)) * VITA_CLOCKS_PER_SEC;
+
+    statp->st_mode = SCE_S_IRUSR | SCE_S_IRGRP | SCE_S_IROTH | SCE_S_IXUSR | SCE_S_IXGRP | SCE_S_IXOTH;
+    statp->st_size = size;
+
+    if (directory) {
+        statp->st_attr = SCE_SO_IFDIR;
+        statp->st_mode |= SCE_S_IFDIR;
+    } else {
+        statp->st_attr = SCE_SO_IFREG;
+        statp->st_mode |= SCE_S_IFREG;
+    }
+
+    __RtcTicksToPspTime(&statp->st_atime, now_ticks);
+    __RtcTicksToPspTime(&statp->st_mtime, now_ticks);
+    __RtcTicksToPspTime(&statp->st_ctime, now_ticks);
 }
 
 int stat_file_by_fd(IOState &io, const SceUID fd, SceIoStat *statp, const fs::path &pref_path, const char *export_name) {
@@ -724,6 +1094,22 @@ SceUID open_dir(IOState &io, const char *path, const fs::path &pref_path, const 
     auto device_for_icase = device;
     const auto translated_path = translate_path(path, device, io.device_paths);
 
+    const auto app_relative = current_app_relative_path(io, device, translated_path);
+    if (app_relative.has_value() && vfs::current_app_archive_mounted(io)) {
+        if (!vfs::current_app_directory_exists(io, *app_relative)) {
+            LOG_ERROR("Archive directory does not exist at app0:{} (target path: {})", app_relative->generic_string(), path);
+            return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
+        }
+
+        const auto normalized = device::construct_normalized_path(device, translated_path);
+        const DirStats d{ path, normalized, construct_io_path(io, device, translated_path, pref_path), vfs::list_current_app_directory(io, *app_relative) };
+        const auto fd = io.next_fd++;
+        io.dir_entries.emplace(fd, d);
+
+        LOG_TRACE_IF(log_file_op, "{}: Opening archive dir {} ({}), fd: {}", export_name, path, normalized, log_hex(fd));
+        return fd;
+    }
+
     auto dir_path = construct_io_path(io, device, translated_path, pref_path) / "";
     if (!fs::exists(dir_path)) {
         if (io.case_isens_find_enabled) {
@@ -776,6 +1162,21 @@ SceUID read_dir(IOState &io, const SceUID fd, SceIoDirent *dent, const fs::path 
         // Refuse any fd that is not explicitly a directory
         if (!dir->second.is_directory())
             return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
+
+        if (dir->second.is_memory_directory()) {
+            const auto d_name_utf8 = dir->second.get_next_memory_entry();
+            if (d_name_utf8.empty())
+                return 0;
+
+            strncpy(dent->d_name, d_name_utf8.c_str(), sizeof(dent->d_name));
+            const auto file_path = std::string(dir->second.get_vita_loc()) + '/' + d_name_utf8;
+
+            LOG_TRACE_IF(log_file_op, "{}: Reading archive entry {} of fd: {}", export_name, file_path, log_hex(fd));
+            if (stat_file(io, file_path.c_str(), &dent->d_stat, pref_path, export_name) < 0)
+                return IO_ERROR(SCE_ERROR_ERRNO_EMFILE);
+
+            return 1;
+        }
 
         const auto d = dir->second.get_dir_ptr();
         if (!d)

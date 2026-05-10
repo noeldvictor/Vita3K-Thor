@@ -352,7 +352,7 @@ static IconData load_app_icon(GuiState &gui, EmuEnvState &emuenv, const std::str
 
     const auto APP_INDEX = get_app_index(gui, app_path);
 
-    const auto read_icon = app_path == emuenv.io.app_path && !emuenv.io.app0_host_path.empty()
+    const auto read_icon = app_path == emuenv.io.app_path && (!emuenv.io.app0_host_path.empty() || vfs::current_app_archive_mounted(emuenv.io))
         ? vfs::read_current_app_file(buffer, emuenv.io, emuenv.pref_path, "sce_sys/icon0.png")
         : vfs::read_app_file(buffer, emuenv.pref_path, app_path, "sce_sys/icon0.png");
     if (!read_icon) {
@@ -447,7 +447,7 @@ void init_app_background(GuiState &gui, EmuEnvState &emuenv, const std::string &
     const auto is_sys = app_path.starts_with("NPXS") && (app_path != "NPXS10007");
     if (is_sys)
         vfs::read_file(VitaIoDevice::vs0, buffer, emuenv.pref_path, "app/" + app_path + "/sce_sys/pic0.png");
-    else if (app_path == emuenv.io.app_path && !emuenv.io.app0_host_path.empty())
+    else if (app_path == emuenv.io.app_path && (!emuenv.io.app0_host_path.empty() || vfs::current_app_archive_mounted(emuenv.io)))
         vfs::read_current_app_file(buffer, emuenv.io, emuenv.pref_path, "sce_sys/pic0.png");
     else
         vfs::read_app_file(buffer, emuenv.pref_path, app_path, "sce_sys/pic0.png");
@@ -700,7 +700,7 @@ App *get_app_index(GuiState &gui, const std::string &app_path) {
 void get_app_param(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path) {
     sfo::SfoAppInfo app_info;
     vfs::FileBuffer param;
-    const auto read_param = app_path == emuenv.io.app_path && !emuenv.io.app0_host_path.empty()
+    const auto read_param = app_path == emuenv.io.app_path && (!emuenv.io.app0_host_path.empty() || vfs::current_app_archive_mounted(emuenv.io))
         ? vfs::read_current_app_file(param, emuenv.io, emuenv.pref_path, "sce_sys/param.sfo")
         : vfs::read_app_file(param, emuenv.pref_path, app_path, "sce_sys/param.sfo");
     if (read_param) {

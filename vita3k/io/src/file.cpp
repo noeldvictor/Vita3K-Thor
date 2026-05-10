@@ -20,8 +20,9 @@
 
 ReadOnlyInMemFile::ReadOnlyInMemFile() = default;
 
-ReadOnlyInMemFile::ReadOnlyInMemFile(const char *data, size_t size)
-    : buf(data, data + size) {
+ReadOnlyInMemFile::ReadOnlyInMemFile(const char *data, size_t size) {
+    if (size)
+        buf.assign(data, data + size);
 }
 
 char *ReadOnlyInMemFile::alloc_data(size_t bufsize) {
@@ -32,9 +33,15 @@ char *ReadOnlyInMemFile::alloc_data(size_t bufsize) {
 size_t ReadOnlyInMemFile::read(void *ibuf, size_t size) {
     size_t res = size;
 
+    if (currentPos >= buf.size())
+        return 0;
+
     if (currentPos + size > buf.size()) {
         res = buf.size() - currentPos;
     }
+
+    if (res == 0)
+        return 0;
 
     memcpy(ibuf, buf.data() + currentPos, res);
     currentPos += res;
@@ -46,21 +53,24 @@ const char *ReadOnlyInMemFile::data() {
     return buf.data();
 }
 
-bool ReadOnlyInMemFile::seek(int offset, int origin) {
-    if ((offset < 0) || !valid()) {
+bool ReadOnlyInMemFile::seek(SceOff offset, int origin) {
+    if (!valid())
+        return false;
+
+    SceOff new_pos = 0;
+    if (origin == SCE_SEEK_SET) {
+        new_pos = offset;
+    } else if (origin == SCE_SEEK_CUR) {
+        new_pos = static_cast<SceOff>(currentPos) + offset;
+    } else if (origin == SCE_SEEK_END) {
+        new_pos = static_cast<SceOff>(buf.size()) + offset;
+    } else {
         return false;
     }
 
-    if (origin == SCE_SEEK_SET) {
-        currentPos = offset;
-        return true;
-    }
+    if (new_pos < 0)
+        return false;
 
-    else if (origin == SCE_SEEK_CUR) {
-        currentPos += offset;
-        return true;
-    }
-
-    currentPos = buf.size() + offset;
+    currentPos = static_cast<size_t>(new_pos);
     return true;
 }

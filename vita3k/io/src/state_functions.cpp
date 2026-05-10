@@ -37,7 +37,7 @@ static const uint32_t page_size = []() -> uint32_t {
 }();
 
 SceOff FileStats::read(void *input_data, const int element_size, const SceSize element_count) const {
-    if (!wrapped_file)
+    if (!wrapped_file && !memory_file)
         return -1;
 
     if (element_size == 0 || element_count == 0)
@@ -52,6 +52,9 @@ SceOff FileStats::read(void *input_data, const int element_size, const SceSize e
         input_addr[i] = 0;
     input_addr[element_size * element_count - 1] = 0;
 
+    if (memory_file)
+        return memory_file->read(input_data, element_size * element_count);
+
     return fread(input_data, element_size, element_count, wrapped_file.get());
 }
 
@@ -63,6 +66,9 @@ SceOff FileStats::write(const void *data, const SceSize size, const int count) c
 }
 
 int FileStats::truncate(const SceSize size) const {
+    if (!wrapped_file)
+        return -1;
+
 #ifdef _WIN32
     return _chsize_s(_fileno(get_file_pointer()), size);
 #else
@@ -71,7 +77,7 @@ int FileStats::truncate(const SceSize size) const {
 }
 
 bool FileStats::seek(const SceOff offset, const SceIoSeekMode seek_mode) const {
-    if (!wrapped_file)
+    if (!wrapped_file && !memory_file)
         return false;
 
     auto base = SEEK_SET;
@@ -90,19 +96,44 @@ bool FileStats::seek(const SceOff offset, const SceIoSeekMode seek_mode) const {
     }
 
 #ifdef _WIN32
+    if (memory_file)
+        return memory_file->seek(offset, seek_mode);
+
     return _fseeki64(wrapped_file.get(), offset, base) == 0;
 #else
+    if (memory_file)
+        return memory_file->seek(offset, seek_mode);
+
     return fseeko(wrapped_file.get(), offset, base) == 0;
 #endif
 }
 
 SceOff FileStats::tell() const {
-    if (!wrapped_file)
+    if (!wrapped_file && !memory_file)
         return -1;
+
+    if (memory_file)
+        return memory_file->tell();
 
 #ifdef _WIN32
     return _ftelli64(wrapped_file.get());
 #else
     return ftello(wrapped_file.get());
 #endif
+}
+
+SceOff FileStats::size() const {
+    if (memory_file)
+        return memory_file->size();
+
+    if (!wrapped_file)
+        return 0;
+
+    const auto current = tell();
+    if (!seek(0, SCE_SEEK_END))
+        return 0;
+
+    const auto end = tell();
+    seek(current, SCE_SEEK_SET);
+    return end;
 }

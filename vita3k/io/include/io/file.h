@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include <util/types.h>
+
 #include <cstddef>
 #include <vector>
 
@@ -33,10 +35,10 @@ public:
     size_t tell() const { return currentPos; }
     size_t size() const { return buf.size(); }
 
-    bool valid() const { return !buf.empty(); }
+    bool valid() const { return true; }
     operator bool() const { return valid(); }
 
     size_t read(void *ibuf, size_t size);
     const char *data();
-    bool seek(int offset, int origin);
+    bool seek(SceOff offset, int origin);
 };

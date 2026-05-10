@@ -299,7 +299,7 @@ static bool extract_archive_content_to_path(const ZipPtr &zip, const std::string
     return true;
 }
 
-static bool mount_archive_content_as_cartridge(EmuEnvState &emuenv, const ZipPtr &zip, const std::string &content_path, const std::function<void(ArchiveContents)> &progress_callback) {
+static bool mount_archive_content_as_cartridge(EmuEnvState &emuenv, const ZipPtr &zip, const fs::path &archive_path, const std::string &content_path, const std::function<void(ArchiveContents)> &progress_callback) {
     vfs::FileBuffer param_sfo;
     if (!mz_zip_reader_extract_file_to_callback(zip.get(), (content_path + "sce_sys/param.sfo").c_str(), &write_to_buffer, &param_sfo, 0)) {
         LOG_ERROR("Cartridge archive content has no sce_sys/param.sfo: {}", content_path);
@@ -317,26 +317,16 @@ static bool mount_archive_content_as_cartridge(EmuEnvState &emuenv, const ZipPtr
         return false;
     }
 
-    const fs::path cartridge_root = emuenv.pref_path / "ux0/cart";
-    const fs::path cartridge_path = cartridge_root / emuenv.app_info.app_title_id;
-    fs::create_directories(cartridge_root);
-    fs::remove_all(cartridge_path);
-    fs::create_directories(cartridge_path);
-
-    if (!extract_archive_content_to_path(zip, content_path, cartridge_path, progress_callback)) {
-        fs::remove_all(cartridge_path);
+    if (!vfs::mount_current_app_archive(emuenv.io, archive_path, content_path))
         return false;
-    }
 
-    if (fs::exists(cartridge_path / "sce_sys/package/") && emuenv.app_info.app_title_id.starts_with("PCS")) {
-        if (!is_nonpdrm(emuenv, cartridge_path)) {
-            fs::remove_all(cartridge_path);
-            return false;
-        }
-    }
+    if (progress_callback)
+        progress_callback({ {}, {}, 100.f });
 
-    emuenv.io.app0_host_path = cartridge_path;
-    LOG_INFO("{} [{}] mounted as virtual cartridge at {}", emuenv.app_info.app_title, emuenv.app_info.app_title_id, cartridge_path);
+    if (vfs::current_app_file_exists(emuenv.io, "sce_sys/package/work.bin") && emuenv.app_info.app_title_id.starts_with("PCS"))
+        LOG_WARN("Direct archive cartridge mode found NoNpDrm package metadata. If this title needs install-time decryption, direct ZIP launch may fail.");
+
+    LOG_INFO("{} [{}] mounted directly from archive {} root {}", emuenv.app_info.app_title, emuenv.app_info.app_title_id, archive_path, content_path);
     return true;
 }
 
@@ -438,7 +428,7 @@ ContentInfo mount_archive_as_cartridge(EmuEnvState &emuenv, const fs::path &arch
     }
 
     for (const auto &path : content_paths) {
-        if (!mount_archive_content_as_cartridge(emuenv, zip, path, progress_callback))
+        if (!mount_archive_content_as_cartridge(emuenv, zip, archive_path, path, progress_callback))
             continue;
 
         fclose(vpk_fp);
@@ -613,15 +603,15 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv) {
             process_preload_disabled = *preload_disabled_ptr.get(emuenv.mem);
         }
     }
-    const auto module_app_path{ (emuenv.io.app0_host_path.empty() ? emuenv.pref_path / "ux0/app" / emuenv.io.app_path : emuenv.io.app0_host_path) / "sce_module" };
-
     std::vector<std::string> lib_load_list = {};
     // todo: check if module is imported
     auto add_preload_module = [&](uint32_t code, SceSysmoduleModuleId module_id, const std::string &name, bool load_from_app) {
         if ((process_preload_disabled & code) == 0) {
             if (is_lle_module(name, emuenv)) {
                 const auto module_name_file = fmt::format("{}.suprx", name);
-                if (load_from_app && fs::exists(module_app_path / module_name_file))
+                const auto module_relative_path = fs::path("sce_module") / module_name_file;
+                const auto module_app_path = (emuenv.io.app0_host_path.empty() ? emuenv.pref_path / "ux0/app" / emuenv.io.app_path : emuenv.io.app0_host_path) / module_relative_path;
+                if (load_from_app && (vfs::current_app_file_exists(emuenv.io, module_relative_path) || fs::exists(module_app_path)))
                     lib_load_list.emplace_back(fmt::format("app0:sce_module/{}", module_name_file));
                 else if (fs::exists(emuenv.pref_path / "vs0/sys/external" / module_name_file))
                     lib_load_list.emplace_back(fmt::format("vs0:sys/external/{}", module_name_file));

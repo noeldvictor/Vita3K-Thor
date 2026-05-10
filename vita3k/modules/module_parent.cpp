@@ -222,11 +222,12 @@ SceUID load_module(EmuEnvState &emuenv, const std::string &module_path) {
             return translated.substr(app0.size() + 1);
         return translated_module_path;
     };
+    const bool archive_app_module = requested_device == VitaIoDevice::app0 && vfs::current_app_archive_mounted(emuenv.io);
     auto system_path = (requested_device == VitaIoDevice::app0 && !emuenv.io.app0_host_path.empty())
         ? (emuenv.io.app0_host_path / current_app_relative_path()).generic_path()
         : device::construct_emulated_path(device, translated_module_path, emuenv.pref_path, emuenv.io.redirect_stdio);
 
-    if (emuenv.io.case_isens_find_enabled && !fs::exists(system_path)) {
+    if (!archive_app_module && emuenv.io.case_isens_find_enabled && !fs::exists(system_path)) {
         // Attempt a case-insensitive file search.
         const auto original_translated_module_path = translated_module_path;
         const auto cached_path = find_in_cache(emuenv.io, string_utils::tolower(translated_module_path.string()));

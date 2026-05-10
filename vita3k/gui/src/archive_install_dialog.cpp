@@ -22,6 +22,7 @@
 #include <gui/functions.h>
 #include <host/dialog/filesystem.h>
 #include <io/state.h>
+#include <io/vfs.h>
 #include <packages/sfo.h>
 
 #include <util/string_utils.h>
@@ -344,6 +345,8 @@ void draw_archive_cartridge_dialog(GuiState &gui, EmuEnvState &emuenv) {
             fs::remove_all(emuenv.io.app0_host_path);
             emuenv.io.app0_host_path.clear();
         }
+        if (!keep_mount && content.state && vfs::current_app_archive_mounted(emuenv.io))
+            vfs::unmount_current_app_archive(emuenv.io);
 
         archive_path.clear();
         content = {};
