@@ -2,13 +2,13 @@
 
 ## Captures
 
-- Current Thor screenshot: `reports/20260510_172927_thor_screen.png`
-- Current screenshot logcat tail: `reports/20260510_172927_logcat_tail.txt`
-- Vita3K focused before input: `reports/20260510_173015_vita3k_before.png`
-- Vita3K after ADB Back: `reports/20260510_173015_vita3k_after_back.png`
-- Vita3K after ADB Select: `reports/20260510_173015_vita3k_after_select.png`
-- Vita3K input logcat: `reports/20260510_173015_vita3k_input_logcat.txt`
-- Thor input device map: `reports/20260510_173015_input_devices.txt`
+- Current Thor screenshot: `reports/rpcsx-foreground-grid-screenshot_20260510_172927.png`
+- Current screenshot logcat tail: `reports/rpcsx-foreground-logcat-tail_20260510_172927.txt`
+- Vita3K focused before input: `reports/vita3k-start-screen-before-input_20260510_173015.png`
+- Vita3K after ADB Back: `reports/vita3k-start-screen-after-back_20260510_173015.png`
+- Vita3K after ADB Select: `reports/vita3k-start-screen-after-select_20260510_173015.png`
+- Vita3K input logcat: `reports/vita3k-input-logcat_20260510_173015.txt`
+- Thor input device map: `reports/thor-input-devices_20260510_173015.txt`
 
 ## What The Screenshot Shows
 

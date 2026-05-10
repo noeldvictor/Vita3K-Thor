@@ -131,12 +131,13 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - Prefer non-destructive installs such as `adb install -r path\to\apk`. Do not uninstall the existing app or clear Vita3K data unless the user explicitly accepts data loss.
 - For debug/reldebug APKs, expect the `.debug` package slot unless the build config says otherwise.
 - After installing, launch through ADB or the device UI, then capture proof with screenshots, `logcat`, selected driver, renderer settings, and any game/title ID tested.
-- Save durable test notes in `reports/YYYYMMDD_HHMMSS.md`; keep bulky raw logs out of git unless the user asks to commit them.
+- Save durable Markdown test notes in `reports/semantic-topic_YYYYMMDD_HHMMSS.md`; use short lowercase kebab-case topics, keep the timestamp at the end, and keep bulky raw logs/screenshots out of git unless the user asks to commit them.
 
 ## Reporting Thor Results
 
 - Record device model, Android version, Vita3K commit, APK/build type, renderer, selected driver, title ID, game version/update, settings, screenshots, and logs.
 - A "works" claim should include proof for boot, rendering, input, audio, save/load, suspend/resume, and exit when those areas matter.
 - Do not send Thor-experiment regressions to upstream Vita3K unless the issue is reproduced cleanly on upstream too.
-- Write repo work reports as timestamped Markdown files under `reports/`, using names like `YYYYMMDD_HHMMSS.md`.
+- Write repo work reports as semantically named timestamped Markdown files under `reports/`, using names like `fast-forward-guest-clock-follow-up_20260510_172815.md`.
+- Avoid bare timestamp-only Markdown report names except when renaming legacy files would be more confusing than helpful.
 - Reports should briefly state what changed, why, verification performed, and any remaining blockers.
