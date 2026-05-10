@@ -98,6 +98,17 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - Do not use Android toast popups for fast-forward, save-state, or load-state feedback. Prefer OSD/overlay state and logs so gameplay is not interrupted.
 - Save-state/load-state shortcuts provide an experimental same-session per-game slot 0 quickstate: pause guest threads, snapshot CPU contexts plus allocated guest memory pages, and restore them while the same app session is still running. It writes `states/<TITLEID>/slot0.same-session.txt` as a marker only; durable disk `.thorstate` serialization still needs kernel object, GPU/display, IO, and audio state capture before it can be considered reliable.
 
+## Runtime OSD Direction
+
+- Add a game-running OSD opened by a short Back/Select press. Do not let it steal existing chord shortcuts: `Select + R1`, `Select + right-stick down`, and `Select + right-stick up` must keep working without opening the OSD.
+- Opening the OSD should pause guest threads by default. Closing/resuming from the OSD should resume guest threads unless the user explicitly selected Pause.
+- OSD feedback should replace toast feedback for runtime actions. Fast-forward, save/load quickstate, cheat toggles, and pause/resume should update OSD/overlay status and logs.
+- OSD first-level actions should include Resume, Pause/Resume, Save State slot 0, Load State slot 0, Fast Forward toggle, Cheats, Screenshot, Reset/Reboot Game, Close Game, and Settings.
+- The Cheats panel should list detected cheats for the current title, show enabled/disabled state, allow toggling individual cheats, show unsupported-code counts, and provide a reload-cheat-file action.
+- The status area should show title ID, current speed percentage, FPS/performance summary when available, renderer, selected custom driver, quickstate slot status, and whether a matching cheat file was loaded.
+- Keep the OSD usable with controller only: D-pad/left stick navigates, Cross/A confirms, Circle/B cancels, Back/Select closes. It should also work with touch/mouse when available.
+- Keep OSD rendering lightweight and in the existing ImGui path. Do not open the Vita Live Area or normal settings dialog just to perform runtime actions.
+
 ## ADB Thor Testing
 
 - When an APK is built and an AYN Thor is connected, push/install it to the Thor with ADB for real-device testing.
