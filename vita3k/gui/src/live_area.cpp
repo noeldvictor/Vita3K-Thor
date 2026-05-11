@@ -183,6 +183,12 @@ void init_live_area(GuiState &gui, EmuEnvState &emuenv, const std::string &app_p
     const auto is_ps_app = app_path.starts_with("PCS") || (app_path == "NPXS10007");
     const VitaIoDevice app_device = is_sys_app ? VitaIoDevice::vs0 : VitaIoDevice::ux0;
     const auto APP_INDEX = get_app_index(gui, app_path);
+    if (!APP_INDEX) {
+        type[app_path] = "a1";
+        LOG_ERROR("Could not initialize LiveArea for unknown application path/title {}.", app_path);
+        return;
+    }
+
     const auto TITLE_ID = APP_INDEX->title_id;
 
     get_license(emuenv, APP_INDEX->title_id, APP_INDEX->content_id);

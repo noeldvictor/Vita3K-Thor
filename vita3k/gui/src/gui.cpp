@@ -1249,19 +1249,34 @@ void init_user_app(GuiState &gui, EmuEnvState &emuenv, const std::string &app_pa
 }
 
 std::map<std::string, ImGui_Texture>::const_iterator get_app_icon(GuiState &gui, const std::string &app_path) {
-    const auto &app_type = app_path.starts_with("NPXS") && (app_path != "NPXS10007") ? gui.app_selector.sys_apps_icon : gui.app_selector.user_apps_icon;
-    const auto app_icon = std::find_if(app_type.begin(), app_type.end(), [&](const auto &i) {
+    const bool is_sys = app_path.starts_with("NPXS") && (app_path != "NPXS10007");
+    const auto &app_type = is_sys ? gui.app_selector.sys_apps_icon : gui.app_selector.user_apps_icon;
+    auto app_icon = std::find_if(app_type.begin(), app_type.end(), [&](const auto &i) {
         return i.first == app_path;
     });
+
+    if (app_icon == app_type.end()) {
+        if (const auto app = get_app_index(gui, app_path); app && (app->path != app_path)) {
+            app_icon = std::find_if(app_type.begin(), app_type.end(), [&](const auto &i) {
+                return i.first == app->path;
+            });
+        }
+    }
 
     return app_icon;
 }
 
 App *get_app_index(GuiState &gui, const std::string &app_path) {
     auto &app_type = app_path.starts_with("NPXS") && (app_path != "NPXS10007") ? gui.app_selector.sys_apps : gui.app_selector.user_apps;
-    const auto app_index = std::find_if(app_type.begin(), app_type.end(), [&](const App &a) {
+    auto app_index = std::find_if(app_type.begin(), app_type.end(), [&](const App &a) {
         return a.path == app_path;
     });
+
+    if (app_index == app_type.end()) {
+        app_index = std::find_if(app_type.begin(), app_type.end(), [&](const App &a) {
+            return a.title_id == app_path;
+        });
+    }
 
     return (app_index != app_type.end()) ? &(*app_index) : nullptr;
 }

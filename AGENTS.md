@@ -106,6 +106,7 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 ## Runtime OSD
 
 - The game-running OSD opens from a short Android Back press (`AC_BACK`) on AYN Thor. A long Android Back press should route to the Vita PS/Home path and return to the Vita LiveArea/home flow for the running app. Do not bind plain gamepad Select/`BTN_SELECT`/SDL `GamepadBack` as a second OSD opener; Select must remain Vita `SCE_CTRL_SELECT` and the modifier for `Select + R1`, `Select + right-stick down`, and `Select + right-stick up`.
+- Long Android Back must first restore fast-forward to 100% before routing PS/Home, and virtual-cartridge LiveArea lookups must resolve either source archive path or title ID without null-crashing.
 - AYN Thor/Odin controller input may expose Back/Select through multiple Android paths (`KEY_BACK`, `KEY_APPSELECT`, `BTN_SELECT`, and SDL gamepad Back). Back and Select are separate controls: `Emulator.dispatchKeyEvent` forwards `KEYCODE_BACK` directly to SDL's native key path so Vita3K sees `AC_BACK`; `BTN_SELECT`/SDL gamepad Back is Vita Select and Select chords only. When debugging OSD behavior, capture `getevent -lp`, SDL/logcat event traces, and before/after screenshots before changing bindings.
 - Opening the OSD pauses guest threads by default. Closing/resuming from the OSD resumes guest threads unless the user explicitly changed pause state in the OSD.
 - OSD feedback should replace toast feedback for runtime actions. Fast-forward, save/load quickstate, cheat toggles, and pause/resume should update OSD/overlay status and logs.

@@ -1293,13 +1293,14 @@ bool handle_events(EmuEnvState &emuenv, GuiState &gui) {
         case SCE_CTRL_PSBUTTON:
             gui.is_key_locked = true;
             if (allow_switch_state) {
+                const auto running_app_path = gui::get_app_index(gui, emuenv.io.app_path) ? emuenv.io.app_path : emuenv.app_path;
                 // Show/Hide Live Area during app running
-                const auto live_area_app_index = gui::get_live_area_current_open_apps_list_index(gui, emuenv.io.app_path);
+                const auto live_area_app_index = gui::get_live_area_current_open_apps_list_index(gui, running_app_path);
                 if (live_area_app_index == gui.live_area_current_open_apps_list.end())
-                    gui::open_live_area(gui, emuenv, emuenv.io.app_path);
+                    gui::open_live_area(gui, emuenv, running_app_path);
                 else {
                     // If current live area app open is not the current app running, set it as current
-                    if ((gui.live_area_app_current_open < 0) || (gui.live_area_current_open_apps_list[gui.live_area_app_current_open] != emuenv.io.app_path))
+                    if ((gui.live_area_app_current_open < 0) || (gui.live_area_current_open_apps_list[gui.live_area_app_current_open] != running_app_path))
                         gui.live_area_app_current_open = static_cast<int32_t>(std::distance(live_area_app_index, gui.live_area_current_open_apps_list.end()) - 1);
 
                     // Switch Live Area state
@@ -1383,6 +1384,11 @@ bool handle_events(EmuEnvState &emuenv, GuiState &gui) {
         android_back_chord_used = true;
         if (runtime_osd_is_open())
             runtime_osd_set_open(emuenv, false);
+
+        if (emuenv.display.speed_percent.load() != 100) {
+            LOG_INFO("Android Back long press: disabling fast forward before Vita PS/Home");
+            runtime_set_speed_percent(emuenv, 100);
+        }
 
         LOG_INFO("Android Back long press: routing to Vita PS/Home");
         ui_navigation(SCE_CTRL_PSBUTTON);
