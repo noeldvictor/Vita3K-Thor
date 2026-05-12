@@ -903,11 +903,19 @@ static void log_renderer_debug_draw_dump(VKContext &context, MemState &mem, SceG
     Ptr<void> indices, size_t count, uint32_t instance_count, uint32_t max_index, uint32_t debug_draw_index,
     uint32_t debug_rt_width, uint32_t debug_rt_height, const std::string &hash_text_v, const std::string &hash_text_f) {
     const SceGxmVertexProgram &vertex_program = *context.record.vertex_program.get(mem);
+    const SceGxmFragmentProgram &fragment_program = *context.record.fragment_program.get(mem);
+    const SceGxmProgram &fragment_program_gxp = *fragment_program.program.get(mem);
     const VertexProgram &vkvert = *vertex_program.renderer_data.get();
     const auto &vertex_data = context.record.vertex_program.get(mem)->renderer_data;
     const auto &fragment_data = context.record.fragment_program.get(mem)->renderer_data;
+    const VKFragmentProgram &vkfrag = *reinterpret_cast<const VKFragmentProgram *>(fragment_data.get());
     const std::array<size_t, SCE_GXM_MAX_VERTEX_STREAMS> required_sizes = get_required_vertex_stream_sizes(vertex_program, vkvert, instance_count, max_index);
     const int max_stream_idx = get_used_vertex_stream_count(vertex_program, vkvert);
+    const SceGxmBlendInfo &blend_info = vkfrag.blend_info;
+    const uint32_t vk_write_mask = (static_cast<bool>(vkfrag.blending.colorWriteMask & vk::ColorComponentFlagBits::eR) ? 1U : 0U)
+        | (static_cast<bool>(vkfrag.blending.colorWriteMask & vk::ColorComponentFlagBits::eG) ? 2U : 0U)
+        | (static_cast<bool>(vkfrag.blending.colorWriteMask & vk::ColorComponentFlagBits::eB) ? 4U : 0U)
+        | (static_cast<bool>(vkfrag.blending.colorWriteMask & vk::ColorComponentFlagBits::eA) ? 8U : 0U);
 
     LOG_INFO("ThorRenderDump draw frame={} scene={} rt={}x{} draw={} prim={} index_fmt={} index_addr=0x{:08X} count={} max_index={} instances={} memory_mapping={} mapping={} vhash={} fhash={} streams={} attrs={} vtex={} ftex={} color_addr=0x{:08X} depth_addr=0x{:08X} stencil_addr=0x{:08X}",
         context.frame_timestamp,
@@ -953,6 +961,39 @@ static void log_renderer_debug_draw_dump(VKContext &context, MemState &mem, SceG
         context.record.z_offset,
         context.record.z_scale,
         context.record.writing_mask);
+
+    LOG_INFO("ThorRenderDump fragment frame={} scene={} draw={} program_flags=0x{:08X} discard={} depth_replace={} sprite_coord={} native_color={} frag_color={} output_undefined={} no_effect={} maskupdate={} fp_mode={}/{} has_blend_info={} gxm_mask={} gxm_color_func={} gxm_alpha_func={} gxm_color_src={} gxm_color_dst={} gxm_alpha_src={} gxm_alpha_dst={} vk_blend={} vk_mask_rgba_bits={} vk_color_src={} vk_color_dst={} vk_color_op={} vk_alpha_src={} vk_alpha_dst={} vk_alpha_op={} blend_hash=0x{:016X}",
+        context.frame_timestamp,
+        context.scene_timestamp,
+        debug_draw_index,
+        fragment_program_gxp.program_flags,
+        fragment_program_gxp.is_discard_used(),
+        fragment_program_gxp.is_depth_replace_used(),
+        fragment_program_gxp.is_sprite_coord_used(),
+        fragment_program_gxp.is_native_color(),
+        fragment_program_gxp.is_frag_color_used(),
+        static_cast<bool>(fragment_program_gxp.program_flags & SCE_GXM_PROGRAM_FLAG_OUTPUT_UNDEFINED),
+        fragment_program_gxp.has_no_effect(),
+        fragment_program.is_maskupdate,
+        static_cast<uint32_t>(context.record.front_side_fragment_program_mode),
+        static_cast<uint32_t>(context.record.back_side_fragment_program_mode),
+        vkfrag.has_blend_info,
+        vkfrag.has_blend_info ? static_cast<uint32_t>(blend_info.colorMask) : 0,
+        vkfrag.has_blend_info ? static_cast<uint32_t>(blend_info.colorFunc) : 0,
+        vkfrag.has_blend_info ? static_cast<uint32_t>(blend_info.alphaFunc) : 0,
+        vkfrag.has_blend_info ? static_cast<uint32_t>(blend_info.colorSrc) : 0,
+        vkfrag.has_blend_info ? static_cast<uint32_t>(blend_info.colorDst) : 0,
+        vkfrag.has_blend_info ? static_cast<uint32_t>(blend_info.alphaSrc) : 0,
+        vkfrag.has_blend_info ? static_cast<uint32_t>(blend_info.alphaDst) : 0,
+        static_cast<bool>(vkfrag.blending.blendEnable),
+        vk_write_mask,
+        static_cast<uint32_t>(vkfrag.blending.srcColorBlendFactor),
+        static_cast<uint32_t>(vkfrag.blending.dstColorBlendFactor),
+        static_cast<uint32_t>(vkfrag.blending.colorBlendOp),
+        static_cast<uint32_t>(vkfrag.blending.srcAlphaBlendFactor),
+        static_cast<uint32_t>(vkfrag.blending.dstAlphaBlendFactor),
+        static_cast<uint32_t>(vkfrag.blending.alphaBlendOp),
+        vkfrag.blending_hash);
 
     for (int stream_index = 0; stream_index < max_stream_idx; stream_index++) {
         const SceGxmVertexStream &stream = vertex_program.streams[stream_index];

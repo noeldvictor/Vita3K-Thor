@@ -376,5 +376,8 @@ struct VKRenderTarget : public renderer::RenderTarget {
 struct VKFragmentProgram : public renderer::FragmentProgram {
     vk::PipelineColorBlendAttachmentState blending;
     uint64_t blending_hash;
+    bool has_blend_info = false;
+    SceGxmBlendInfo blend_info{};
+    uint32_t program_flags = 0;
 };
 } // namespace renderer::vulkan

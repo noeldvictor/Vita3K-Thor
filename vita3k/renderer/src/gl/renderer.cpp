@@ -350,17 +350,20 @@ bool create(std::unique_ptr<FragmentProgram> &fp, GLState &state, const SceGxmPr
 
     // Translate blending.
     if (blend != nullptr) {
+        const bool color_blend_enabled = blend->colorFunc != SCE_GXM_BLEND_FUNC_NONE;
+        const bool alpha_blend_enabled = blend->alphaFunc != SCE_GXM_BLEND_FUNC_NONE;
+
         frag_program_gl->color_mask_red = ((blend->colorMask & SCE_GXM_COLOR_MASK_R) != 0) ? GL_TRUE : GL_FALSE;
         frag_program_gl->color_mask_green = ((blend->colorMask & SCE_GXM_COLOR_MASK_G) != 0) ? GL_TRUE : GL_FALSE;
         frag_program_gl->color_mask_blue = ((blend->colorMask & SCE_GXM_COLOR_MASK_B) != 0) ? GL_TRUE : GL_FALSE;
         frag_program_gl->color_mask_alpha = ((blend->colorMask & SCE_GXM_COLOR_MASK_A) != 0) ? GL_TRUE : GL_FALSE;
-        frag_program_gl->blend_enabled = (blend->colorFunc != SCE_GXM_BLEND_FUNC_NONE) || (blend->alphaFunc != SCE_GXM_BLEND_FUNC_NONE);
-        frag_program_gl->color_func = translate_blend_func(blend->colorFunc);
-        frag_program_gl->color_src = translate_blend_factor(blend->colorSrc);
-        frag_program_gl->color_dst = translate_blend_factor(blend->colorDst);
-        frag_program_gl->alpha_func = translate_blend_func(blend->alphaFunc);
-        frag_program_gl->alpha_src = translate_blend_factor(blend->alphaSrc);
-        frag_program_gl->alpha_dst = translate_blend_factor(blend->alphaDst);
+        frag_program_gl->blend_enabled = color_blend_enabled || alpha_blend_enabled;
+        frag_program_gl->color_func = color_blend_enabled ? translate_blend_func(blend->colorFunc) : GL_FUNC_ADD;
+        frag_program_gl->color_src = color_blend_enabled ? translate_blend_factor(blend->colorSrc) : GL_ONE;
+        frag_program_gl->color_dst = color_blend_enabled ? translate_blend_factor(blend->colorDst) : GL_ZERO;
+        frag_program_gl->alpha_func = alpha_blend_enabled ? translate_blend_func(blend->alphaFunc) : GL_FUNC_ADD;
+        frag_program_gl->alpha_src = alpha_blend_enabled ? translate_blend_factor(blend->alphaSrc) : GL_ONE;
+        frag_program_gl->alpha_dst = alpha_blend_enabled ? translate_blend_factor(blend->alphaDst) : GL_ZERO;
     }
 
     return true;
