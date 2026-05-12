@@ -21,6 +21,7 @@
 #include <SDL3/SDL_hints.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 #define SDL_CHECK_EXT(condition, ret)                         \
     do {                                                      \
@@ -36,6 +37,67 @@
 
 static int get_threshold_samples(const int device_buffer_samples) {
     return 4 * device_buffer_samples;
+}
+
+static int16_t blend_sample(const int16_t a, const int16_t b, const int index, const int count) {
+    const int weight_b = index + 1;
+    const int weight_a = count - weight_b + 1;
+    return static_cast<int16_t>((static_cast<int32_t>(a) * weight_a + static_cast<int32_t>(b) * weight_b) / (count + 1));
+}
+
+static const void *pitch_correct_fast_forward(SDLAudioOutPort &port, const void *buffer, int &bytes_to_write, const uint32_t speed_percent) {
+    if (speed_percent <= 100 || port.channels <= 0 || port.len <= 0)
+        return buffer;
+
+    const int input_frames = port.len;
+    const int target_frames = std::max(1, (input_frames * 100) / static_cast<int>(speed_percent));
+    if (target_frames >= input_frames)
+        return buffer;
+
+    const auto *input = static_cast<const int16_t *>(buffer);
+    auto &output = port.pitch_correct_buffer;
+    output.assign(static_cast<size_t>(target_frames) * port.channels, 0);
+
+    const int grain_frames = std::clamp(port.freq / 100, 96, std::max(96, input_frames));
+    const int overlap_frames = std::clamp(grain_frames / 4, 16, std::max(16, grain_frames / 2));
+    int write_frame = 0;
+
+    while (write_frame < target_frames) {
+        const int input_frame = std::min(input_frames - 1, (write_frame * static_cast<int>(speed_percent)) / 100);
+        const int copy_frames = std::min({ grain_frames, target_frames - write_frame, input_frames - input_frame });
+        if (copy_frames <= 0)
+            break;
+
+        if (write_frame == 0) {
+            std::copy_n(&input[input_frame * port.channels], static_cast<size_t>(copy_frames) * port.channels, output.data());
+            write_frame += copy_frames;
+            continue;
+        }
+
+        const int overlap = std::min({ overlap_frames, write_frame, copy_frames });
+        for (int frame = 0; frame < overlap; frame++) {
+            const int dst_frame = write_frame - overlap + frame;
+            const int src_frame = input_frame + frame;
+            for (int channel = 0; channel < port.channels; channel++) {
+                const int dst = dst_frame * port.channels + channel;
+                output[dst] = blend_sample(output[dst], input[src_frame * port.channels + channel], frame, overlap);
+            }
+        }
+
+        const int append_frames = copy_frames - overlap;
+        if (append_frames > 0) {
+            std::copy_n(
+                &input[(input_frame + overlap) * port.channels],
+                static_cast<size_t>(append_frames) * port.channels,
+                &output[write_frame * port.channels]);
+            write_frame += append_frames;
+        } else {
+            write_frame++;
+        }
+    }
+
+    bytes_to_write = std::max(1, write_frame) * port.channels * static_cast<int>(sizeof(int16_t));
+    return output.data();
 }
 
 void SDLCALL SDLAudioAdapter::thread_wakeup_callback(void *userdata, SDL_AudioStream *stream, int additional_amount, int total_amount) {
@@ -97,7 +159,7 @@ void SDLAudioAdapter::audio_output(AudioOutPort &out_port, const void *buffer) {
     //  Put audio to the port's stream and see how much is left to play.
     SDLAudioOutPort &port = static_cast<SDLAudioOutPort &>(out_port);
     const uint32_t speed_percent = std::max<uint32_t>(state.speed_percent.load(), 1);
-    const float speed_ratio = std::clamp(speed_percent / 100.f, 0.01f, 100.f);
+    const float speed_ratio = 1.f;
     if (std::abs(port.speed_ratio - speed_ratio) > 0.001f) {
         SDL_CHECK_VOID(SDL_SetAudioStreamFrequencyRatio(port.stream.get(), speed_ratio));
         port.speed_ratio = speed_ratio;
@@ -112,7 +174,9 @@ void SDLAudioAdapter::audio_output(AudioOutPort &out_port, const void *buffer) {
         const uint64_t scaled_wait = std::max<uint64_t>(1, (port.len_microseconds * 200) / speed_percent);
         port.cond_var.wait_for(lock, std::chrono::microseconds(scaled_wait));
     }
-    SDL_CHECK_VOID(SDL_PutAudioStreamData(port.stream.get(), buffer, out_port.len_bytes));
+    int bytes_to_write = out_port.len_bytes;
+    const void *audio_data = pitch_correct_fast_forward(port, buffer, bytes_to_write, speed_percent);
+    SDL_CHECK_VOID(SDL_PutAudioStreamData(port.stream.get(), audio_data, bytes_to_write));
 }
 
 void SDLAudioAdapter::set_volume(AudioOutPort &out_port, float volume) {

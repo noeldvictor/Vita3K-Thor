@@ -46,6 +46,7 @@ using AudioStreamPtr = std::shared_ptr<SDL_AudioStream>;
 struct SDLAudioOutPort : public AudioOutPort {
     int channels = 2;
     float speed_ratio = 1.f;
+    std::vector<int16_t> pitch_correct_buffer;
     AudioStreamPtr stream;
     SDLAudioAdapter &adapter;
     std::mutex mutex;
