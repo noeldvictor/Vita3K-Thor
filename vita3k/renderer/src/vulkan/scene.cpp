@@ -23,10 +23,12 @@
 #include <config/state.h>
 #include <spdlog/fmt/bin_to_hex.h>
 
+#include <util/float_to_half.h>
 #include <util/log.h>
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -678,6 +680,143 @@ static void log_renderer_debug_textures(VKContext &context, const char *stage, c
     }
 }
 
+static uint32_t get_renderer_debug_index_value(const void *indices, size_t index, SceGxmIndexFormat format) {
+    if (format == SCE_GXM_INDEX_FORMAT_U16)
+        return reinterpret_cast<const uint16_t *>(indices)[index];
+    return reinterpret_cast<const uint32_t *>(indices)[index];
+}
+
+template <typename T>
+static T read_renderer_debug_unaligned(const uint8_t *data) {
+    T value;
+    std::memcpy(&value, data, sizeof(T));
+    return value;
+}
+
+static bool read_renderer_debug_attribute_component(const uint8_t *data, SceGxmAttributeFormat format, uint8_t component, float &value) {
+    switch (format) {
+    case SCE_GXM_ATTRIBUTE_FORMAT_U8:
+        value = static_cast<float>(read_renderer_debug_unaligned<uint8_t>(data + component));
+        return true;
+    case SCE_GXM_ATTRIBUTE_FORMAT_S8:
+        value = static_cast<float>(read_renderer_debug_unaligned<int8_t>(data + component));
+        return true;
+    case SCE_GXM_ATTRIBUTE_FORMAT_U16:
+        value = static_cast<float>(read_renderer_debug_unaligned<uint16_t>(data + component * sizeof(uint16_t)));
+        return true;
+    case SCE_GXM_ATTRIBUTE_FORMAT_S16:
+        value = static_cast<float>(read_renderer_debug_unaligned<int16_t>(data + component * sizeof(int16_t)));
+        return true;
+    case SCE_GXM_ATTRIBUTE_FORMAT_U8N:
+        value = static_cast<float>(read_renderer_debug_unaligned<uint8_t>(data + component)) / 255.0f;
+        return true;
+    case SCE_GXM_ATTRIBUTE_FORMAT_S8N:
+        value = std::max(-1.0f, static_cast<float>(read_renderer_debug_unaligned<int8_t>(data + component)) / 127.0f);
+        return true;
+    case SCE_GXM_ATTRIBUTE_FORMAT_U16N:
+        value = static_cast<float>(read_renderer_debug_unaligned<uint16_t>(data + component * sizeof(uint16_t))) / 65535.0f;
+        return true;
+    case SCE_GXM_ATTRIBUTE_FORMAT_S16N:
+        value = std::max(-1.0f, static_cast<float>(read_renderer_debug_unaligned<int16_t>(data + component * sizeof(int16_t))) / 32767.0f);
+        return true;
+    case SCE_GXM_ATTRIBUTE_FORMAT_F16:
+        value = util::decode_flt16<float>(read_renderer_debug_unaligned<uint16_t>(data + component * sizeof(uint16_t)));
+        return true;
+    case SCE_GXM_ATTRIBUTE_FORMAT_F32:
+        value = read_renderer_debug_unaligned<float>(data + component * sizeof(float));
+        return true;
+    case SCE_GXM_ATTRIBUTE_FORMAT_UNTYPED:
+        value = static_cast<float>(read_renderer_debug_unaligned<uint32_t>(data + component * sizeof(uint32_t)));
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void log_renderer_debug_attribute_values(VKContext &context, MemState &mem, SceGxmIndexFormat index_format,
+    Ptr<void> indices, size_t index_count, uint32_t debug_draw_index, const SceGxmVertexAttribute &attribute,
+    const shader::usse::AttributeInformation &info, const SceGxmVertexStream &stream, size_t required_size) {
+    const GXMStreamInfo &stream_info = context.record.vertex_streams[attribute.streamIndex];
+    if (!stream_info.data || index_count == 0 || attribute.componentCount == 0)
+        return;
+
+    const uint8_t *stream_data = stream_info.data.get(mem);
+    const void *indices_data = indices.get(mem);
+    const uint8_t component_count = std::min<uint8_t>(attribute.componentCount, 4);
+    std::array<float, 4> min_values = { std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity() };
+    std::array<float, 4> max_values = { -std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity() };
+    std::array<float, 4> first_values = {};
+    std::array<uint32_t, 4> first_indices = {};
+    uint32_t sampled = 0;
+    uint32_t nonfinite = 0;
+    uint32_t out_of_required_bounds = 0;
+    uint32_t huge = 0;
+
+    const size_t attr_size = get_vulkan_attribute_byte_size(attribute, info);
+    for (size_t i = 0; i < index_count; i++) {
+        const uint32_t vertex_index = get_renderer_debug_index_value(indices_data, i, index_format);
+        const size_t vertex_offset = static_cast<size_t>(vertex_index) * stream.stride + attribute.offset;
+        if (vertex_offset + attr_size > required_size) {
+            out_of_required_bounds++;
+            continue;
+        }
+
+        const uint8_t *attribute_data = stream_data + vertex_offset;
+        for (uint8_t component = 0; component < component_count; component++) {
+            float value = 0.0f;
+            if (!read_renderer_debug_attribute_component(attribute_data, static_cast<SceGxmAttributeFormat>(attribute.format), component, value))
+                continue;
+
+            if (sampled == 0) {
+                first_values[component] = value;
+                first_indices[0] = vertex_index;
+            } else if (sampled < first_indices.size()) {
+                first_indices[sampled] = vertex_index;
+            }
+
+            if (!std::isfinite(value)) {
+                nonfinite++;
+                continue;
+            }
+            if (std::abs(value) > 100000.0f)
+                huge++;
+            min_values[component] = std::min(min_values[component], value);
+            max_values[component] = std::max(max_values[component], value);
+        }
+        sampled++;
+    }
+
+    LOG_INFO("ThorRenderDump attr-values frame={} scene={} draw={} reg={} loc={} stream={} format={} components={} sampled={} first_indices={},{},{},{} first={},{},{},{} min={},{},{},{} max={},{},{},{} nonfinite={} huge={} out_of_required_bounds={}",
+        context.frame_timestamp,
+        context.scene_timestamp,
+        debug_draw_index,
+        attribute.regIndex,
+        info.location,
+        attribute.streamIndex,
+        static_cast<uint32_t>(attribute.format),
+        attribute.componentCount,
+        sampled,
+        first_indices[0],
+        first_indices[1],
+        first_indices[2],
+        first_indices[3],
+        first_values[0],
+        first_values[1],
+        first_values[2],
+        first_values[3],
+        min_values[0],
+        min_values[1],
+        min_values[2],
+        min_values[3],
+        max_values[0],
+        max_values[1],
+        max_values[2],
+        max_values[3],
+        nonfinite,
+        huge,
+        out_of_required_bounds);
+}
+
 static void log_renderer_debug_draw_dump(VKContext &context, MemState &mem, SceGxmPrimitiveType type, SceGxmIndexFormat format,
     Ptr<void> indices, size_t count, uint32_t instance_count, uint32_t max_index, uint32_t debug_draw_index,
     uint32_t debug_rt_width, uint32_t debug_rt_height, const std::string &hash_text_v, const std::string &hash_text_f) {
@@ -783,6 +922,7 @@ static void log_renderer_debug_draw_dump(VKContext &context, MemState &mem, SceG
             info.is_integer,
             info.is_signed,
             info.regformat);
+        log_renderer_debug_attribute_values(context, mem, format, indices, count, debug_draw_index, attribute, info, stream, required_sizes[attribute.streamIndex]);
     }
 
     log_renderer_debug_textures(context, "vertex", context.vertex_gxm_textures, context.vertex_gxm_texture_valid, vertex_data->texture_count, debug_draw_index);
