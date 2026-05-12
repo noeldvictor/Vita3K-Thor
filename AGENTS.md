@@ -145,6 +145,7 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - Save durable Markdown test notes in `reports/semantic-topic_YYYYMMDD_HHMMSS.md`; use short lowercase kebab-case topics, keep the timestamp at the end, and keep bulky raw logs/screenshots out of git unless the user asks to commit them.
 - Prefer `tools/thor_adb_debug_capture.ps1` for repeatable crash/render captures. It should be the first tool for suspected renderer hangs, Android kills, or game-specific startup crashes because it captures normal logcat, crash buffer, current window focus, meminfo, and a screenshot together.
 - Use `tools/thor_live_debug_stream.ps1` when the user is actively playing and Codex needs a stream of evidence. It writes rolling samples under `tmp/thor-live/<topic>_<timestamp>/`, keeps `latest.txt` and `latest-screen.png` fresh, and writes a semantic Markdown report in `reports/`. This is the preferred "play while Codex watches logs/screenshots" workflow.
+- On Android, renderer trace can be toggled while a game is already running with `adb shell setprop debug.vita3k.thor_render_trace 1` and disabled with `adb shell setprop debug.vita3k.thor_render_trace 0`. `tools/thor_live_debug_stream.ps1 -RenderTrace` sets the property before sampling so Codex can capture `ThorRenderTrace` scene/draw/texture lines without making the user restart the game.
 
 ## Reporting Thor Results
 

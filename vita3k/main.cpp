@@ -63,6 +63,7 @@
 #ifdef __ANDROID__
 #include <SDL3/SDL_system.h>
 #include <jni.h>
+#include <sys/system_properties.h>
 #include <unistd.h>
 #include <xxh3.h>
 #endif
@@ -522,6 +523,32 @@ static uint32_t runtime_cheat_unsupported_count(const RuntimeCheats &runtime_che
         count += cheat.unsupported_lines;
     return count;
 }
+
+#ifdef __ANDROID__
+static bool is_adb_truthy_value(const char *value) {
+    return std::strcmp(value, "1") == 0 || string_utils::tolower(value) == "true" || string_utils::tolower(value) == "on" || string_utils::tolower(value) == "yes";
+}
+
+static void update_thor_adb_debug_toggles(EmuEnvState &emuenv) {
+    if (!emuenv.renderer)
+        return;
+
+    char trace_value[PROP_VALUE_MAX] = {};
+    if (__system_property_get("debug.vita3k.thor_render_trace", trace_value) <= 0)
+        return;
+
+    const bool trace_enabled = is_adb_truthy_value(trace_value);
+    static std::optional<bool> last_trace_enabled;
+    if (!last_trace_enabled.has_value() || (last_trace_enabled.value() != trace_enabled) || (emuenv.renderer->renderer_trace_gxm_state != trace_enabled)) {
+        emuenv.renderer->renderer_trace_gxm_state = trace_enabled;
+        last_trace_enabled = trace_enabled;
+        LOG_INFO("{} Thor renderer GXM trace from ADB property debug.vita3k.thor_render_trace={}", trace_enabled ? "Enabled" : "Disabled", trace_value);
+    }
+}
+#else
+static void update_thor_adb_debug_toggles(EmuEnvState &) {
+}
+#endif
 
 static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &runtime_cheats, const int32_t main_module_id) {
     if (!runtime_osd_is_open())
@@ -1243,6 +1270,7 @@ int main(int argc, char *argv[]) {
         ZoneScopedN("Game loading"); // Tracy - Track game loading loop scope
 #endif
         wait_for_frame_done();
+        update_thor_adb_debug_toggles(emuenv);
         apply_runtime_cheats(emuenv, runtime_cheats);
 
         // Driver acto!
@@ -1270,6 +1298,7 @@ int main(int argc, char *argv[]) {
         if (emuenv.kernel.is_threads_paused())
             wait_for_frame_done();
 
+        update_thor_adb_debug_toggles(emuenv);
         apply_runtime_cheats(emuenv, runtime_cheats);
 
         // Driver acto!

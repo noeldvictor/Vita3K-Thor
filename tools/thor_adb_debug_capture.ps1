@@ -61,6 +61,10 @@ if (-not $NoClearLogcat) {
     & $Adb logcat -c | Out-Null
 }
 
+if ($RenderTrace) {
+    & $Adb shell setprop debug.vita3k.thor_render_trace 1 | Out-Null
+}
+
 $args = @("-a", "true", "--cartridge", $GamePath, "--log-level", "$LogLevel")
 if ($RenderTrace) {
     $args += "--thor-render-trace"
@@ -124,6 +128,7 @@ $report += "- Game path: ``$GamePath``"
 $report += "- Seconds captured: ``$Seconds``"
 $report += "- Log level: ``$LogLevel``"
 $report += "- Render trace: ``$RenderTrace``"
+$report += "- ADB trace property: ``debug.vita3k.thor_render_trace=$(if ($RenderTrace) { '1' } else { 'unchanged' })``"
 $report += ""
 $report += "## Artifacts"
 $report += ""
