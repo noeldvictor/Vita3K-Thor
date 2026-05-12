@@ -31,6 +31,10 @@
 
 #include <thread>
 
+#ifdef ERROR
+#undef ERROR
+#endif
+
 namespace gui {
 
 static std::vector<fs::path> get_path_of_archives(const fs::path &path) {
