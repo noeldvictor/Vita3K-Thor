@@ -64,6 +64,7 @@ void runtime_toggle_fast_forward(EmuEnvState &emuenv);
 void runtime_request_save_state(EmuEnvState &emuenv);
 void runtime_request_load_state(EmuEnvState &emuenv);
 void runtime_take_screenshot(EmuEnvState &emuenv);
+void runtime_poll_control_file(EmuEnvState &emuenv);
 
 std::vector<ContentInfo> install_archive(EmuEnvState &emuenv, GuiState *gui, const fs::path &archive_path, const std::function<void(ArchiveContents)> &progress_callback = nullptr);
 ContentInfo mount_archive_as_cartridge(EmuEnvState &emuenv, const fs::path &archive_path, const std::function<void(ArchiveContents)> &progress_callback = nullptr);

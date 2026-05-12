@@ -52,6 +52,8 @@ if (-not (Test-Path -LiteralPath $ControlFile)) {
         "skip="
         "stop_after="
         "dump="
+        "action="
+        "action_id="
     ) | Set-Content -LiteralPath $ControlFile -Encoding UTF8
 }
 if ($NoLabels) {

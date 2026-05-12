@@ -57,6 +57,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstring>
 #include <initializer_list>
 #include <limits>
@@ -973,6 +974,16 @@ constexpr uint32_t QUICKSTATE_MAX_STRING_BYTES = 4096;
 constexpr uint32_t QUICKSTATE_COMPRESSION_NONE = 0;
 constexpr uint32_t QUICKSTATE_COMPRESSION_MINIZ = 1;
 
+struct RuntimeControlFileState {
+    bool initialized = false;
+    fs::path path;
+    std::time_t last_write = 0;
+    uintmax_t last_size = 0;
+    std::string last_action_id;
+};
+
+static RuntimeControlFileState runtime_control_file_state;
+
 struct QuickStateDiskHeader {
     uint32_t version = 0;
     std::string title_id;
@@ -1766,6 +1777,138 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
     } else {
         LOG_WARN("Failed to restore quickstate slot 0 for {}", title_id);
     }
+}
+
+static std::string runtime_control_trim(std::string_view text) {
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front())))
+        text.remove_prefix(1);
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back())))
+        text.remove_suffix(1);
+    return std::string(text);
+}
+
+static std::string runtime_control_lower(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](const unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return text;
+}
+
+static fs::path runtime_control_file_path() {
+    const char *path = std::getenv("VITA3K_RUNTIME_CONTROL_FILE");
+    if (path == nullptr || path[0] == '\0')
+        path = std::getenv("VITA3K_RENDER_CONTROL_FILE");
+    if (path == nullptr || path[0] == '\0')
+        return {};
+
+    return fs_utils::utf8_to_path(path);
+}
+
+static std::map<std::string, std::string> read_runtime_control_file(const fs::path &path) {
+    std::map<std::string, std::string> values;
+    fs::ifstream in(path);
+    if (!in.good())
+        return values;
+
+    std::string line;
+    while (std::getline(in, line)) {
+        const size_t comment = line.find('#');
+        if (comment != std::string::npos)
+            line.resize(comment);
+
+        const size_t equals = line.find('=');
+        if (equals == std::string::npos)
+            continue;
+
+        std::string key = runtime_control_lower(runtime_control_trim(std::string_view(line).substr(0, equals)));
+        std::string value = runtime_control_trim(std::string_view(line).substr(equals + 1));
+        if (!key.empty())
+            values[std::move(key)] = std::move(value);
+    }
+
+    return values;
+}
+
+static void runtime_set_pause_state(EmuEnvState &emuenv, const bool pause) {
+    const bool already_paused = emuenv.kernel.is_threads_paused();
+    if (pause == already_paused)
+        return;
+
+    if (!pause)
+        runtime_osd_auto_paused = false;
+    app::switch_state(emuenv, pause);
+    LOG_INFO("Runtime control {}", pause ? "paused emulation" : "resumed emulation");
+}
+
+static void apply_runtime_control_action(EmuEnvState &emuenv, const std::string &raw_action) {
+    std::string action = runtime_control_lower(runtime_control_trim(raw_action));
+    std::replace(action.begin(), action.end(), '-', '_');
+    if (action.empty() || action == "none" || action == "clear")
+        return;
+
+    if (emuenv.io.title_id.empty()) {
+        LOG_WARN("Runtime control action '{}' ignored because no title is running", raw_action);
+        return;
+    }
+
+    if (action == "save" || action == "save_state" || action == "save_state_0" || action == "quick_save" || action == "quicksave") {
+        LOG_INFO("Runtime control action: save_state");
+        runtime_request_save_state(emuenv);
+    } else if (action == "load" || action == "load_state" || action == "load_state_0" || action == "quick_load" || action == "quickload") {
+        LOG_INFO("Runtime control action: load_state");
+        runtime_request_load_state(emuenv);
+    } else if (action == "pause") {
+        runtime_set_pause_state(emuenv, true);
+    } else if (action == "resume" || action == "unpause") {
+        runtime_set_pause_state(emuenv, false);
+    } else if (action == "toggle_pause") {
+        runtime_set_pause_state(emuenv, !emuenv.kernel.is_threads_paused());
+    } else if (action == "open_osd") {
+        runtime_osd_set_open(emuenv, true);
+    } else if (action == "close_osd") {
+        runtime_osd_set_open(emuenv, false);
+    } else {
+        LOG_WARN("Unknown runtime control action '{}'", raw_action);
+    }
+}
+
+void runtime_poll_control_file(EmuEnvState &emuenv) {
+    const fs::path path = runtime_control_file_path();
+    if (path.empty())
+        return;
+
+    boost::system::error_code ec;
+    if (!fs::exists(path, ec) || ec)
+        return;
+
+    const std::time_t last_write = fs::last_write_time(path, ec);
+    if (ec)
+        return;
+    const uintmax_t size = fs::file_size(path, ec);
+    if (ec)
+        return;
+
+    RuntimeControlFileState &state = runtime_control_file_state;
+    if (state.initialized && state.path == path && state.last_write == last_write && state.last_size == size)
+        return;
+
+    state.initialized = true;
+    state.path = path;
+    state.last_write = last_write;
+    state.last_size = size;
+
+    const auto values = read_runtime_control_file(path);
+    const auto action_it = values.find("action");
+    if (action_it == values.end())
+        return;
+
+    const auto action_id_it = values.find("action_id");
+    const std::string action_id = action_id_it != values.end() ? action_id_it->second : fmt::format("{}:{}:{}", fs_utils::path_to_utf8(path), last_write, size);
+    if (!action_id.empty() && action_id == state.last_action_id)
+        return;
+
+    state.last_action_id = action_id;
+    apply_runtime_control_action(emuenv, action_it->second);
 }
 
 static SDL_GamepadButton runtime_configured_button(const EmuEnvState &emuenv, const SDL_GamepadButton default_button) {

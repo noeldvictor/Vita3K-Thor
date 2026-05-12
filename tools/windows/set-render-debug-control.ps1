@@ -2,6 +2,8 @@ param(
     [string]$Skip = "",
     [string]$StopAfter = "",
     [string]$Dump = "",
+    [string]$Action = "",
+    [string]$ActionId = "",
     [int]$TraceLimit = 512,
     [switch]$NoTrace,
     [switch]$NoLabels,
@@ -16,6 +18,9 @@ if (-not $ControlFile) {
 }
 
 New-Item -ItemType Directory -Force -Path (Split-Path $ControlFile) | Out-Null
+if ($Action -and -not $ActionId) {
+    $ActionId = Get-Date -Format "yyyyMMdd_HHmmss_ffff"
+}
 
 @(
     "# Edit while Vita3K is running; values update live."
@@ -25,6 +30,8 @@ New-Item -ItemType Directory -Force -Path (Split-Path $ControlFile) | Out-Null
     "skip=$Skip"
     "stop_after=$StopAfter"
     "dump=$Dump"
+    "action=$Action"
+    "action_id=$ActionId"
 ) | Set-Content -LiteralPath $ControlFile -Encoding UTF8
 
 Write-Host "Updated renderer control:"
@@ -35,3 +42,5 @@ Write-Host "  labels:     $(-not $NoLabels)"
 Write-Host "  skip:       $Skip"
 Write-Host "  stopAfter:  $StopAfter"
 Write-Host "  dump:       $Dump"
+Write-Host "  action:     $Action"
+Write-Host "  actionId:   $ActionId"

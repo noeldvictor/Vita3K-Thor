@@ -1268,6 +1268,7 @@ int main(int argc, char *argv[]) {
 #endif
         wait_for_frame_done();
         update_thor_adb_debug_toggles(emuenv);
+        runtime_poll_control_file(emuenv);
         apply_runtime_cheats(emuenv, runtime_cheats);
 
         // Driver acto!
@@ -1296,6 +1297,7 @@ int main(int argc, char *argv[]) {
             wait_for_frame_done();
 
         update_thor_adb_debug_toggles(emuenv);
+        runtime_poll_control_file(emuenv);
         apply_runtime_cheats(emuenv, runtime_cheats);
 
         // Driver acto!
