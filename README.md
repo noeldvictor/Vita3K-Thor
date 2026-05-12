@@ -56,7 +56,7 @@ These are the practical differences you should notice first compared with upstre
 - Clear library badges: encrypted virtual cartridges show an `E` badge instead of failing mysteriously, and games with matching cheat files show a `C` badge.
 - In-game OSD menu: press Back during gameplay to open a controller-friendly menu for resume, pause, save/load state, fast-forward speed, screenshots, renderer trace, and cheats.
 - Thor controller shortcuts: `Select + R1` toggles fast-forward, `Select + right-stick down` saves state, and `Select + right-stick up` loads state.
-- Fast-forward presets: choose Off, 2x, 3x, or 4x from the OSD. Audio is routed through FFmpeg `atempo` when available so fast-forward can preserve pitch instead of sounding extremely high-pitched.
+- Fast-forward presets: choose Off, 2x, 3x, or 4x from the OSD. Fast-forward avoids high-pitched chipmunk audio by using pitch-preserving tempo filtering when available, or normal-pitch buffer skipping when that filter is missing.
 - Per-game quickstate slot: save/load slot 0 for the current game from the OSD or shortcuts.
 - VitaCheat panel: load `.psv` cheat files from supported cheat folders, show available cheats in the OSD, and toggle individual cheats per game.
 - Thor testing tools: ADB scripts can capture screenshots, logs, crash info, memory info, frame stats, and renderer trace notes while testing on the real device.
@@ -78,7 +78,7 @@ This section is for people changing the emulator code, debugging games, or compa
 - Direct ZIP cartridge mode mounts `app0:` against the archive and applies read-time `patch`/`rePatch` overlays. It does not bypass encryption, licenses, or ownership checks.
 - Large deflated archive members, including multi-gigabyte `.psarc` files, are cached to app-local storage instead of inflated into RAM.
 - Fast-forward updates display/vblank pacing, guest kernel clock/wait timing, AVPlayer video pacing, and SDL audio tempo together.
-- SDL fast-forward audio uses FFmpeg `atempo` for pitch-preserving tempo changes when possible, with SDL frequency-ratio speed-up as a fallback.
+- SDL fast-forward audio keeps SDL's stream frequency ratio at `1.0x`. It uses FFmpeg `atempo` for pitch-preserving tempo changes when possible, with normal-pitch buffer skipping as the fallback.
 - Quickstates currently serialize CPU contexts, allocated guest memory pages, and allocator maps. The next durability targets are kernel objects, GPU/display state, audio, AVPlayer/movie state, IO/VFS handles, and renderer cache state.
 - `--thor-render-trace` adds GXM/Vulkan trace logs, including scene, draw, surface, and texture upload details for renderer debugging.
 - Thor-only behavior should stay behind settings, build flags, device checks, or clearly named code paths.

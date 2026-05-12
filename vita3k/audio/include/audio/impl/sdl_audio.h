@@ -60,6 +60,8 @@ struct SDLAudioOutPort : public AudioOutPort {
     uint32_t tempo_speed_percent = 100;
     bool tempo_filter_failed = false;
     std::vector<int16_t> tempo_buffer;
+    double tempo_fallback_credit = 0.0;
+    std::vector<int16_t> tempo_fallback_tail;
     AudioStreamPtr stream;
     SDLAudioAdapter &adapter;
     std::mutex mutex;

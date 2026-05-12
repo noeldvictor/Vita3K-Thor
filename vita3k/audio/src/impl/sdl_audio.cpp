@@ -20,7 +20,6 @@
 #include <SDL3/SDL_audio.h>
 #include <SDL3/SDL_hints.h>
 #include <algorithm>
-#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -74,6 +73,8 @@ static void reset_tempo_filter(SDLAudioOutPort &port) {
     port.tempo_sink = nullptr;
     port.tempo_speed_percent = 100;
     port.tempo_buffer.clear();
+    port.tempo_fallback_credit = 0.0;
+    port.tempo_fallback_tail.clear();
 }
 
 SDLAudioOutPort::~SDLAudioOutPort() {
@@ -283,6 +284,52 @@ static const void *tempo_correct_fast_forward(SDLAudioOutPort &port, const void 
     return output.data();
 }
 
+static int16_t blend_sample(const int16_t a, const int16_t b, const int index, const int count) {
+    const int weight_b = index + 1;
+    const int weight_a = count - weight_b + 1;
+    return static_cast<int16_t>((static_cast<int32_t>(a) * weight_a + static_cast<int32_t>(b) * weight_b) / (count + 1));
+}
+
+static const void *normal_pitch_skip_fast_forward(SDLAudioOutPort &port, const void *buffer, int &bytes_to_write, const uint32_t speed_percent) {
+    bytes_to_write = port.len_bytes;
+    if (speed_percent <= 100 || port.channels <= 0 || port.len <= 0 || port.freq <= 0) {
+        port.tempo_fallback_credit = 0.0;
+        port.tempo_fallback_tail.clear();
+        return buffer;
+    }
+
+    port.tempo_fallback_credit += 100.0;
+    if (port.tempo_fallback_credit + 0.001 < speed_percent) {
+        bytes_to_write = 0;
+        return nullptr;
+    }
+
+    while (port.tempo_fallback_credit >= speed_percent)
+        port.tempo_fallback_credit -= speed_percent;
+
+    const auto *input = static_cast<const int16_t *>(buffer);
+    auto &output = port.tempo_buffer;
+    const size_t sample_count = static_cast<size_t>(port.len) * port.channels;
+    output.assign(input, input + sample_count);
+
+    const int overlap_frames = std::min({ port.len, std::max(16, port.freq / 400), static_cast<int>(port.tempo_fallback_tail.size() / port.channels) });
+    if (overlap_frames > 0) {
+        for (int frame = 0; frame < overlap_frames; frame++) {
+            for (int channel = 0; channel < port.channels; channel++) {
+                const int index = frame * port.channels + channel;
+                output[index] = blend_sample(port.tempo_fallback_tail[index], output[index], frame, overlap_frames);
+            }
+        }
+    }
+
+    const int tail_frames = std::min(port.len, std::max(16, port.freq / 400));
+    port.tempo_fallback_tail.assign(
+        output.end() - static_cast<ptrdiff_t>(tail_frames * port.channels),
+        output.end());
+
+    return output.data();
+}
+
 void SDLCALL SDLAudioAdapter::thread_wakeup_callback(void *userdata, SDL_AudioStream *stream, int additional_amount, int total_amount) {
     assert(userdata != nullptr);
     assert(stream != nullptr);
@@ -343,7 +390,7 @@ void SDLAudioAdapter::audio_output(AudioOutPort &out_port, const void *buffer) {
     SDLAudioOutPort &port = static_cast<SDLAudioOutPort &>(out_port);
     const uint32_t speed_percent = std::max<uint32_t>(state.speed_percent.load(), 1);
     const bool use_tempo_filter = ensure_tempo_filter(port, speed_percent);
-    const float speed_ratio = use_tempo_filter ? 1.f : std::clamp(speed_percent / 100.f, 0.01f, 100.f);
+    const float speed_ratio = 1.f;
     if (std::abs(port.speed_ratio - speed_ratio) > 0.001f) {
         SDL_CHECK_VOID(SDL_SetAudioStreamFrequencyRatio(port.stream.get(), speed_ratio));
         port.speed_ratio = speed_ratio;
@@ -359,7 +406,9 @@ void SDLAudioAdapter::audio_output(AudioOutPort &out_port, const void *buffer) {
         port.cond_var.wait_for(lock, std::chrono::microseconds(scaled_wait));
     }
     int bytes_to_write = out_port.len_bytes;
-    const void *audio_data = use_tempo_filter ? tempo_correct_fast_forward(port, buffer, bytes_to_write, speed_percent) : buffer;
+    const void *audio_data = use_tempo_filter
+        ? tempo_correct_fast_forward(port, buffer, bytes_to_write, speed_percent)
+        : normal_pitch_skip_fast_forward(port, buffer, bytes_to_write, speed_percent);
     if (bytes_to_write > 0) {
         SDL_CHECK_VOID(SDL_PutAudioStreamData(port.stream.get(), audio_data, bytes_to_write));
     }
