@@ -42,32 +42,30 @@ Do not open issues expecting support for this experiment. Fork it, test it, patc
 
 The upstream Vita3K project has its own rules, standards, and support expectations. Do not send Thor-experiment problems to upstream Vita3K.
 
-## Major Feature Differences From Upstream
+## User-Facing Differences
 
-This fork keeps its differences from stock Vita3K visible and testable:
+The short version: this fork is Vita3K tuned for testing on AYN Thor.
 
-- README and repo branding identify this as the `Vita3K Thor Experiment`.
-- Writable fork remote is `git@github.com:noeldvictor/Vita3K-Thor.git`.
-- Android testing targets the existing `android/` Gradle project and `arm64-v8a` native build path.
-- GPU settings include an in-app Turnip driver picker that can download K11MCH1 AdrenoToolsDrivers ZIP assets, install them, mark a Thor/Adreno 740 recommendation, select the installed custom driver, and delete cached driver ZIPs.
-- Virtual cartridge mode can launch `.zip`/`.vpk` archives directly with `--cartridge`, from the Android UI, or from Android open-with/front-end intents without installing them into the normal Vita3K app library.
-- Archive introspection understands common nonstandard Vita ZIP layouts, including `app/<TITLEID>`, `patch/<TITLEID>`, and `rePatch/<TITLEID>` overlays used by translated game packs.
-- The Android game grid caches virtual ZIP/VPK entries plus archive icons/backgrounds so unchanged ROM folders do not need full archive introspection on every launch.
-- Virtual cartridge entries with readable metadata but encrypted app files are marked with an `E` badge and refused in pure ZIP mode with a clear message instead of failing as a blank icon or broken launch.
-- Direct ZIP cartridge mode now caches very large deflated archive members, such as multi-gigabyte `.psarc` files, to app-local storage on first open instead of inflating them into RAM every time. This keeps large games like `PCSG00490`/Sora no Kiseki the 3rd Evolution from blowing up Android native heap during startup.
-- Android virtual-cartridge scanning includes common internal and removable SD card roots such as `/storage/<card>/Roms/psvita`.
-- The runtime OSD opens from short Back while a game is running, supports controller navigation, uses a high-contrast readable in-game panel, and exposes pause/resume, save/load quickstate slot 0, fast-forward presets, screenshots, renderer trace, and cheat toggles.
-- Long Back maps to the Vita PS/Home path for returning to the LiveArea/home flow instead of opening the OSD.
-- Runtime hotkeys are tuned for Thor: `Select + R1` fast-forward toggle, `Select + right-stick down` save quickstate, and `Select + right-stick up` load quickstate.
-- Fast-forward defaults to 200%, can be switched from the OSD between Off, 2x, 3x, and 4x, and adjusts display/vblank pacing plus guest kernel clock/wait timing together.
-- Experimental quickstate support snapshots guest CPU contexts and allocated memory pages for per-game slot 0, writes compressed `states/<TITLEID>/slot0.thorstate` files, and reloads same-session states after guest threads fully pause. App-restart reloads are still limited: states containing AVPlayer movie/audio threads are refused after restart until host object serialization lands. `save-state-dir` can move the state root to a custom directory, and `save-state-compression-level` controls miniz compression. It is still not a complete emulator-perfect save-state format until GPU/display/audio/IO/kernel-object serialization lands.
-- VitaCheat `.psv` files are detected by title ID from repo, app storage, emulated `ux0/vitacheat`, and Android SD-card cheat roots. The OSD can show loaded cheats and toggle individual entries, while unsupported VitaCheat code types fail closed.
-- `tools/sync_vitacheat_db.ps1` can clone/update a third-party VitaCheat database into ignored local scratch storage and push it to the Thor SD card without committing unlicensed cheat files.
-- `--thor-render-trace` enables the Thor renderer GXM trace at startup for ADB/front-end launches, and `tools/thor_adb_debug_capture.ps1` captures logcat, crash buffer, window focus, meminfo, screenshot, and a Markdown report for repeatable device debugging.
-- Thor test APKs prefer debug-friendly builds while renderer, cartridge, input, and OSD experiments are still moving.
-- Compatibility claims should include commit, APK/build type, renderer, graphics driver, title ID, settings, screenshots, and logs.
-- Thor-only behavior should be guarded behind settings, build flags, device detection, or clearly named code paths.
-- The Android app label and package id are intentionally unchanged unless a future patch says otherwise.
+- Turnip driver manager: download GitHub Turnip ZIPs from K11MCH1/AdrenoToolsDrivers, see the Thor/Adreno 740 recommendation, install one, select it, and delete cached ZIP downloads.
+- Play ZIP as Cartridge: launch `.zip` and `.vpk` archives directly from the Android UI, Android open-with/front-end intents, or `--cartridge` without installing them into the normal Vita3K library.
+- Smarter ZIP scanning: translated and nonstandard archives with `app/<TITLEID>`, `patch/<TITLEID>`, and `rePatch/<TITLEID>` are detected, and cached icons/backgrounds avoid full rescans every launch.
+- Clear library badges: encrypted/PFS-style virtual cartridge entries get an `E` badge and fail with a clear message; games with matching VitaCheat files get a `C` badge.
+- Runtime OSD: short Back opens a controller-friendly in-game menu for pause/resume, save/load quickstate slot 0, fast-forward speed, screenshots, renderer trace, and cheats.
+- Thor hotkeys: `Select + R1` toggles fast-forward, `Select + right-stick down` saves state, and `Select + right-stick up` loads state.
+- Fast-forward presets: Off, 2x, 3x, and 4x are available from the OSD; the selected speed also drives the hotkey.
+- Experimental quickstates: per-game slot 0 saves compressed state files under `states/<TITLEID>/slot0.thorstate`. Same-session save/load works; app-restart durability is still incomplete and is being expanded toward PPSSPP-style reliability.
+- VitaCheat support: `.psv` files can be loaded from repo/user/app/SD-card cheat roots and toggled per game in the OSD. Unsupported code types fail closed.
+- Thor debug capture: one-shot and live ADB tools collect logs, screenshots, focus, meminfo, gfxinfo, crash buffers, and renderer trace evidence while testing on device.
+
+## Technical Differences And Goals
+
+- Android `arm64-v8a` APKs and real AYN Thor testing are the main path; desktop builds still follow upstream expectations.
+- Direct ZIP cartridge mode mounts `app0:` against the archive and applies read-time `patch`/`rePatch` overlays. It does not bypass encryption, licenses, or ownership checks.
+- Large deflated archive members, including multi-gigabyte `.psarc` files, are cached to app-local storage instead of inflated into RAM.
+- Fast-forward changes display/vblank pacing and guest kernel clock/wait timing together.
+- Quickstates currently serialize CPU contexts, allocated guest memory pages, and allocator maps. The next durability targets are kernel objects, GPU/display state, audio, AVPlayer/movie state, IO/VFS handles, and renderer cache state.
+- `--thor-render-trace` adds GXM/Vulkan trace logs, including scene, draw, surface, and texture upload details for renderer debugging.
+- Thor-only behavior should stay behind settings, build flags, device checks, or clearly named code paths.
 - Broad Vita3K fixes should stay clean enough to propose upstream separately.
 - No game files, firmware, license files, or commercial content should be committed here.
 

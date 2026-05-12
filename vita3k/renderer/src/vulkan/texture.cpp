@@ -283,6 +283,7 @@ bool VKTextureCache::init(const bool hashless_texture_cache, const fs::path &tex
 
 void VKTextureCache::select(size_t index, const SceGxmTexture &texture) {
     current_texture = &textures[index];
+    gxm_texture = &texture;
     is_texture_transfer_ready = false;
 }
 
@@ -372,6 +373,27 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
     if (is_cube)
         memory_needed *= 6;
     current_texture->memory_needed = align(memory_needed, 16);
+
+    if (state.renderer_trace_gxm_state) {
+        LOG_INFO("ThorRenderTrace texture configure scene={} cache={} addr=0x{:08X} type={} fmt=0x{:08X} base=0x{:08X} size={}x{} mips={}/{} vk_format={} cube={} bytes={} hash=0x{:016X} use_hash={} imported={}",
+            current_scene_timestamp,
+            current_info ? current_info->index : -1,
+            static_cast<uint32_t>(gxm_texture.data_addr << 2),
+            static_cast<uint32_t>(gxm_texture.texture_type()),
+            static_cast<uint32_t>(format),
+            static_cast<uint32_t>(base_format),
+            width,
+            height,
+            mip_count,
+            gxm_texture.true_mip_count(),
+            vk::to_string(vk_format),
+            is_cube,
+            current_texture->memory_needed,
+            current_info ? current_info->hash : 0,
+            current_info ? current_info->use_hash : false,
+            current_info ? current_info->is_imported : false);
+    }
+
     vkutil::Image &image = current_texture->texture;
 
     // In case the cache is full, no need to put the previous image in the destroy queue
@@ -489,8 +511,38 @@ void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, ui
     }
 
     if (staging_buffer.used_so_far + upload_size > staging_buffer.buffer.size) {
-        LOG_ERROR("Staging buffer size left ({}) is too small for texture size {}!", staging_buffer.buffer.size - staging_buffer.used_so_far, upload_size);
+        LOG_ERROR("Staging buffer size left ({}) is too small for texture size {}! scene={} cache={} addr=0x{:08X} mip={} face={} size={}x{} stride={} buffer_height={} base=0x{:08X}",
+            staging_buffer.buffer.size - staging_buffer.used_so_far,
+            upload_size,
+            current_scene_timestamp,
+            current_info ? current_info->index : -1,
+            current_info ? static_cast<uint32_t>(current_info->texture.data_addr << 2) : 0,
+            mip_index,
+            face,
+            width,
+            height,
+            pixels_per_stride,
+            buffer_height,
+            static_cast<uint32_t>(base_format));
         return;
+    }
+
+    if (state.renderer_trace_gxm_state) {
+        LOG_INFO("ThorRenderTrace texture upload scene={} cache={} addr=0x{:08X} mip={} face={} size={}x{} stride={} buffer_height={} base=0x{:08X} bytes={} staging_used={}/{} hash=0x{:016X}",
+            current_scene_timestamp,
+            current_info ? current_info->index : -1,
+            current_info ? static_cast<uint32_t>(current_info->texture.data_addr << 2) : 0,
+            mip_index,
+            face,
+            width,
+            height,
+            pixels_per_stride,
+            buffer_height,
+            static_cast<uint32_t>(base_format),
+            static_cast<uint64_t>(upload_size),
+            static_cast<uint64_t>(staging_buffer.used_so_far),
+            static_cast<uint64_t>(staging_buffer.buffer.size),
+            current_info ? current_info->hash : 0);
     }
 
     memcpy(static_cast<uint8_t *>(staging_buffer.buffer.mapped_data) + staging_buffer.used_so_far, text_data, upload_size);

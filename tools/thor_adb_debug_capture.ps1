@@ -79,7 +79,10 @@ Start-Sleep -Seconds $Seconds
 & $Adb logcat -b crash -d -v threadtime | Set-Content -Encoding UTF8 -Path $crashPath
 & $Adb shell dumpsys window | Set-Content -Encoding UTF8 -Path $windowPath
 & $Adb shell dumpsys meminfo $Package | Set-Content -Encoding UTF8 -Path $memPath
-& $Adb exec-out screencap -p > $screenPath
+$remoteScreenPath = "/sdcard/vita3k-thor-debug-$stamp.png"
+& $Adb shell screencap -p $remoteScreenPath | Out-Null
+& $Adb pull $remoteScreenPath $screenPath | Out-Null
+& $Adb shell rm $remoteScreenPath | Out-Null
 foreach ($path in @($logPath, $crashPath, $windowPath, $memPath, $screenPath)) {
     if (-not (Test-Path -LiteralPath $path)) {
         New-Item -ItemType File -Path $path | Out-Null
