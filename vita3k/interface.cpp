@@ -1794,13 +1794,20 @@ static bool runtime_any_gamepad_button_down(EmuEnvState &emuenv, const SDL_Gamep
 }
 
 static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &event) {
+    static bool osd_chord_latched = false;
     static bool fast_forward_latched = false;
     static bool save_state_latched = false;
     static bool load_state_latched = false;
+    const SDL_GamepadButton l3_button = runtime_configured_button(emuenv, SDL_GAMEPAD_BUTTON_LEFT_STICK);
+    const SDL_GamepadButton r3_button = runtime_configured_button(emuenv, SDL_GAMEPAD_BUTTON_RIGHT_STICK);
     const SDL_GamepadButton select_button = runtime_configured_button(emuenv, SDL_GAMEPAD_BUTTON_BACK);
     const SDL_GamepadButton r1_button = runtime_configured_button(emuenv, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
 
     if (event.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+        if (runtime_button_matches(static_cast<SDL_GamepadButton>(event.gbutton.button), l3_button, SDL_GAMEPAD_BUTTON_LEFT_STICK)
+            || runtime_button_matches(static_cast<SDL_GamepadButton>(event.gbutton.button), r3_button, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) {
+            osd_chord_latched = false;
+        }
         if (runtime_button_matches(static_cast<SDL_GamepadButton>(event.gbutton.button), r1_button, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER))
             fast_forward_latched = false;
         if (runtime_button_matches(static_cast<SDL_GamepadButton>(event.gbutton.button), select_button, SDL_GAMEPAD_BUTTON_BACK)) {
@@ -1817,6 +1824,22 @@ static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &
 
     if (!gamepad)
         return false;
+
+    if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+        const auto button = static_cast<SDL_GamepadButton>(event.gbutton.button);
+        const bool l3_event = runtime_button_matches(button, l3_button, SDL_GAMEPAD_BUTTON_LEFT_STICK);
+        const bool r3_event = runtime_button_matches(button, r3_button, SDL_GAMEPAD_BUTTON_RIGHT_STICK);
+        if ((l3_event || r3_event) && !emuenv.io.title_id.empty()) {
+            const bool l3_down = runtime_gamepad_button_down(gamepad, l3_button, SDL_GAMEPAD_BUTTON_LEFT_STICK);
+            const bool r3_down = runtime_gamepad_button_down(gamepad, r3_button, SDL_GAMEPAD_BUTTON_RIGHT_STICK);
+            if (l3_down && r3_down && !osd_chord_latched) {
+                osd_chord_latched = true;
+                LOG_INFO("L3+R3 chord: toggling runtime OSD");
+                runtime_osd_set_open(emuenv, !runtime_osd_is_open());
+                return true;
+            }
+        }
+    }
 
     const bool select_down = runtime_gamepad_button_down(gamepad, select_button, SDL_GAMEPAD_BUTTON_BACK) || android_back_key_down;
     const bool r1_down = runtime_gamepad_button_down(gamepad, r1_button, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
