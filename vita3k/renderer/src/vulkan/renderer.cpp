@@ -35,6 +35,9 @@
 
 #include <SDL3/SDL_vulkan.h>
 
+#include <algorithm>
+#include <cstdlib>
+
 #ifdef __APPLE__
 #include <MoltenVK/mvk_vulkan.h>
 #endif
@@ -149,6 +152,23 @@ const static std::vector<const char *> required_device_extensions = {
 };
 
 namespace renderer::vulkan {
+
+static bool renderer_debug_env_flag(const char *name) {
+    const char *value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0')
+        return false;
+
+    const std::string_view text(value);
+    return text != "0" && text != "false" && text != "False" && text != "FALSE" && text != "off" && text != "OFF" && text != "no" && text != "NO";
+}
+
+static bool renderer_debug_env_requested() {
+    return renderer_debug_env_flag("VITA3K_RENDER_DEBUG")
+        || renderer_debug_env_flag("VITA3K_RENDER_LABELS")
+        || std::getenv("VITA3K_RENDER_SKIP") != nullptr
+        || std::getenv("VITA3K_RENDER_STOP_AFTER") != nullptr
+        || std::getenv("VITA3K_RENDER_TRACE_LIMIT") != nullptr;
+}
 
 #ifdef __ANDROID__
 static bool detect_patch_bcn(bool *support_dxt) {
@@ -432,19 +452,19 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
             }
         }
 
-        // look if we can use the validation layer
+        // look if we can use the validation layer and debug labels
         bool has_validation_layer = false;
-        const std::array<const std::string, 2> debug_extensions = { VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
-            VK_EXT_DEBUG_REPORT_EXTENSION_NAME };
-        // use a string, not a string view, on some mali devices the memory gets modified
-        std::string found_debug_extension;
+        // use strings, not string views, on some Mali devices the memory gets modified
+        std::string found_debug_utils_extension;
+        std::string found_debug_report_extension;
         for (const vk::ExtensionProperties &prop : vk::enumerateInstanceExtensionProperties()) {
             const std::string_view extension(prop.extensionName.data());
-            for (const auto &debug_ext : debug_extensions) {
-                if (debug_ext == extension)
-                    found_debug_extension = extension;
-            }
+            if (extension == VK_EXT_DEBUG_UTILS_EXTENSION_NAME)
+                found_debug_utils_extension = extension;
+            else if (extension == VK_EXT_DEBUG_REPORT_EXTENSION_NAME)
+                found_debug_report_extension = extension;
         }
+        const std::string &validation_debug_extension = !found_debug_utils_extension.empty() ? found_debug_utils_extension : found_debug_report_extension;
         const std::string validation_layer = "VK_LAYER_KHRONOS_validation";
         for (const vk::LayerProperties &layer : vk::enumerateInstanceLayerProperties()) {
             if (std::string_view(layer.layerName.data()) == validation_layer) {
@@ -453,15 +473,23 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
             }
         }
 
+        const bool wants_renderer_debug = renderer_debug_env_requested();
         std::vector<const char *> instance_layers;
-        if (has_validation_layer && !found_debug_extension.empty()) {
+        if (has_validation_layer && !validation_debug_extension.empty()) {
             if (config.validation_layer) {
                 LOG_INFO("Enabling vulkan validation layers (has a performance impact but allows better error messages)");
                 instance_layers.push_back(validation_layer.c_str());
-                instance_extensions.push_back(found_debug_extension.data());
+                instance_extensions.push_back(validation_debug_extension.data());
             } else {
                 LOG_INFO("Disabling Vulkan validation layers (may improve performance but provides limited error messages)");
             }
+        }
+
+        if (wants_renderer_debug && !found_debug_utils_extension.empty()) {
+            if (std::find(instance_extensions.begin(), instance_extensions.end(), found_debug_utils_extension.data()) == instance_extensions.end())
+                instance_extensions.push_back(found_debug_utils_extension.data());
+            support_debug_utils_labels = true;
+            LOG_INFO("Enabling Vulkan debug utils labels for renderer debug capture");
         }
 
 #ifdef __APPLE__
@@ -499,9 +527,10 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
         instance = vk::createInstance(instance_info);
         VULKAN_HPP_DEFAULT_DISPATCHER.init(instance);
 
-        if (has_validation_layer && !found_debug_extension.empty() && config.validation_layer) {
+        if (has_validation_layer && !validation_debug_extension.empty() && config.validation_layer) {
             // we support two debugging extensions
-            if (found_debug_extension == VK_EXT_DEBUG_UTILS_EXTENSION_NAME) {
+            if (validation_debug_extension == VK_EXT_DEBUG_UTILS_EXTENSION_NAME) {
+                support_debug_utils_labels = true;
                 vk::DebugUtilsMessengerCreateInfoEXT debug_info{
                     .messageSeverity = vk::DebugUtilsMessageSeverityFlagBitsEXT::eVerbose
                         | vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning | vk::DebugUtilsMessageSeverityFlagBitsEXT::eError,
@@ -511,7 +540,7 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
                 };
                 debug_messenger = instance.createDebugUtilsMessengerEXT(debug_info);
 
-            } else if (found_debug_extension == VK_EXT_DEBUG_REPORT_EXTENSION_NAME) {
+            } else if (validation_debug_extension == VK_EXT_DEBUG_REPORT_EXTENSION_NAME) {
                 vk::DebugReportCallbackCreateInfoEXT report_info{
                     .flags = vk::DebugReportFlagBitsEXT::eError,
                     .pfnCallback = debug_report_callback
@@ -904,6 +933,7 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
 
 void VKState::late_init(const Config &cfg, const std::string_view game_id, MemState &mem) {
     this->mem = &mem;
+    this->game_id = game_id;
 
     bool use_high_accuracy = cfg.current_config.high_accuracy;
 

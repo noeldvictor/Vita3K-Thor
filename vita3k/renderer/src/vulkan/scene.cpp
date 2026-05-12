@@ -25,7 +25,182 @@
 
 #include <util/log.h>
 
+#include <algorithm>
+#include <array>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
+#include <string>
+#include <string_view>
+
 namespace renderer::vulkan {
+
+struct RendererDebugRange {
+    bool enabled = false;
+    bool has_frame = false;
+    bool has_scene = false;
+    uint64_t frame = 0;
+    uint64_t scene = 0;
+    uint32_t first_draw = 0;
+    uint32_t last_draw = 0;
+};
+
+struct RendererDebugConfig {
+    bool labels = false;
+    bool trace = false;
+    uint32_t trace_limit = 32;
+    RendererDebugRange skip;
+    RendererDebugRange stop_after;
+};
+
+static bool renderer_debug_env_flag(const char *name) {
+    const char *value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0')
+        return false;
+
+    const std::string_view text(value);
+    return text != "0" && text != "false" && text != "False" && text != "FALSE" && text != "off" && text != "OFF" && text != "no" && text != "NO";
+}
+
+static bool parse_u64_at(const char *begin, uint64_t &value, const char **end_out = nullptr) {
+    char *end = nullptr;
+    const unsigned long long parsed = std::strtoull(begin, &end, 10);
+    if (begin == end)
+        return false;
+
+    value = static_cast<uint64_t>(parsed);
+    if (end_out != nullptr)
+        *end_out = end;
+    return true;
+}
+
+static bool parse_u64_key(const std::string &spec, const char *key, uint64_t &value) {
+    const size_t pos = spec.find(key);
+    if (pos == std::string::npos)
+        return false;
+
+    return parse_u64_at(spec.c_str() + pos + std::strlen(key), value);
+}
+
+static uint32_t clamp_draw_index(uint64_t value) {
+    return static_cast<uint32_t>(std::min<uint64_t>(value, std::numeric_limits<uint32_t>::max()));
+}
+
+static RendererDebugRange parse_renderer_debug_range(const char *name) {
+    RendererDebugRange range;
+    const char *value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0')
+        return range;
+
+    const std::string spec(value);
+    uint64_t parsed = 0;
+    if (parse_u64_key(spec, "frame=", parsed)) {
+        range.has_frame = true;
+        range.frame = parsed;
+    }
+    if (parse_u64_key(spec, "scene=", parsed)) {
+        range.has_scene = true;
+        range.scene = parsed;
+    }
+
+    const size_t draw_pos = spec.find("draw=");
+    const char *draw_begin = draw_pos == std::string::npos ? spec.c_str() : spec.c_str() + draw_pos + 5;
+    const char *draw_end = nullptr;
+    if (!parse_u64_at(draw_begin, parsed, &draw_end))
+        return range;
+
+    range.first_draw = clamp_draw_index(parsed);
+    range.last_draw = range.first_draw;
+    if (draw_end != nullptr && *draw_end == '-') {
+        uint64_t parsed_last = 0;
+        if (parse_u64_at(draw_end + 1, parsed_last))
+            range.last_draw = clamp_draw_index(parsed_last);
+    }
+
+    if (range.first_draw > range.last_draw)
+        std::swap(range.first_draw, range.last_draw);
+
+    range.enabled = true;
+    return range;
+}
+
+static uint32_t renderer_debug_trace_limit() {
+    const char *value = std::getenv("VITA3K_RENDER_TRACE_LIMIT");
+    if (value == nullptr || value[0] == '\0')
+        return 32;
+
+    uint64_t parsed = 0;
+    if (!parse_u64_at(value, parsed) || parsed == 0)
+        return 32;
+
+    return clamp_draw_index(parsed);
+}
+
+static const RendererDebugConfig &renderer_debug_config() {
+    static const RendererDebugConfig config = [] {
+        RendererDebugConfig cfg;
+        cfg.labels = renderer_debug_env_flag("VITA3K_RENDER_DEBUG") || renderer_debug_env_flag("VITA3K_RENDER_LABELS");
+        cfg.trace = renderer_debug_env_flag("VITA3K_RENDER_DEBUG") || renderer_debug_env_flag("VITA3K_RENDER_TRACE");
+        cfg.trace_limit = renderer_debug_trace_limit();
+        cfg.skip = parse_renderer_debug_range("VITA3K_RENDER_SKIP");
+        cfg.stop_after = parse_renderer_debug_range("VITA3K_RENDER_STOP_AFTER");
+
+        if (cfg.labels || cfg.trace || cfg.skip.enabled || cfg.stop_after.enabled || cfg.trace_limit != 32) {
+            LOG_INFO("ThorRenderDebug labels={} trace={} trace_limit={} skip={} stop_after={}",
+                cfg.labels,
+                cfg.trace,
+                cfg.trace_limit,
+                cfg.skip.enabled ? std::getenv("VITA3K_RENDER_SKIP") : "",
+                cfg.stop_after.enabled ? std::getenv("VITA3K_RENDER_STOP_AFTER") : "");
+        }
+        return cfg;
+    }();
+    return config;
+}
+
+static bool renderer_debug_range_matches(const RendererDebugRange &range, uint64_t frame, uint64_t scene, uint32_t draw) {
+    if (!range.enabled)
+        return false;
+    if (range.has_frame && range.frame != frame)
+        return false;
+    if (range.has_scene && range.scene != scene)
+        return false;
+    return draw >= range.first_draw && draw <= range.last_draw;
+}
+
+static bool renderer_debug_stop_after_matches(const RendererDebugRange &range, uint64_t frame, uint64_t scene, uint32_t draw) {
+    if (!range.enabled)
+        return false;
+    if (range.has_frame && range.frame != frame)
+        return false;
+    if (range.has_scene && range.scene != scene)
+        return false;
+    return draw > range.last_draw;
+}
+
+static void insert_renderer_debug_label(VKContext &context, const std::string &label, const std::array<float, 4> &color) {
+    const RendererDebugConfig &debug = renderer_debug_config();
+    if (!debug.labels)
+        return;
+
+    static bool logged_missing_support = false;
+    if (!context.state.support_debug_utils_labels) {
+        if (!logged_missing_support) {
+            LOG_WARN("VITA3K_RENDER_LABELS requested, but VK_EXT_debug_utils labels are not available in this Vulkan instance");
+            logged_missing_support = true;
+        }
+        return;
+    }
+
+    vk::DebugUtilsLabelEXT label_info{
+        .pLabelName = label.c_str()
+    };
+    label_info.color[0] = color[0];
+    label_info.color[1] = color[1];
+    label_info.color[2] = color[2];
+    label_info.color[3] = color[3];
+    context.render_cmd.insertDebugUtilsLabelEXT(label_info);
+}
 
 void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *program, const bool vertex_shader, const int block_num, const int size, Ptr<uint8_t> data) {
     auto offset = program->uniform_buffer_data_offsets.at(block_num);
@@ -377,6 +552,40 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         context.last_draw_was_framebuffer_fetch = fragment_program_gxp.is_frag_color_used();
     }
 
+    const RendererDebugConfig &renderer_debug = renderer_debug_config();
+    const uint32_t debug_draw_index = context.debug_scene_draw_count++;
+    const bool renderer_debug_skip = renderer_debug_range_matches(renderer_debug.skip, context.frame_timestamp, context.scene_timestamp, debug_draw_index);
+    const bool renderer_debug_stop_after = renderer_debug_stop_after_matches(renderer_debug.stop_after, context.frame_timestamp, context.scene_timestamp, debug_draw_index);
+    if (renderer_debug_skip || renderer_debug_stop_after) {
+        const char *reason = renderer_debug_skip ? "skip" : "stop-after";
+        if (context.state.renderer_trace_gxm_state || renderer_debug.trace) {
+            LOG_INFO("ThorRenderDebug {} frame={} scene={} draw={} prim={} index_fmt={} count={} instances={}",
+                reason,
+                context.frame_timestamp,
+                context.scene_timestamp,
+                debug_draw_index,
+                static_cast<uint32_t>(type),
+                static_cast<uint32_t>(format),
+                count,
+                instance_count);
+        }
+
+        insert_renderer_debug_label(context,
+            fmt::format("{} frame={} scene={} draw={} {} prim={} count={}",
+                context.state.game_id.empty() ? "unknown" : context.state.game_id,
+                context.frame_timestamp,
+                context.scene_timestamp,
+                debug_draw_index,
+                reason,
+                static_cast<uint32_t>(type),
+                count),
+            { 1.0f, 0.25f, 0.1f, 1.0f });
+
+        context.vertex_uniform_storage_allocated = false;
+        context.fragment_uniform_storage_allocated = false;
+        return;
+    }
+
     if (context.current_visibility_buffer != nullptr && context.current_query_idx != -1 && !context.is_in_query) {
         if (context.current_visibility_buffer->queries_used[context.current_query_idx]) {
             LOG_WARN_ONCE("Visibility buffer entry is used more than once in a scene");
@@ -413,19 +622,18 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     if (context.current_pipeline == nullptr)
         return;
 
-    if (context.state.renderer_trace_gxm_state) {
-        const uint32_t trace_draw_index = context.debug_scene_draw_count++;
-        constexpr uint32_t trace_draw_limit = 32;
-        if (trace_draw_index < trace_draw_limit) {
+    if (context.state.renderer_trace_gxm_state || renderer_debug.trace) {
+        const uint32_t trace_draw_limit = renderer_debug.trace_limit;
+        if (debug_draw_index < trace_draw_limit) {
             const auto &vertex_data = context.record.vertex_program.get(mem)->renderer_data;
             const auto &fragment_data = context.record.fragment_program.get(mem)->renderer_data;
             const std::string hash_text_f = hex_string(fragment_data->hash);
             const std::string hash_text_v = hex_string(vertex_data->hash);
 
-            LOG_INFO("ThorRenderTrace draw frame={} scene={} draw={} prim={} index_fmt={} count={} instances={} pipeline={} framebuffer_fetch={} vhash={} fhash={} vtex={} ftex={} vbufs={} fbufs={} depth_func={}/{} depth_write={}/{} stencil_func={}/{} cull={} two_sided={} vp_flat={} z_offset={} z_scale={} writing_mask={}",
+                LOG_INFO("ThorRenderTrace draw frame={} scene={} draw={} prim={} index_fmt={} count={} instances={} pipeline={} framebuffer_fetch={} vhash={} fhash={} vtex={} ftex={} vbufs={} fbufs={} depth_func={}/{} depth_write={}/{} stencil_func={}/{} cull={} two_sided={} vp_flat={} z_offset={} z_scale={} writing_mask={}",
                 context.frame_timestamp,
                 context.scene_timestamp,
-                trace_draw_index,
+                debug_draw_index,
                 static_cast<uint32_t>(type),
                 static_cast<uint32_t>(format),
                 count,
@@ -450,7 +658,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
                 context.record.z_offset,
                 context.record.z_scale,
                 context.record.writing_mask);
-        } else if (trace_draw_index == trace_draw_limit) {
+        } else if (debug_draw_index == trace_draw_limit) {
             LOG_INFO("ThorRenderTrace draw frame={} scene={} draw_limit={} reached; suppressing remaining draws for this scene",
                 context.frame_timestamp,
                 context.scene_timestamp,
@@ -549,6 +757,22 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
 
     // bind the vertex streams
     bind_vertex_streams(context, mem, instance_count, max_index);
+
+    if (renderer_debug.labels) {
+        const auto &vertex_data = context.record.vertex_program.get(mem)->renderer_data;
+        const auto &fragment_data = context.record.fragment_program.get(mem)->renderer_data;
+        insert_renderer_debug_label(context,
+            fmt::format("{} frame={} scene={} draw={} prim={} count={} vhash={} fhash={}",
+                context.state.game_id.empty() ? "unknown" : context.state.game_id,
+                context.frame_timestamp,
+                context.scene_timestamp,
+                debug_draw_index,
+                static_cast<uint32_t>(type),
+                count,
+                hex_string(vertex_data->hash),
+                hex_string(fragment_data->hash)),
+            { 0.2f, 0.7f, 1.0f, 1.0f });
+    }
 
     context.render_cmd.drawIndexed(count, instance_count, 0, 0, 0);
 
