@@ -40,10 +40,18 @@ struct RendererDebugRange {
     bool enabled = false;
     bool has_frame = false;
     bool has_scene = false;
+    bool has_rt = false;
+    bool has_vhash = false;
+    bool has_fhash = false;
     uint64_t frame = 0;
     uint64_t scene = 0;
+    uint32_t rt_width = 0;
+    uint32_t rt_height = 0;
     uint32_t first_draw = 0;
     uint32_t last_draw = 0;
+    std::string vhash_prefix;
+    std::string fhash_prefix;
+    std::string spec;
 };
 
 struct RendererDebugConfig {
@@ -87,6 +95,19 @@ static bool parse_u64_key(const std::string &spec, const char *key, uint64_t &va
     return parse_u64_at(spec.c_str() + pos + std::strlen(key), value);
 }
 
+static std::string parse_text_key(const std::string &spec, const char *key) {
+    const size_t pos = spec.find(key);
+    if (pos == std::string::npos)
+        return {};
+
+    const size_t value_begin = pos + std::strlen(key);
+    size_t value_end = spec.find(':', value_begin);
+    if (value_end == std::string::npos)
+        value_end = spec.size();
+
+    return spec.substr(value_begin, value_end - value_begin);
+}
+
 static uint32_t clamp_draw_index(uint64_t value) {
     return static_cast<uint32_t>(std::min<uint64_t>(value, std::numeric_limits<uint32_t>::max()));
 }
@@ -95,6 +116,7 @@ static RendererDebugRange parse_renderer_debug_range_spec(const std::string &spe
     RendererDebugRange range;
     if (spec.empty())
         return range;
+    range.spec = spec;
 
     uint64_t parsed = 0;
     if (parse_u64_key(spec, "frame=", parsed)) {
@@ -105,6 +127,25 @@ static RendererDebugRange parse_renderer_debug_range_spec(const std::string &spe
         range.has_scene = true;
         range.scene = parsed;
     }
+
+    const std::string rt = parse_text_key(spec, "rt=");
+    if (!rt.empty()) {
+        const size_t separator = rt.find('x');
+        if (separator != std::string::npos) {
+            uint64_t parsed_width = 0;
+            uint64_t parsed_height = 0;
+            if (parse_u64_at(rt.c_str(), parsed_width) && parse_u64_at(rt.c_str() + separator + 1, parsed_height)) {
+                range.has_rt = true;
+                range.rt_width = clamp_draw_index(parsed_width);
+                range.rt_height = clamp_draw_index(parsed_height);
+            }
+        }
+    }
+
+    range.vhash_prefix = parse_text_key(spec, "vhash=");
+    range.has_vhash = !range.vhash_prefix.empty();
+    range.fhash_prefix = parse_text_key(spec, "fhash=");
+    range.has_fhash = !range.fhash_prefix.empty();
 
     const size_t draw_pos = spec.find("draw=");
     const char *draw_begin = draw_pos == std::string::npos ? spec.c_str() : spec.c_str() + draw_pos + 5;
@@ -197,18 +238,13 @@ static void poll_renderer_debug_control_file(RendererDebugConfig &cfg) {
     }
 
     if (next.labels != cfg.labels || next.trace != cfg.trace || next.trace_limit != cfg.trace_limit
-        || next.skip.enabled != cfg.skip.enabled || next.skip.first_draw != cfg.skip.first_draw || next.skip.last_draw != cfg.skip.last_draw
-        || next.stop_after.enabled != cfg.stop_after.enabled || next.stop_after.first_draw != cfg.stop_after.first_draw || next.stop_after.last_draw != cfg.stop_after.last_draw) {
-        LOG_INFO("ThorRenderDebug live-control labels={} trace={} trace_limit={} skip={}{}{} stop_after={}{}{}",
+        || next.skip.spec != cfg.skip.spec || next.stop_after.spec != cfg.stop_after.spec) {
+        LOG_INFO("ThorRenderDebug live-control labels={} trace={} trace_limit={} skip={} stop_after={}",
             next.labels,
             next.trace,
             next.trace_limit,
-            next.skip.enabled,
-            next.skip.enabled ? " draw=" : "",
-            next.skip.enabled ? fmt::format("{}-{}", next.skip.first_draw, next.skip.last_draw) : "",
-            next.stop_after.enabled,
-            next.stop_after.enabled ? " draw<=" : "",
-            next.stop_after.enabled ? fmt::format("{}", next.stop_after.last_draw) : "");
+            next.skip.spec,
+            next.stop_after.spec);
     }
     cfg = next;
 }
@@ -236,22 +272,38 @@ static RendererDebugConfig &renderer_debug_config() {
     return config;
 }
 
-static bool renderer_debug_range_matches(const RendererDebugRange &range, uint64_t frame, uint64_t scene, uint32_t draw) {
+static bool renderer_debug_hash_prefix_matches(const std::string &hash, const std::string &prefix) {
+    return hash.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), hash.begin());
+}
+
+static bool renderer_debug_range_matches(const RendererDebugRange &range, uint64_t frame, uint64_t scene, uint32_t rt_width, uint32_t rt_height, const std::string &vhash, const std::string &fhash, uint32_t draw) {
     if (!range.enabled)
         return false;
     if (range.has_frame && range.frame != frame)
         return false;
     if (range.has_scene && range.scene != scene)
+        return false;
+    if (range.has_rt && (range.rt_width != rt_width || range.rt_height != rt_height))
+        return false;
+    if (range.has_vhash && !renderer_debug_hash_prefix_matches(vhash, range.vhash_prefix))
+        return false;
+    if (range.has_fhash && !renderer_debug_hash_prefix_matches(fhash, range.fhash_prefix))
         return false;
     return draw >= range.first_draw && draw <= range.last_draw;
 }
 
-static bool renderer_debug_stop_after_matches(const RendererDebugRange &range, uint64_t frame, uint64_t scene, uint32_t draw) {
+static bool renderer_debug_stop_after_matches(const RendererDebugRange &range, uint64_t frame, uint64_t scene, uint32_t rt_width, uint32_t rt_height, const std::string &vhash, const std::string &fhash, uint32_t draw) {
     if (!range.enabled)
         return false;
     if (range.has_frame && range.frame != frame)
         return false;
     if (range.has_scene && range.scene != scene)
+        return false;
+    if (range.has_rt && (range.rt_width != rt_width || range.rt_height != rt_height))
+        return false;
+    if (range.has_vhash && !renderer_debug_hash_prefix_matches(vhash, range.vhash_prefix))
+        return false;
+    if (range.has_fhash && !renderer_debug_hash_prefix_matches(fhash, range.fhash_prefix))
         return false;
     return draw > range.last_draw;
 }
@@ -668,20 +720,30 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
 
     const RendererDebugConfig &renderer_debug = renderer_debug_config();
     const uint32_t debug_draw_index = context.debug_scene_draw_count++;
-    const bool renderer_debug_skip = renderer_debug_range_matches(renderer_debug.skip, context.frame_timestamp, context.scene_timestamp, debug_draw_index);
-    const bool renderer_debug_stop_after = renderer_debug_stop_after_matches(renderer_debug.stop_after, context.frame_timestamp, context.scene_timestamp, debug_draw_index);
+    const auto &vertex_data = context.record.vertex_program.get(mem)->renderer_data;
+    const auto &fragment_data = context.record.fragment_program.get(mem)->renderer_data;
+    const std::string hash_text_v = hex_string(vertex_data->hash);
+    const std::string hash_text_f = hex_string(fragment_data->hash);
+    const uint32_t debug_rt_width = context.render_target != nullptr ? context.render_target->width : 0;
+    const uint32_t debug_rt_height = context.render_target != nullptr ? context.render_target->height : 0;
+    const bool renderer_debug_skip = renderer_debug_range_matches(renderer_debug.skip, context.frame_timestamp, context.scene_timestamp, debug_rt_width, debug_rt_height, hash_text_v, hash_text_f, debug_draw_index);
+    const bool renderer_debug_stop_after = renderer_debug_stop_after_matches(renderer_debug.stop_after, context.frame_timestamp, context.scene_timestamp, debug_rt_width, debug_rt_height, hash_text_v, hash_text_f, debug_draw_index);
     if (renderer_debug_skip || renderer_debug_stop_after) {
         const char *reason = renderer_debug_skip ? "skip" : "stop-after";
         if (context.state.renderer_trace_gxm_state || renderer_debug.trace) {
-            LOG_INFO("ThorRenderDebug {} frame={} scene={} draw={} prim={} index_fmt={} count={} instances={}",
+            LOG_INFO("ThorRenderDebug {} frame={} scene={} rt={}x{} draw={} prim={} index_fmt={} count={} instances={} vhash={} fhash={}",
                 reason,
                 context.frame_timestamp,
                 context.scene_timestamp,
+                debug_rt_width,
+                debug_rt_height,
                 debug_draw_index,
                 static_cast<uint32_t>(type),
                 static_cast<uint32_t>(format),
                 count,
-                instance_count);
+                instance_count,
+                hash_text_v,
+                hash_text_f);
         }
 
         insert_renderer_debug_label(context,
@@ -739,11 +801,6 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     if (context.state.renderer_trace_gxm_state || renderer_debug.trace) {
         const uint32_t trace_draw_limit = renderer_debug.trace_limit;
         if (debug_draw_index < trace_draw_limit) {
-            const auto &vertex_data = context.record.vertex_program.get(mem)->renderer_data;
-            const auto &fragment_data = context.record.fragment_program.get(mem)->renderer_data;
-            const std::string hash_text_f = hex_string(fragment_data->hash);
-            const std::string hash_text_v = hex_string(vertex_data->hash);
-
                 LOG_INFO("ThorRenderTrace draw frame={} scene={} draw={} prim={} index_fmt={} count={} instances={} pipeline={} framebuffer_fetch={} vhash={} fhash={} vtex={} ftex={} vbufs={} fbufs={} depth_func={}/{} depth_write={}/{} stencil_func={}/{} cull={} two_sided={} vp_flat={} z_offset={} z_scale={} writing_mask={}",
                 context.frame_timestamp,
                 context.scene_timestamp,
@@ -873,8 +930,6 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     bind_vertex_streams(context, mem, instance_count, max_index);
 
     if (renderer_debug.labels) {
-        const auto &vertex_data = context.record.vertex_program.get(mem)->renderer_data;
-        const auto &fragment_data = context.record.fragment_program.get(mem)->renderer_data;
         insert_renderer_debug_label(context,
             fmt::format("{} frame={} scene={} draw={} prim={} count={} vhash={} fhash={}",
                 context.state.game_id.empty() ? "unknown" : context.state.game_id,
@@ -883,8 +938,8 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
                 debug_draw_index,
                 static_cast<uint32_t>(type),
                 count,
-                hex_string(vertex_data->hash),
-                hex_string(fragment_data->hash)),
+                hash_text_v,
+                hash_text_f),
             { 0.2f, 0.7f, 1.0f, 1.0f });
     }
 
