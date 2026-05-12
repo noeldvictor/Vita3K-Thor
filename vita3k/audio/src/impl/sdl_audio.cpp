@@ -20,8 +20,23 @@
 #include <SDL3/SDL_audio.h>
 #include <SDL3/SDL_hints.h>
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <sstream>
+#include <string>
+
+extern "C" {
+#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/error.h>
+#include <libavutil/frame.h>
+#include <libavutil/mem.h>
+#include <libavutil/samplefmt.h>
+}
 
 #define SDL_CHECK_EXT(condition, ret)                         \
     do {                                                      \
@@ -39,64 +54,232 @@ static int get_threshold_samples(const int device_buffer_samples) {
     return 4 * device_buffer_samples;
 }
 
-static int16_t blend_sample(const int16_t a, const int16_t b, const int index, const int count) {
-    const int weight_b = index + 1;
-    const int weight_a = count - weight_b + 1;
-    return static_cast<int16_t>((static_cast<int32_t>(a) * weight_a + static_cast<int32_t>(b) * weight_b) / (count + 1));
+static void log_av_error(const char *operation, const int ret) {
+    char errbuf[AV_ERROR_MAX_STRING_SIZE] = {};
+    av_strerror(ret, errbuf, sizeof(errbuf));
+    LOG_ERROR("FFmpeg atempo {} failed: {}", operation, errbuf);
 }
 
-static const void *pitch_correct_fast_forward(SDLAudioOutPort &port, const void *buffer, int &bytes_to_write, const uint32_t speed_percent) {
-    if (speed_percent <= 100 || port.channels <= 0 || port.len <= 0)
-        return buffer;
+static void reset_tempo_filter(SDLAudioOutPort &port) {
+    if (port.tempo_input_frame) {
+        av_frame_free(&port.tempo_input_frame);
+    }
+    if (port.tempo_output_frame) {
+        av_frame_free(&port.tempo_output_frame);
+    }
+    if (port.tempo_graph) {
+        avfilter_graph_free(&port.tempo_graph);
+    }
+    port.tempo_source = nullptr;
+    port.tempo_sink = nullptr;
+    port.tempo_speed_percent = 100;
+    port.tempo_buffer.clear();
+}
 
-    const int input_frames = port.len;
-    const int target_frames = std::max(1, (input_frames * 100) / static_cast<int>(speed_percent));
-    if (target_frames >= input_frames)
-        return buffer;
+SDLAudioOutPort::~SDLAudioOutPort() {
+    reset_tempo_filter(*this);
+}
 
-    const auto *input = static_cast<const int16_t *>(buffer);
-    auto &output = port.pitch_correct_buffer;
-    output.assign(static_cast<size_t>(target_frames) * port.channels, 0);
-
-    const int grain_frames = std::clamp(port.freq / 100, 96, std::max(96, input_frames));
-    const int overlap_frames = std::clamp(grain_frames / 4, 16, std::max(16, grain_frames / 2));
-    int write_frame = 0;
-
-    while (write_frame < target_frames) {
-        const int input_frame = std::min(input_frames - 1, (write_frame * static_cast<int>(speed_percent)) / 100);
-        const int copy_frames = std::min({ grain_frames, target_frames - write_frame, input_frames - input_frame });
-        if (copy_frames <= 0)
-            break;
-
-        if (write_frame == 0) {
-            std::copy_n(&input[input_frame * port.channels], static_cast<size_t>(copy_frames) * port.channels, output.data());
-            write_frame += copy_frames;
-            continue;
-        }
-
-        const int overlap = std::min({ overlap_frames, write_frame, copy_frames });
-        for (int frame = 0; frame < overlap; frame++) {
-            const int dst_frame = write_frame - overlap + frame;
-            const int src_frame = input_frame + frame;
-            for (int channel = 0; channel < port.channels; channel++) {
-                const int dst = dst_frame * port.channels + channel;
-                output[dst] = blend_sample(output[dst], input[src_frame * port.channels + channel], frame, overlap);
-            }
-        }
-
-        const int append_frames = copy_frames - overlap;
-        if (append_frames > 0) {
-            std::copy_n(
-                &input[(input_frame + overlap) * port.channels],
-                static_cast<size_t>(append_frames) * port.channels,
-                &output[write_frame * port.channels]);
-            write_frame += append_frames;
-        } else {
-            write_frame++;
-        }
+static std::string make_atempo_filter_chain(const uint32_t speed_percent) {
+    double tempo = std::clamp(speed_percent / 100.0, 0.5, 100.0);
+    std::ostringstream filter;
+    bool first = true;
+    while (tempo > 2.0) {
+        if (!first)
+            filter << ',';
+        filter << "atempo=2.0";
+        tempo /= 2.0;
+        first = false;
     }
 
-    bytes_to_write = std::max(1, write_frame) * port.channels * static_cast<int>(sizeof(int16_t));
+    if (!first)
+        filter << ',';
+    filter << "atempo=" << tempo;
+    return filter.str();
+}
+
+static bool init_tempo_filter(SDLAudioOutPort &port, const uint32_t speed_percent) {
+    reset_tempo_filter(port);
+    port.tempo_filter_failed = false;
+
+    const AVFilter *source_filter = avfilter_get_by_name("abuffer");
+    const AVFilter *sink_filter = avfilter_get_by_name("abuffersink");
+    const AVFilter *tempo_filter = avfilter_get_by_name("atempo");
+    if (!source_filter || !sink_filter || !tempo_filter) {
+        LOG_ERROR("FFmpeg atempo filter is unavailable; falling back to SDL fast-forward audio");
+        port.tempo_filter_failed = true;
+        return false;
+    }
+
+    port.tempo_graph = avfilter_graph_alloc();
+    if (!port.tempo_graph) {
+        LOG_ERROR("Failed to allocate FFmpeg atempo graph");
+        port.tempo_filter_failed = true;
+        return false;
+    }
+
+    int ret = avfilter_graph_create_filter(&port.tempo_source, source_filter, "thor_tempo_in", nullptr, nullptr, port.tempo_graph);
+    if (ret < 0) {
+        log_av_error("create abuffer", ret);
+        port.tempo_filter_failed = true;
+        reset_tempo_filter(port);
+        return false;
+    }
+
+    AVBufferSrcParameters *params = av_buffersrc_parameters_alloc();
+    if (!params) {
+        LOG_ERROR("Failed to allocate FFmpeg atempo source parameters");
+        port.tempo_filter_failed = true;
+        reset_tempo_filter(port);
+        return false;
+    }
+
+    params->format = AV_SAMPLE_FMT_S16;
+    params->time_base = { 1, port.freq };
+    params->sample_rate = port.freq;
+    av_channel_layout_default(&params->ch_layout, port.channels);
+    ret = av_buffersrc_parameters_set(port.tempo_source, params);
+    av_channel_layout_uninit(&params->ch_layout);
+    av_free(params);
+    if (ret < 0) {
+        log_av_error("set abuffer parameters", ret);
+        port.tempo_filter_failed = true;
+        reset_tempo_filter(port);
+        return false;
+    }
+
+    ret = avfilter_graph_create_filter(&port.tempo_sink, sink_filter, "thor_tempo_out", nullptr, nullptr, port.tempo_graph);
+    if (ret < 0) {
+        log_av_error("create abuffersink", ret);
+        port.tempo_filter_failed = true;
+        reset_tempo_filter(port);
+        return false;
+    }
+
+    AVFilterInOut *inputs = avfilter_inout_alloc();
+    AVFilterInOut *outputs = avfilter_inout_alloc();
+    if (!inputs || !outputs) {
+        LOG_ERROR("Failed to allocate FFmpeg atempo graph endpoints");
+        avfilter_inout_free(&inputs);
+        avfilter_inout_free(&outputs);
+        port.tempo_filter_failed = true;
+        reset_tempo_filter(port);
+        return false;
+    }
+
+    outputs->name = av_strdup("in");
+    outputs->filter_ctx = port.tempo_source;
+    outputs->pad_idx = 0;
+    outputs->next = nullptr;
+
+    inputs->name = av_strdup("out");
+    inputs->filter_ctx = port.tempo_sink;
+    inputs->pad_idx = 0;
+    inputs->next = nullptr;
+
+    const std::string filter_chain = make_atempo_filter_chain(speed_percent);
+    ret = avfilter_graph_parse_ptr(port.tempo_graph, filter_chain.c_str(), &inputs, &outputs, nullptr);
+    avfilter_inout_free(&inputs);
+    avfilter_inout_free(&outputs);
+    if (ret < 0) {
+        log_av_error("parse filter chain", ret);
+        port.tempo_filter_failed = true;
+        reset_tempo_filter(port);
+        return false;
+    }
+
+    ret = avfilter_graph_config(port.tempo_graph, nullptr);
+    if (ret < 0) {
+        log_av_error("configure graph", ret);
+        port.tempo_filter_failed = true;
+        reset_tempo_filter(port);
+        return false;
+    }
+
+    port.tempo_input_frame = av_frame_alloc();
+    port.tempo_output_frame = av_frame_alloc();
+    if (!port.tempo_input_frame || !port.tempo_output_frame) {
+        LOG_ERROR("Failed to allocate FFmpeg atempo frames");
+        port.tempo_filter_failed = true;
+        reset_tempo_filter(port);
+        return false;
+    }
+
+    port.tempo_speed_percent = speed_percent;
+    LOG_INFO("Using FFmpeg atempo fast-forward audio filter: {}", filter_chain);
+    return true;
+}
+
+static bool ensure_tempo_filter(SDLAudioOutPort &port, const uint32_t speed_percent) {
+    if (speed_percent <= 100 || port.channels <= 0 || port.len <= 0 || port.freq <= 0) {
+        reset_tempo_filter(port);
+        port.tempo_filter_failed = false;
+        return false;
+    }
+
+    if (port.tempo_filter_failed && !port.tempo_graph)
+        return false;
+
+    if (port.tempo_graph && port.tempo_speed_percent == speed_percent)
+        return true;
+
+    return init_tempo_filter(port, speed_percent);
+}
+
+static const void *tempo_correct_fast_forward(SDLAudioOutPort &port, const void *buffer, int &bytes_to_write, const uint32_t speed_percent) {
+    bytes_to_write = port.len_bytes;
+    if (!ensure_tempo_filter(port, speed_percent))
+        return buffer;
+
+    AVFrame *input_frame = port.tempo_input_frame;
+    av_frame_unref(input_frame);
+    input_frame->format = AV_SAMPLE_FMT_S16;
+    input_frame->nb_samples = port.len;
+    input_frame->sample_rate = port.freq;
+    av_channel_layout_default(&input_frame->ch_layout, port.channels);
+
+    int ret = av_frame_get_buffer(input_frame, 0);
+    if (ret < 0) {
+        log_av_error("allocate input frame", ret);
+        return buffer;
+    }
+
+    const int input_bytes = port.len * port.channels * static_cast<int>(sizeof(int16_t));
+    std::memcpy(input_frame->data[0], buffer, static_cast<size_t>(input_bytes));
+    ret = av_buffersrc_add_frame_flags(port.tempo_source, input_frame, 0);
+    if (ret < 0) {
+        log_av_error("push input frame", ret);
+        av_frame_unref(input_frame);
+        return buffer;
+    }
+
+    auto &output = port.tempo_buffer;
+    output.clear();
+    AVFrame *output_frame = port.tempo_output_frame;
+    while (true) {
+        av_frame_unref(output_frame);
+        ret = av_buffersink_get_frame(port.tempo_sink, output_frame);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+            break;
+        if (ret < 0) {
+            log_av_error("pull output frame", ret);
+            break;
+        }
+
+        const int bytes_per_sample = av_get_bytes_per_sample(static_cast<AVSampleFormat>(output_frame->format));
+        if (output_frame->format != AV_SAMPLE_FMT_S16 || bytes_per_sample != static_cast<int>(sizeof(int16_t)) || output_frame->ch_layout.nb_channels != port.channels) {
+            LOG_ERROR("Unexpected FFmpeg atempo output format");
+            av_frame_unref(output_frame);
+            return buffer;
+        }
+
+        const size_t existing = output.size();
+        const size_t sample_count = static_cast<size_t>(output_frame->nb_samples) * port.channels;
+        output.resize(existing + sample_count);
+        std::memcpy(&output[existing], output_frame->data[0], sample_count * sizeof(int16_t));
+    }
+
+    bytes_to_write = static_cast<int>(output.size() * sizeof(int16_t));
     return output.data();
 }
 
@@ -159,7 +342,8 @@ void SDLAudioAdapter::audio_output(AudioOutPort &out_port, const void *buffer) {
     //  Put audio to the port's stream and see how much is left to play.
     SDLAudioOutPort &port = static_cast<SDLAudioOutPort &>(out_port);
     const uint32_t speed_percent = std::max<uint32_t>(state.speed_percent.load(), 1);
-    const float speed_ratio = 1.f;
+    const bool use_tempo_filter = ensure_tempo_filter(port, speed_percent);
+    const float speed_ratio = use_tempo_filter ? 1.f : std::clamp(speed_percent / 100.f, 0.01f, 100.f);
     if (std::abs(port.speed_ratio - speed_ratio) > 0.001f) {
         SDL_CHECK_VOID(SDL_SetAudioStreamFrequencyRatio(port.stream.get(), speed_ratio));
         port.speed_ratio = speed_ratio;
@@ -175,8 +359,10 @@ void SDLAudioAdapter::audio_output(AudioOutPort &out_port, const void *buffer) {
         port.cond_var.wait_for(lock, std::chrono::microseconds(scaled_wait));
     }
     int bytes_to_write = out_port.len_bytes;
-    const void *audio_data = pitch_correct_fast_forward(port, buffer, bytes_to_write, speed_percent);
-    SDL_CHECK_VOID(SDL_PutAudioStreamData(port.stream.get(), audio_data, bytes_to_write));
+    const void *audio_data = use_tempo_filter ? tempo_correct_fast_forward(port, buffer, bytes_to_write, speed_percent) : buffer;
+    if (bytes_to_write > 0) {
+        SDL_CHECK_VOID(SDL_PutAudioStreamData(port.stream.get(), audio_data, bytes_to_write));
+    }
 }
 
 void SDLAudioAdapter::set_volume(AudioOutPort &out_port, float volume) {

@@ -20,6 +20,12 @@
 #include "../state.h"
 #include <SDL3/SDL_audio.h>
 #include <condition_variable>
+#include <cstdint>
+#include <vector>
+
+struct AVFilterContext;
+struct AVFilterGraph;
+struct AVFrame;
 
 class SDLAudioAdapter : public AudioAdapter {
 private:
@@ -46,7 +52,14 @@ using AudioStreamPtr = std::shared_ptr<SDL_AudioStream>;
 struct SDLAudioOutPort : public AudioOutPort {
     int channels = 2;
     float speed_ratio = 1.f;
-    std::vector<int16_t> pitch_correct_buffer;
+    AVFilterGraph *tempo_graph = nullptr;
+    AVFilterContext *tempo_source = nullptr;
+    AVFilterContext *tempo_sink = nullptr;
+    AVFrame *tempo_input_frame = nullptr;
+    AVFrame *tempo_output_frame = nullptr;
+    uint32_t tempo_speed_percent = 100;
+    bool tempo_filter_failed = false;
+    std::vector<int16_t> tempo_buffer;
     AudioStreamPtr stream;
     SDLAudioAdapter &adapter;
     std::mutex mutex;
@@ -54,4 +67,5 @@ struct SDLAudioOutPort : public AudioOutPort {
     SDLAudioOutPort(AudioStreamPtr stream, AudioAdapter &adapter)
         : stream(std::move(stream))
         , adapter(dynamic_cast<SDLAudioAdapter &>(adapter)) {}
+    ~SDLAudioOutPort();
 };
