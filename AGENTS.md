@@ -2,6 +2,14 @@
 
 These notes are for work in Vita3K Thor Experiment, a personal Android-focused Vita3K fork for AYN Thor testing. Keep changes practical, reversible, and clearly scoped to handheld compatibility work.
 
+## Project Goals
+
+- Treat Vita3K Thor as a performance, quality, and usability fork, not only a compatibility fork. Getting a game to boot is not enough if pacing, renderer quality, audio, input, OSD readability, or the debug loop are poor.
+- Prefer fixes that improve emulator correctness and long-term quality over one-off game hacks. Game-specific work is acceptable for diagnosis, but it should usually lead to reusable renderer, timing, input, VFS, or tooling improvements.
+- Performance work should be measured with logs, screenshots, profiles, frame pacing data, or before/after reports. Do not assume a change is faster or smoother without evidence.
+- Debug tooling is part of the product direction. Keep improving the Windows and ADB loops so the user can play while Codex quickly captures evidence, isolates issues, patches, rebuilds, and verifies.
+- End-user polish matters: features should be discoverable, controller-first, readable on handheld screens, and explained in plain README language separate from technical implementation notes.
+
 ## Source Control
 
 - Writable remote is the user's fork: `origin = git@github.com:noeldvictor/Vita3K-Thor.git`.
