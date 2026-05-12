@@ -3,6 +3,7 @@ param(
     [string]$GameZip = "",
     [string]$Skip = "",
     [string]$StopAfter = "",
+    [string]$ControlFile = "",
     [int]$TraceLimit = 256,
     [int]$LogLevel = 2,
     [switch]$NoLabels
@@ -18,6 +19,9 @@ if (-not $ConfigPath) {
 }
 if (-not $GameZip) {
     $GameZip = Join-Path $RepoRoot "tmp\local-games\Uppers (English v0.97)[vita3k].zip"
+}
+if (-not $ControlFile) {
+    $ControlFile = Join-Path $RepoRoot "tmp\vita3k-win-debug\render-control.txt"
 }
 
 $LaunchConfigPath = $ConfigPath
@@ -37,6 +41,17 @@ if ($LogLevel -ge 0) {
 $env:VITA3K_RENDER_DEBUG = "1"
 $env:VITA3K_RENDER_TRACE = "1"
 $env:VITA3K_RENDER_TRACE_LIMIT = [string]$TraceLimit
+$env:VITA3K_RENDER_CONTROL_FILE = $ControlFile
+if (-not (Test-Path -LiteralPath $ControlFile)) {
+    @(
+        "# Edit while Vita3K is running; values update live."
+        "trace=1"
+        "trace_limit=$TraceLimit"
+        "labels=$([int](-not $NoLabels))"
+        "skip="
+        "stop_after="
+    ) | Set-Content -LiteralPath $ControlFile -Encoding UTF8
+}
 if ($NoLabels) {
     Remove-Item Env:\VITA3K_RENDER_LABELS -ErrorAction SilentlyContinue
 } else {
@@ -64,6 +79,7 @@ Write-Host "  game:       $GameZip"
 Write-Host "  labels:     $(-not $NoLabels)"
 Write-Host "  traceLimit: $TraceLimit"
 Write-Host "  logLevel:   $LogLevel"
+Write-Host "  control:    $ControlFile"
 Write-Host "  skip:       $Skip"
 Write-Host "  stopAfter:  $StopAfter"
 

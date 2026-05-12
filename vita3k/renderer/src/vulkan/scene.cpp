@@ -29,6 +29,7 @@
 #include <array>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -62,6 +63,10 @@ static bool renderer_debug_env_flag(const char *name) {
     return text != "0" && text != "false" && text != "False" && text != "FALSE" && text != "off" && text != "OFF" && text != "no" && text != "NO";
 }
 
+static bool parse_debug_bool(std::string_view text) {
+    return text == "1" || text == "true" || text == "True" || text == "TRUE" || text == "on" || text == "ON" || text == "yes" || text == "YES";
+}
+
 static bool parse_u64_at(const char *begin, uint64_t &value, const char **end_out = nullptr) {
     char *end = nullptr;
     const unsigned long long parsed = std::strtoull(begin, &end, 10);
@@ -86,13 +91,11 @@ static uint32_t clamp_draw_index(uint64_t value) {
     return static_cast<uint32_t>(std::min<uint64_t>(value, std::numeric_limits<uint32_t>::max()));
 }
 
-static RendererDebugRange parse_renderer_debug_range(const char *name) {
+static RendererDebugRange parse_renderer_debug_range_spec(const std::string &spec) {
     RendererDebugRange range;
-    const char *value = std::getenv(name);
-    if (value == nullptr || value[0] == '\0')
+    if (spec.empty())
         return range;
 
-    const std::string spec(value);
     uint64_t parsed = 0;
     if (parse_u64_key(spec, "frame=", parsed)) {
         range.has_frame = true;
@@ -124,6 +127,11 @@ static RendererDebugRange parse_renderer_debug_range(const char *name) {
     return range;
 }
 
+static RendererDebugRange parse_renderer_debug_range_env(const char *name) {
+    const char *value = std::getenv(name);
+    return value == nullptr ? RendererDebugRange{} : parse_renderer_debug_range_spec(value);
+}
+
 static uint32_t renderer_debug_trace_limit() {
     const char *value = std::getenv("VITA3K_RENDER_TRACE_LIMIT");
     if (value == nullptr || value[0] == '\0')
@@ -136,14 +144,83 @@ static uint32_t renderer_debug_trace_limit() {
     return clamp_draw_index(parsed);
 }
 
-static const RendererDebugConfig &renderer_debug_config() {
-    static const RendererDebugConfig config = [] {
+static bool parse_debug_config_line(RendererDebugConfig &cfg, const std::string &line) {
+    const size_t eq = line.find('=');
+    if (eq == std::string::npos)
+        return false;
+
+    const std::string key = line.substr(0, eq);
+    const std::string value = line.substr(eq + 1);
+    if (key == "labels") {
+        cfg.labels = parse_debug_bool(value);
+    } else if (key == "trace") {
+        cfg.trace = parse_debug_bool(value);
+    } else if (key == "trace_limit") {
+        uint64_t parsed = 0;
+        if (parse_u64_at(value.c_str(), parsed) && parsed != 0)
+            cfg.trace_limit = clamp_draw_index(parsed);
+    } else if (key == "skip") {
+        cfg.skip = parse_renderer_debug_range_spec(value);
+    } else if (key == "stop_after") {
+        cfg.stop_after = parse_renderer_debug_range_spec(value);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+static void poll_renderer_debug_control_file(RendererDebugConfig &cfg) {
+    const char *path = std::getenv("VITA3K_RENDER_CONTROL_FILE");
+    if (path == nullptr || path[0] == '\0')
+        return;
+
+    static uint64_t poll_counter = 0;
+    if ((poll_counter++ % 128) != 0)
+        return;
+
+    std::ifstream file(path, std::ios::in);
+    if (!file.is_open())
+        return;
+
+    RendererDebugConfig next = cfg;
+    std::string line;
+    while (std::getline(file, line)) {
+        const size_t comment = line.find('#');
+        if (comment != std::string::npos)
+            line.resize(comment);
+        line.erase(std::remove_if(line.begin(), line.end(), [](unsigned char ch) {
+            return ch == ' ' || ch == '\t' || ch == '\r';
+        }),
+            line.end());
+        if (!line.empty())
+            parse_debug_config_line(next, line);
+    }
+
+    if (next.labels != cfg.labels || next.trace != cfg.trace || next.trace_limit != cfg.trace_limit
+        || next.skip.enabled != cfg.skip.enabled || next.skip.first_draw != cfg.skip.first_draw || next.skip.last_draw != cfg.skip.last_draw
+        || next.stop_after.enabled != cfg.stop_after.enabled || next.stop_after.first_draw != cfg.stop_after.first_draw || next.stop_after.last_draw != cfg.stop_after.last_draw) {
+        LOG_INFO("ThorRenderDebug live-control labels={} trace={} trace_limit={} skip={}{}{} stop_after={}{}{}",
+            next.labels,
+            next.trace,
+            next.trace_limit,
+            next.skip.enabled,
+            next.skip.enabled ? " draw=" : "",
+            next.skip.enabled ? fmt::format("{}-{}", next.skip.first_draw, next.skip.last_draw) : "",
+            next.stop_after.enabled,
+            next.stop_after.enabled ? " draw<=" : "",
+            next.stop_after.enabled ? fmt::format("{}", next.stop_after.last_draw) : "");
+    }
+    cfg = next;
+}
+
+static RendererDebugConfig &renderer_debug_config() {
+    static RendererDebugConfig config = [] {
         RendererDebugConfig cfg;
         cfg.labels = renderer_debug_env_flag("VITA3K_RENDER_DEBUG") || renderer_debug_env_flag("VITA3K_RENDER_LABELS");
         cfg.trace = renderer_debug_env_flag("VITA3K_RENDER_DEBUG") || renderer_debug_env_flag("VITA3K_RENDER_TRACE");
         cfg.trace_limit = renderer_debug_trace_limit();
-        cfg.skip = parse_renderer_debug_range("VITA3K_RENDER_SKIP");
-        cfg.stop_after = parse_renderer_debug_range("VITA3K_RENDER_STOP_AFTER");
+        cfg.skip = parse_renderer_debug_range_env("VITA3K_RENDER_SKIP");
+        cfg.stop_after = parse_renderer_debug_range_env("VITA3K_RENDER_STOP_AFTER");
 
         if (cfg.labels || cfg.trace || cfg.skip.enabled || cfg.stop_after.enabled || cfg.trace_limit != 32) {
             LOG_INFO("ThorRenderDebug labels={} trace={} trace_limit={} skip={} stop_after={}",
@@ -155,6 +232,7 @@ static const RendererDebugConfig &renderer_debug_config() {
         }
         return cfg;
     }();
+    poll_renderer_debug_control_file(config);
     return config;
 }
 

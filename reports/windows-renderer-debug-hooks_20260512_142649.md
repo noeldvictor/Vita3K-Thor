@@ -10,8 +10,12 @@
   - `VITA3K_RENDER_SKIP=scene=5:draw=100-200`
 - Added stop-after filtering:
   - `VITA3K_RENDER_STOP_AFTER=scene=5:draw=186`
+- Added live control-file polling:
+  - `VITA3K_RENDER_CONTROL_FILE=tmp/vita3k-win-debug/render-control.txt`
+  - `tools/windows/set-render-debug-control.ps1 -StopAfter "draw=93"`
 - Added a Windows launcher:
   - `tools/windows/start-uppers-render-debug.ps1`
+  - `tools/windows/set-render-debug-control.ps1`
 
 ## Why It Helps
 
@@ -50,6 +54,12 @@ That uses the high-accuracy config and the local UPPERS zip:
 3. Relaunch with `-StopAfter "scene=N:draw=D"` or `-Skip "scene=N:draw=A-B"`.
 4. Repeat with narrowed ranges until the first bad draw is isolated.
 5. Inspect that draw in RenderDoc/GFXReconstruct or dump its state from Vita3K.
+
+With the live control file, step 3 can now be done without relaunching:
+
+```powershell
+.\tools\windows\set-render-debug-control.ps1 -StopAfter "draw=93"
+```
 
 ## Notes
 
