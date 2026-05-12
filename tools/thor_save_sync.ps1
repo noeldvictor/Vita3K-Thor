@@ -1,0 +1,139 @@
+param(
+    [string]$TitleId = "PCSG00633",
+    [string]$InstallPath = "",
+    [switch]$Backup,
+    [string]$Package = "org.vita3k.emulator.debug",
+    [string]$Adb = "adb",
+    [string]$OutDir = "tmp/thor-saves",
+    [string]$ReportDir = "reports",
+    [switch]$NoReport
+)
+
+$ErrorActionPreference = "Stop"
+
+function Require-Command($Name) {
+    if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
+        throw "Required command not found: $Name"
+    }
+}
+
+function Slug($Value) {
+    $slug = ($Value.ToLowerInvariant() -replace "[^a-z0-9]+", "-").Trim("-")
+    if ([string]::IsNullOrWhiteSpace($slug)) {
+        return "vita-save-sync"
+    }
+    return $slug
+}
+
+function Find-SaveRoot($Path, $TitleId) {
+    $root = Resolve-Path -LiteralPath $Path
+    $dirs = @((Get-Item -LiteralPath $root).FullName)
+    $dirs += @(Get-ChildItem -LiteralPath $root -Directory -Recurse | ForEach-Object { $_.FullName })
+
+    $titleMatches = @($dirs | Where-Object { (Split-Path -Leaf $_).ToUpperInvariant() -eq $TitleId.ToUpperInvariant() })
+    foreach ($candidate in ($titleMatches + $dirs)) {
+        $files = @(Get-ChildItem -LiteralPath $candidate -File -ErrorAction SilentlyContinue)
+        $hasSaveFiles = @($files | Where-Object {
+            $_.Name -like "SAVEDATA*.bin" -or
+            $_.Name -like "SlotParam*.bin" -or
+            $_.Name -ieq "param.sfo" -or
+            $_.Name -ieq "system.dat"
+        }).Count -gt 0
+        $hasSceSys = Test-Path -LiteralPath (Join-Path $candidate "sce_sys\param.sfo")
+        if ($hasSaveFiles -or $hasSceSys) {
+            return $candidate
+        }
+    }
+
+    throw "Could not find a likely savedata root inside $Path for $TitleId."
+}
+
+Require-Command $Adb
+
+if (-not $Backup -and [string]::IsNullOrWhiteSpace($InstallPath)) {
+    $Backup = $true
+}
+
+$devices = & $Adb devices -l
+$connected = @($devices | Select-String -Pattern "\bdevice\b" | Where-Object { $_.Line -notmatch "^List of devices" })
+if ($connected.Count -eq 0) {
+    throw "No adb device connected."
+}
+
+$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$topicSlug = Slug "save-$TitleId"
+$sessionDir = Join-Path $OutDir "$($topicSlug)_$stamp"
+New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null
+New-Item -ItemType Directory -Force -Path $ReportDir | Out-Null
+
+$remoteBase = "/sdcard/Android/data/$Package/files/vita/ux0/user/00/savedata"
+$remoteSave = "$remoteBase/$TitleId"
+$listPath = Join-Path $sessionDir "remote-list-before.txt"
+$backupTarget = Join-Path $sessionDir $TitleId
+$installRoot = ""
+$installSource = ""
+$actions = @()
+
+(& $Adb shell ls -la $remoteSave 2>&1) | Set-Content -Encoding UTF8 -Path $listPath
+
+if ($Backup -or -not [string]::IsNullOrWhiteSpace($InstallPath)) {
+    $actions += "Backed up existing remote save, if present."
+    & $Adb pull $remoteSave $backupTarget | Out-File -Encoding UTF8 -FilePath (Join-Path $sessionDir "adb-pull.txt")
+}
+
+if (-not [string]::IsNullOrWhiteSpace($InstallPath)) {
+    $resolvedInstall = Resolve-Path -LiteralPath $InstallPath
+    $installSource = $resolvedInstall.Path
+
+    if ((Get-Item -LiteralPath $installSource).PSIsContainer) {
+        $installRoot = Find-SaveRoot $installSource $TitleId
+    } elseif ($installSource.ToLowerInvariant().EndsWith(".zip")) {
+        $expanded = Join-Path $sessionDir "expanded-save"
+        New-Item -ItemType Directory -Force -Path $expanded | Out-Null
+        Expand-Archive -LiteralPath $installSource -DestinationPath $expanded -Force
+        $installRoot = Find-SaveRoot $expanded $TitleId
+    } else {
+        throw "InstallPath must be a savedata folder or a ZIP archive."
+    }
+
+    $actions += "Installed savedata from $installRoot."
+    & $Adb shell mkdir -p $remoteSave | Out-Null
+    & $Adb push "$installRoot\." "$remoteSave/" | Out-File -Encoding UTF8 -FilePath (Join-Path $sessionDir "adb-push.txt")
+    (& $Adb shell ls -la $remoteSave 2>&1) | Set-Content -Encoding UTF8 -Path (Join-Path $sessionDir "remote-list-after.txt")
+}
+
+if (-not $NoReport) {
+    $reportPath = Join-Path $ReportDir "$($topicSlug)_$stamp.md"
+    $report = @()
+    $report += "# Save Sync $TitleId - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+    $report += ""
+    $report += "## Session"
+    $report += ""
+    $report += "- Package: ``$Package``"
+    $report += "- Title ID: ``$TitleId``"
+    $report += "- Remote save: ``$remoteSave``"
+    $report += "- Session directory: ``$sessionDir``"
+    $report += "- Backup target: ``$backupTarget``"
+    $report += "- Install source: ``$installSource``"
+    $report += "- Installed root: ``$installRoot``"
+    $report += ""
+    $report += "## Actions"
+    $report += ""
+    if ($actions.Count -eq 0) {
+        $report += "- No save data changed."
+    } else {
+        foreach ($action in $actions) {
+            $report += "- $action"
+        }
+    }
+    $report += ""
+    $report += "## Notes"
+    $report += ""
+    $report += "- Generated by ``tools/thor_save_sync.ps1``."
+    $report += "- Save backups stay under ``tmp/thor-saves`` and should not be committed."
+    $report += "- Use decrypted Vita Save Manager-style savedata folders or ZIPs. Official encrypted CMA/QCMA backups may not be usable without the original Vita/account context."
+    $report | Set-Content -Encoding UTF8 -Path $reportPath
+    Write-Host "Wrote save report: $reportPath"
+}
+
+Write-Host "Save sync artifacts: $sessionDir"
