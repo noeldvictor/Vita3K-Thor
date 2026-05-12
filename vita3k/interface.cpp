@@ -1685,15 +1685,15 @@ void runtime_osd_set_open(EmuEnvState &emuenv, bool open) {
     if (open) {
         runtime_osd_auto_paused = false;
         if (!emuenv.kernel.is_threads_paused()) {
-            emuenv.kernel.pause_threads();
+            app::switch_state(emuenv, true);
             runtime_osd_auto_paused = true;
         }
-        LOG_INFO("Runtime OSD opened");
+        LOG_INFO("Runtime OSD opened{}", runtime_osd_auto_paused ? " and paused emulation" : "");
         return;
     }
 
-    if (runtime_osd_auto_paused && emuenv.kernel.is_threads_paused())
-        emuenv.kernel.resume_threads();
+    if (runtime_osd_auto_paused)
+        app::switch_state(emuenv, false);
     runtime_osd_auto_paused = false;
     LOG_INFO("Runtime OSD closed");
 }

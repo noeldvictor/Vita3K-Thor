@@ -700,12 +700,9 @@ static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &
     if (window_appearing)
         ImGui::SetItemDefaultFocus();
     ImGui::SameLine();
-    if (ImGui::Button(emuenv.kernel.is_threads_paused() ? "Resume Threads" : "Pause", action_button)) {
-        if (emuenv.kernel.is_threads_paused())
-            emuenv.kernel.resume_threads();
-        else
-            emuenv.kernel.pause_threads();
-    }
+    ImGui::BeginDisabled();
+    ImGui::Button("Paused", action_button);
+    ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Settings", action_button)) {
         gui.configuration_menu.settings_dialog = true;
