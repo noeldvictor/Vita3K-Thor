@@ -48,6 +48,10 @@ function Find-SaveRoot($Path, $TitleId) {
     throw "Could not find a likely savedata root inside $Path for $TitleId."
 }
 
+function To-AndroidPath($Path) {
+    return ($Path -replace "\\", "/")
+}
+
 Require-Command $Adb
 
 if (-not $Backup -and [string]::IsNullOrWhiteSpace($InstallPath)) {
@@ -98,6 +102,15 @@ if (-not [string]::IsNullOrWhiteSpace($InstallPath)) {
 
     $actions += "Installed savedata from $installRoot."
     & $Adb shell mkdir -p $remoteSave | Out-Null
+    $directories = @(Get-ChildItem -LiteralPath $installRoot -Directory -Recurse)
+    foreach ($directory in $directories) {
+        $relativeDir = $directory.FullName.Substring($installRoot.Length).TrimStart("\", "/")
+        if ([string]::IsNullOrWhiteSpace($relativeDir)) {
+            continue
+        }
+        $remoteDir = "$remoteSave/$(To-AndroidPath $relativeDir)"
+        & $Adb shell mkdir -p $remoteDir | Out-Null
+    }
     & $Adb push "$installRoot\." "$remoteSave/" | Out-File -Encoding UTF8 -FilePath (Join-Path $sessionDir "adb-push.txt")
     (& $Adb shell ls -la $remoteSave 2>&1) | Set-Content -Encoding UTF8 -Path (Join-Path $sessionDir "remote-list-after.txt")
 }
