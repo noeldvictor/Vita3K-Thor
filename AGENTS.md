@@ -16,6 +16,7 @@ These notes are for work in Vita3K Thor Experiment, a personal Android-focused V
 - Upstream reference is `https://github.com/Vita3K/Vita3K`.
 - Always push with SSH; do not switch `origin` to HTTPS.
 - Do not push to upstream Vita3K from this checkout.
+- Commit and push often. Prefer small pushed checkpoints after a buildable code change, a useful report, an Android/Thor install, a debug-tool improvement, or a confirmed investigation result instead of letting local work pile up.
 - Keep Thor-specific changes easy to identify so broadly useful fixes can be proposed upstream separately.
 - Do not commit APK outputs, build folders, downloaded driver ZIPs, extracted drivers, caches, SDKs, firmware, license files, or game content.
 
