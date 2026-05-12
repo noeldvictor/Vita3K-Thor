@@ -2,6 +2,7 @@ param(
     [string]$TitleId = "PCSG00633",
     [string]$InstallPath = "",
     [switch]$Backup,
+    [switch]$Replace,
     [string]$Package = "org.vita3k.emulator.debug",
     [string]$Adb = "adb",
     [string]$OutDir = "tmp/thor-saves",
@@ -50,6 +51,13 @@ function Find-SaveRoot($Path, $TitleId) {
 
 function To-AndroidPath($Path) {
     return ($Path -replace "\\", "/")
+}
+
+function Assert-SafeRemoteSavePath($Path, $Package, $TitleId) {
+    $expected = "/sdcard/Android/data/$Package/files/vita/ux0/user/00/savedata/$TitleId"
+    if ($Path -ne $expected -or $TitleId -notmatch "^[A-Za-z0-9_-]+$" -or $Package -notmatch "^[A-Za-z0-9_.]+$") {
+        throw "Refusing to replace unexpected remote save path: $Path"
+    }
 }
 
 Require-Command $Adb
@@ -101,6 +109,11 @@ if (-not [string]::IsNullOrWhiteSpace($InstallPath)) {
     }
 
     $actions += "Installed savedata from $installRoot."
+    if ($Replace) {
+        Assert-SafeRemoteSavePath $remoteSave $Package $TitleId
+        $actions += "Replaced remote save directory before install."
+        & $Adb shell "rm -rf '$remoteSave'; mkdir -p '$remoteSave'" | Out-Null
+    }
     & $Adb shell mkdir -p $remoteSave | Out-Null
     $directories = @(Get-ChildItem -LiteralPath $installRoot -Directory -Recurse)
     foreach ($directory in $directories) {
@@ -112,6 +125,7 @@ if (-not [string]::IsNullOrWhiteSpace($InstallPath)) {
         & $Adb shell mkdir -p $remoteDir | Out-Null
     }
     & $Adb push "$installRoot\." "$remoteSave/" | Out-File -Encoding UTF8 -FilePath (Join-Path $sessionDir "adb-push.txt")
+    & $Adb shell "find '$remoteSave' -type d -exec chmod 2770 {} \; ; find '$remoteSave' -type f -exec chmod 660 {} \;" | Out-Null
     (& $Adb shell ls -la $remoteSave 2>&1) | Set-Content -Encoding UTF8 -Path (Join-Path $sessionDir "remote-list-after.txt")
 }
 
@@ -129,6 +143,7 @@ if (-not $NoReport) {
     $report += "- Backup target: ``$backupTarget``"
     $report += "- Install source: ``$installSource``"
     $report += "- Installed root: ``$installRoot``"
+    $report += "- Replace: ``$Replace``"
     $report += ""
     $report += "## Actions"
     $report += ""
