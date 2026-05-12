@@ -242,6 +242,12 @@ struct VKContext : public renderer::Context {
     SceGxmTexture fragment_gxm_textures[SCE_GXM_MAX_TEXTURE_UNITS] = {};
     bool vertex_gxm_texture_valid[SCE_GXM_MAX_TEXTURE_UNITS] = {};
     bool fragment_gxm_texture_valid[SCE_GXM_MAX_TEXTURE_UNITS] = {};
+    uint32_t vertex_uniform_addresses[SCE_GXM_REAL_MAX_UNIFORM_BUFFER] = {};
+    uint32_t fragment_uniform_addresses[SCE_GXM_REAL_MAX_UNIFORM_BUFFER] = {};
+    uint32_t vertex_uniform_sizes[SCE_GXM_REAL_MAX_UNIFORM_BUFFER] = {};
+    uint32_t fragment_uniform_sizes[SCE_GXM_REAL_MAX_UNIFORM_BUFFER] = {};
+    bool vertex_uniform_valid[SCE_GXM_REAL_MAX_UNIFORM_BUFFER] = {};
+    bool fragment_uniform_valid[SCE_GXM_REAL_MAX_UNIFORM_BUFFER] = {};
 
     bool vertex_uniform_storage_allocated = false;
     bool fragment_uniform_storage_allocated = false;

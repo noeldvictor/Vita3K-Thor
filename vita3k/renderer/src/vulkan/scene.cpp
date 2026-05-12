@@ -347,6 +347,15 @@ void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *
     }
 
     const uint32_t data_size_upload = std::min<uint32_t>(size, program->uniform_buffer_sizes.at(block_num) * 4);
+    if (block_num >= 0 && block_num < SCE_GXM_REAL_MAX_UNIFORM_BUFFER) {
+        uint32_t *addresses = vertex_shader ? context.vertex_uniform_addresses : context.fragment_uniform_addresses;
+        uint32_t *sizes = vertex_shader ? context.vertex_uniform_sizes : context.fragment_uniform_sizes;
+        bool *valid = vertex_shader ? context.vertex_uniform_valid : context.fragment_uniform_valid;
+        addresses[block_num] = data.address();
+        sizes[block_num] = data_size_upload;
+        valid[block_num] = true;
+    }
+
     if (context.state.features.enable_memory_mapping) {
         if (context.state.mapping_method == MappingMethod::DoubleBuffer) {
             // we must always cover everything as some small part of the buffer may get changed only
@@ -817,6 +826,79 @@ static void log_renderer_debug_attribute_values(VKContext &context, MemState &me
         out_of_required_bounds);
 }
 
+static void log_renderer_debug_uniform_buffers(VKContext &context, MemState &mem, const char *stage,
+    const ShaderProgram &program, const uint32_t *addresses, const uint32_t *sizes, const bool *valid,
+    uint32_t debug_draw_index) {
+    for (uint32_t block = 0; block < program.buffer_count && block < SCE_GXM_REAL_MAX_UNIFORM_BUFFER; block++) {
+        const uint32_t declared_size = program.uniform_buffer_sizes[block] * 4;
+        if (!valid[block]) {
+            LOG_INFO("ThorRenderDump uniform frame={} scene={} draw={} stage={} block={} valid=0 declared_size={} offset_words={}",
+                context.frame_timestamp,
+                context.scene_timestamp,
+                debug_draw_index,
+                stage,
+                block,
+                declared_size,
+                program.uniform_buffer_data_offsets[block]);
+            continue;
+        }
+
+        const uint32_t data_size = std::min(sizes[block], declared_size);
+        const uint8_t *data = Ptr<const uint8_t>(addresses[block]).get(mem);
+        const uint32_t float_count = data_size / sizeof(float);
+        std::array<float, 8> first_values = {};
+        float min_value = std::numeric_limits<float>::infinity();
+        float max_value = -std::numeric_limits<float>::infinity();
+        uint32_t nonfinite = 0;
+        uint32_t huge = 0;
+        uint32_t nonzero_bytes = 0;
+
+        for (uint32_t byte = 0; byte < data_size; byte++) {
+            if (data[byte] != 0)
+                nonzero_bytes++;
+        }
+
+        for (uint32_t index = 0; index < float_count; index++) {
+            const float value = read_renderer_debug_unaligned<float>(data + index * sizeof(float));
+            if (index < first_values.size())
+                first_values[index] = value;
+            if (!std::isfinite(value)) {
+                nonfinite++;
+                continue;
+            }
+            if (std::abs(value) > 100000.0f)
+                huge++;
+            min_value = std::min(min_value, value);
+            max_value = std::max(max_value, value);
+        }
+
+        LOG_INFO("ThorRenderDump uniform frame={} scene={} draw={} stage={} block={} valid=1 addr=0x{:08X} size={} declared_size={} offset_words={} nonzero_bytes={} float_count={} first8={},{},{},{},{},{},{},{} min={} max={} nonfinite={} huge={}",
+            context.frame_timestamp,
+            context.scene_timestamp,
+            debug_draw_index,
+            stage,
+            block,
+            addresses[block],
+            data_size,
+            declared_size,
+            program.uniform_buffer_data_offsets[block],
+            nonzero_bytes,
+            float_count,
+            first_values[0],
+            first_values[1],
+            first_values[2],
+            first_values[3],
+            first_values[4],
+            first_values[5],
+            first_values[6],
+            first_values[7],
+            min_value,
+            max_value,
+            nonfinite,
+            huge);
+    }
+}
+
 static void log_renderer_debug_draw_dump(VKContext &context, MemState &mem, SceGxmPrimitiveType type, SceGxmIndexFormat format,
     Ptr<void> indices, size_t count, uint32_t instance_count, uint32_t max_index, uint32_t debug_draw_index,
     uint32_t debug_rt_width, uint32_t debug_rt_height, const std::string &hash_text_v, const std::string &hash_text_f) {
@@ -927,6 +1009,8 @@ static void log_renderer_debug_draw_dump(VKContext &context, MemState &mem, SceG
 
     log_renderer_debug_textures(context, "vertex", context.vertex_gxm_textures, context.vertex_gxm_texture_valid, vertex_data->texture_count, debug_draw_index);
     log_renderer_debug_textures(context, "fragment", context.fragment_gxm_textures, context.fragment_gxm_texture_valid, fragment_data->texture_count, debug_draw_index);
+    log_renderer_debug_uniform_buffers(context, mem, "vertex", *vertex_data, context.vertex_uniform_addresses, context.vertex_uniform_sizes, context.vertex_uniform_valid, debug_draw_index);
+    log_renderer_debug_uniform_buffers(context, mem, "fragment", *fragment_data, context.fragment_uniform_addresses, context.fragment_uniform_sizes, context.fragment_uniform_valid, debug_draw_index);
 }
 
 // vertex count is only used with double buffer mapping
