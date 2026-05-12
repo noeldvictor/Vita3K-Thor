@@ -98,7 +98,7 @@ bool KernelState::init(MemState &mem, const CallImportFunc &call_import, bool cp
     speed_anchor_host_process_us = 0;
     speed_anchor_guest_process_us = 0;
     speed_percent.store(100);
-    cpu_protocol = std::make_unique<CPUProtocol>(*this, mem, call_import);
+    this->call_import = call_import;
     this->cpu_opt = cpu_opt;
 
     return true;
