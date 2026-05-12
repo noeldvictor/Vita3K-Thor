@@ -42,27 +42,43 @@ Do not open issues expecting support for this experiment. Fork it, test it, patc
 
 The upstream Vita3K project has its own rules, standards, and support expectations. Do not send Thor-experiment problems to upstream Vita3K.
 
-## User-Facing Differences
+## How This Fork Differs From Upstream
 
-The short version: this fork is Vita3K tuned for testing on AYN Thor.
+Upstream Vita3K is the main emulator project. This fork is a personal Android build tuned for AYN Thor handheld testing. The main difference is convenience: this fork tries to make common handheld emulator tasks easier from the device itself.
 
-- Turnip driver manager: download GitHub Turnip ZIPs from K11MCH1/AdrenoToolsDrivers, see the Thor/Adreno 740 recommendation, install one, select it, and delete cached ZIP downloads.
-- Play ZIP as Cartridge: launch `.zip` and `.vpk` archives directly from the Android UI, Android open-with/front-end intents, or `--cartridge` without installing them into the normal Vita3K library.
-- Smarter ZIP scanning: translated and nonstandard archives with `app/<TITLEID>`, `patch/<TITLEID>`, and `rePatch/<TITLEID>` are detected, and cached icons/backgrounds avoid full rescans every launch.
-- Clear library badges: encrypted/PFS-style virtual cartridge entries get an `E` badge and fail with a clear message; games with matching VitaCheat files get a `C` badge.
-- Runtime OSD: short Back opens a controller-friendly in-game menu for pause/resume, save/load quickstate slot 0, fast-forward speed, screenshots, renderer trace, and cheats.
-- Thor hotkeys: `Select + R1` toggles fast-forward, `Select + right-stick down` saves state, and `Select + right-stick up` loads state.
-- Fast-forward presets: Off, 2x, 3x, and 4x are available from the OSD; the selected speed also drives the hotkey.
-- Experimental quickstates: per-game slot 0 saves compressed state files under `states/<TITLEID>/slot0.thorstate`. Same-session save/load works; app-restart durability is still incomplete and is being expanded toward PPSSPP-style reliability.
-- VitaCheat support: `.psv` files can be loaded from repo/user/app/SD-card cheat roots and toggled per game in the OSD. Unsupported code types fail closed.
-- Thor debug capture: one-shot and live ADB tools collect logs, screenshots, focus, meminfo, gfxinfo, crash buffers, and renderer trace evidence while testing on device.
+## Features For Normal Users
 
-## Technical Differences And Goals
+These are the practical differences you should notice first compared with upstream Vita3K Android.
 
-- Android `arm64-v8a` APKs and real AYN Thor testing are the main path; desktop builds still follow upstream expectations.
+- Easier graphics driver setup: download Turnip driver ZIPs from GitHub, see the suggested Thor/Adreno 740 choice, install a driver, select it, and delete old downloaded ZIPs from inside the app.
+- Play ZIP as Cartridge: launch `.zip` and `.vpk` Vita archives directly without adding them to the normal installed Vita3K library first.
+- Better ROM folder scanning: scan common `/sdcard/roms/psvita` and SD-card folders, detect some translated or nonstandard ZIP layouts, and keep cached game icons/backgrounds so the list does not need a full archive scan every launch.
+- Clear library badges: encrypted virtual cartridges show an `E` badge instead of failing mysteriously, and games with matching cheat files show a `C` badge.
+- In-game OSD menu: press Back during gameplay to open a controller-friendly menu for resume, pause, save/load state, fast-forward speed, screenshots, renderer trace, and cheats.
+- Thor controller shortcuts: `Select + R1` toggles fast-forward, `Select + right-stick down` saves state, and `Select + right-stick up` loads state.
+- Fast-forward presets: choose Off, 2x, 3x, or 4x from the OSD. Audio is routed through FFmpeg `atempo` when available so fast-forward can preserve pitch instead of sounding extremely high-pitched.
+- Per-game quickstate slot: save/load slot 0 for the current game from the OSD or shortcuts.
+- VitaCheat panel: load `.psv` cheat files from supported cheat folders, show available cheats in the OSD, and toggle individual cheats per game.
+- Thor testing tools: ADB scripts can capture screenshots, logs, crash info, memory info, frame stats, and renderer trace notes while testing on the real device.
+
+## Experimental Or Unfinished Features
+
+These are useful, but they are not as mature as polished emulator release features yet.
+
+- Save states are experimental. Same-session save/load is the current focus; app-restart durability is still being expanded toward PPSSPP-style reliability.
+- Direct ZIP cartridge mode does not decrypt games, bypass licenses, or replace proper dumping. If a ZIP contains encrypted/PFS content, this fork should report that clearly and stop.
+- Cheat support handles a useful subset of VitaCheat codes, but not every code type. Unsupported code types are skipped instead of guessed.
+- Renderer trace and profile tools are for debugging broken games or graphics issues. They are not normal-user settings you need to leave on.
+
+## Technical Differences For Developers
+
+This section is for people changing the emulator code, debugging games, or comparing this fork with upstream Vita3K internals.
+
+- Android `arm64-v8a` APKs and real AYN Thor testing are the main path. Desktop builds still follow upstream expectations, but desktop packaging is not the priority here.
 - Direct ZIP cartridge mode mounts `app0:` against the archive and applies read-time `patch`/`rePatch` overlays. It does not bypass encryption, licenses, or ownership checks.
 - Large deflated archive members, including multi-gigabyte `.psarc` files, are cached to app-local storage instead of inflated into RAM.
-- Fast-forward changes display/vblank pacing and guest kernel clock/wait timing together.
+- Fast-forward updates display/vblank pacing, guest kernel clock/wait timing, AVPlayer video pacing, and SDL audio tempo together.
+- SDL fast-forward audio uses FFmpeg `atempo` for pitch-preserving tempo changes when possible, with SDL frequency-ratio speed-up as a fallback.
 - Quickstates currently serialize CPU contexts, allocated guest memory pages, and allocator maps. The next durability targets are kernel objects, GPU/display state, audio, AVPlayer/movie state, IO/VFS handles, and renderer cache state.
 - `--thor-render-trace` adds GXM/Vulkan trace logs, including scene, draw, surface, and texture upload details for renderer debugging.
 - Thor-only behavior should stay behind settings, build flags, device checks, or clearly named code paths.
