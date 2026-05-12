@@ -1293,11 +1293,11 @@ int main(int argc, char *argv[]) {
 #ifdef TRACY_ENABLE
         ZoneScopedN("Game rendering"); // Tracy - Track game rendering loop scope
 #endif
+        update_thor_adb_debug_toggles(emuenv);
+        runtime_poll_control_file(emuenv);
         if (emuenv.kernel.is_threads_paused())
             wait_for_frame_done();
 
-        update_thor_adb_debug_toggles(emuenv);
-        runtime_poll_control_file(emuenv);
         apply_runtime_cheats(emuenv, runtime_cheats);
 
         // Driver acto!
