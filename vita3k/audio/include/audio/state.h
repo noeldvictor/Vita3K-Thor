@@ -20,6 +20,7 @@
 #include <util/types.h>
 
 #include <functional>
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -87,6 +88,7 @@ struct AudioState {
     AudioInPort in_port;
     std::string audio_backend;
     float global_volume = 1;
+    std::atomic<uint32_t> speed_percent{ 100 };
 
     bool init(const std::string &adapter_name);
     void set_backend(const std::string &adapter_name);

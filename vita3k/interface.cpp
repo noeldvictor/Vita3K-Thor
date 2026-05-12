@@ -1702,6 +1702,7 @@ void runtime_set_speed_percent(EmuEnvState &emuenv, uint32_t speed_percent) {
     speed_percent = std::clamp(speed_percent, 100u, 1000u);
     emuenv.display.speed_percent.store(speed_percent);
     emuenv.kernel.set_speed_percent(speed_percent);
+    emuenv.audio.speed_percent.store(speed_percent);
     {
         const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
         for (auto &[_, timer] : emuenv.kernel.timers) {

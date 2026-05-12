@@ -68,8 +68,10 @@ void AudioState::audio_output(AudioOutPort &out_port, const void *buffer) {
 
     uint64_t now = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     uint64_t diff = now - out_port.last_output;
-    uint64_t to_wait = out_port.len_microseconds - diff;
-    if (diff < out_port.len_microseconds && to_wait > 1000) {
+    const uint64_t speed = std::max<uint32_t>(speed_percent.load(), 1);
+    const uint64_t target_len_microseconds = std::max<uint64_t>(1, (out_port.len_microseconds * 100) / speed);
+    uint64_t to_wait = target_len_microseconds - diff;
+    if (diff < target_len_microseconds && to_wait > 1000) {
         // This is what we should be waiting to be perfectly accurate
         // However, doing so would cause the host audio buffer to often lack samples to output
         // This is because the PS Vita and the host audio parameters do not match exactly

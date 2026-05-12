@@ -19,6 +19,8 @@
 #include "util/log.h"
 #include <SDL3/SDL_audio.h>
 #include <SDL3/SDL_hints.h>
+#include <algorithm>
+#include <cmath>
 
 #define SDL_CHECK_EXT(condition, ret)                         \
     do {                                                      \
@@ -94,12 +96,21 @@ AudioOutPortPtr SDLAudioAdapter::open_port(int nb_channels, int freq, int nb_sam
 void SDLAudioAdapter::audio_output(AudioOutPort &out_port, const void *buffer) {
     //  Put audio to the port's stream and see how much is left to play.
     SDLAudioOutPort &port = static_cast<SDLAudioOutPort &>(out_port);
+    const uint32_t speed_percent = std::max<uint32_t>(state.speed_percent.load(), 1);
+    const float speed_ratio = std::clamp(speed_percent / 100.f, 0.01f, 100.f);
+    if (std::abs(port.speed_ratio - speed_ratio) > 0.001f) {
+        SDL_CHECK_VOID(SDL_SetAudioStreamFrequencyRatio(port.stream.get(), speed_ratio));
+        port.speed_ratio = speed_ratio;
+    }
+
     // If there's lots of audio left to play, stop this thread.
     // The audio callback will wake it up later when it's running out of data.
     const int samples_available = get_rest_sample(port);
-    if (samples_available > get_threshold_samples(device_buffer_samples)) {
+    const int speed_scaled_threshold = std::max(1, (get_threshold_samples(device_buffer_samples) * static_cast<int>(speed_percent)) / 100);
+    if (samples_available > speed_scaled_threshold) {
         std::unique_lock<std::mutex> lock(port.mutex);
-        port.cond_var.wait_for(lock, std::chrono::microseconds(port.len_microseconds * 2));
+        const uint64_t scaled_wait = std::max<uint64_t>(1, (port.len_microseconds * 200) / speed_percent);
+        port.cond_var.wait_for(lock, std::chrono::microseconds(scaled_wait));
     }
     SDL_CHECK_VOID(SDL_PutAudioStreamData(port.stream.get(), buffer, out_port.len_bytes));
 }
