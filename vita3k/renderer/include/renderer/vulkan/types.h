@@ -238,6 +238,10 @@ struct VKContext : public renderer::Context {
 
     vk::DescriptorImageInfo vertex_textures[SCE_GXM_MAX_TEXTURE_UNITS] = {};
     vk::DescriptorImageInfo fragment_textures[SCE_GXM_MAX_TEXTURE_UNITS] = {};
+    SceGxmTexture vertex_gxm_textures[SCE_GXM_MAX_TEXTURE_UNITS] = {};
+    SceGxmTexture fragment_gxm_textures[SCE_GXM_MAX_TEXTURE_UNITS] = {};
+    bool vertex_gxm_texture_valid[SCE_GXM_MAX_TEXTURE_UNITS] = {};
+    bool fragment_gxm_texture_valid[SCE_GXM_MAX_TEXTURE_UNITS] = {};
 
     bool vertex_uniform_storage_allocated = false;
     bool fragment_uniform_storage_allocated = false;

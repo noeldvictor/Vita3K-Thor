@@ -77,8 +77,12 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
     if (index >= SCE_GXM_MAX_TEXTURE_UNITS) {
         // Vertex textures
         context.shader_hints.vertex_textures[index - SCE_GXM_MAX_TEXTURE_UNITS] = format;
+        context.vertex_gxm_textures[index - SCE_GXM_MAX_TEXTURE_UNITS] = texture;
+        context.vertex_gxm_texture_valid[index - SCE_GXM_MAX_TEXTURE_UNITS] = true;
     } else {
         context.shader_hints.fragment_textures[index] = format;
+        context.fragment_gxm_textures[index] = texture;
+        context.fragment_gxm_texture_valid[index] = true;
     }
 
     std::optional<TextureLookupResult> lookup_result = std::nullopt;

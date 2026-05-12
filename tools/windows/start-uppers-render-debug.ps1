@@ -3,6 +3,7 @@ param(
     [string]$GameZip = "",
     [string]$Skip = "",
     [string]$StopAfter = "",
+    [string]$Dump = "",
     [string]$ControlFile = "",
     [int]$TraceLimit = 256,
     [int]$LogLevel = 2,
@@ -50,6 +51,7 @@ if (-not (Test-Path -LiteralPath $ControlFile)) {
         "labels=$([int](-not $NoLabels))"
         "skip="
         "stop_after="
+        "dump="
     ) | Set-Content -LiteralPath $ControlFile -Encoding UTF8
 }
 if ($NoLabels) {
@@ -70,6 +72,12 @@ if ($StopAfter) {
     Remove-Item Env:\VITA3K_RENDER_STOP_AFTER -ErrorAction SilentlyContinue
 }
 
+if ($Dump) {
+    $env:VITA3K_RENDER_DUMP = $Dump
+} else {
+    Remove-Item Env:\VITA3K_RENDER_DUMP -ErrorAction SilentlyContinue
+}
+
 $argumentLine = "--config-location `"$LaunchConfigPath`" --cartridge --backend-renderer Vulkan --log-level $LogLevel --thor-render-trace `"$GameZip`""
 
 Write-Host "Starting Vita3K render debug:"
@@ -82,5 +90,6 @@ Write-Host "  logLevel:   $LogLevel"
 Write-Host "  control:    $ControlFile"
 Write-Host "  skip:       $Skip"
 Write-Host "  stopAfter:  $StopAfter"
+Write-Host "  dump:       $Dump"
 
 Start-Process -FilePath $ExePath -ArgumentList $argumentLine -WorkingDirectory (Split-Path $ExePath)

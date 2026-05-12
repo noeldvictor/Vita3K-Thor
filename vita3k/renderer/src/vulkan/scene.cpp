@@ -60,6 +60,7 @@ struct RendererDebugConfig {
     uint32_t trace_limit = 32;
     RendererDebugRange skip;
     RendererDebugRange stop_after;
+    RendererDebugRange dump;
 };
 
 static bool renderer_debug_env_flag(const char *name) {
@@ -204,6 +205,8 @@ static bool parse_debug_config_line(RendererDebugConfig &cfg, const std::string 
         cfg.skip = parse_renderer_debug_range_spec(value);
     } else if (key == "stop_after") {
         cfg.stop_after = parse_renderer_debug_range_spec(value);
+    } else if (key == "dump") {
+        cfg.dump = parse_renderer_debug_range_spec(value);
     } else {
         return false;
     }
@@ -238,13 +241,14 @@ static void poll_renderer_debug_control_file(RendererDebugConfig &cfg) {
     }
 
     if (next.labels != cfg.labels || next.trace != cfg.trace || next.trace_limit != cfg.trace_limit
-        || next.skip.spec != cfg.skip.spec || next.stop_after.spec != cfg.stop_after.spec) {
-        LOG_INFO("ThorRenderDebug live-control labels={} trace={} trace_limit={} skip={} stop_after={}",
+        || next.skip.spec != cfg.skip.spec || next.stop_after.spec != cfg.stop_after.spec || next.dump.spec != cfg.dump.spec) {
+        LOG_INFO("ThorRenderDebug live-control labels={} trace={} trace_limit={} skip={} stop_after={} dump={}",
             next.labels,
             next.trace,
             next.trace_limit,
             next.skip.spec,
-            next.stop_after.spec);
+            next.stop_after.spec,
+            next.dump.spec);
     }
     cfg = next;
 }
@@ -257,14 +261,16 @@ static RendererDebugConfig &renderer_debug_config() {
         cfg.trace_limit = renderer_debug_trace_limit();
         cfg.skip = parse_renderer_debug_range_env("VITA3K_RENDER_SKIP");
         cfg.stop_after = parse_renderer_debug_range_env("VITA3K_RENDER_STOP_AFTER");
+        cfg.dump = parse_renderer_debug_range_env("VITA3K_RENDER_DUMP");
 
-        if (cfg.labels || cfg.trace || cfg.skip.enabled || cfg.stop_after.enabled || cfg.trace_limit != 32) {
-            LOG_INFO("ThorRenderDebug labels={} trace={} trace_limit={} skip={} stop_after={}",
+        if (cfg.labels || cfg.trace || cfg.skip.enabled || cfg.stop_after.enabled || cfg.dump.enabled || cfg.trace_limit != 32) {
+            LOG_INFO("ThorRenderDebug labels={} trace={} trace_limit={} skip={} stop_after={} dump={}",
                 cfg.labels,
                 cfg.trace,
                 cfg.trace_limit,
                 cfg.skip.enabled ? std::getenv("VITA3K_RENDER_SKIP") : "",
-                cfg.stop_after.enabled ? std::getenv("VITA3K_RENDER_STOP_AFTER") : "");
+                cfg.stop_after.enabled ? std::getenv("VITA3K_RENDER_STOP_AFTER") : "",
+                cfg.dump.enabled ? std::getenv("VITA3K_RENDER_DUMP") : "");
         }
         return cfg;
     }();
@@ -588,37 +594,217 @@ static size_t get_vulkan_attribute_byte_size(const SceGxmVertexAttribute &attrib
     return gxm::attribute_format_size(attribute_format) * component_count;
 }
 
+static uint32_t get_renderer_debug_max_index(Ptr<void> indices, size_t count, SceGxmIndexFormat format, MemState &mem) {
+    if (count == 0)
+        return 0;
+
+    if (format == SCE_GXM_INDEX_FORMAT_U16) {
+        const uint16_t *data = indices.cast<uint16_t>().get(mem);
+        return *std::max_element(&data[0], &data[count]);
+    }
+
+    const uint32_t *data = indices.cast<uint32_t>().get(mem);
+    return *std::max_element(&data[0], &data[count]);
+}
+
+static int get_used_vertex_stream_count(const SceGxmVertexProgram &vertex_program, const VertexProgram &vkvert) {
+    int max_stream_idx = -1;
+
+    for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
+        if (!vkvert.attribute_infos.contains(attribute.regIndex))
+            continue;
+        max_stream_idx = std::max<int>(max_stream_idx, attribute.streamIndex);
+    }
+
+    return max_stream_idx + 1;
+}
+
+static std::array<size_t, SCE_GXM_MAX_VERTEX_STREAMS> get_required_vertex_stream_sizes(const SceGxmVertexProgram &vertex_program, const VertexProgram &vkvert, uint32_t instance_count, uint32_t max_index) {
+    std::array<size_t, SCE_GXM_MAX_VERTEX_STREAMS> required_sizes{};
+
+    for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
+        if (!vkvert.attribute_infos.contains(attribute.regIndex))
+            continue;
+
+        const size_t attribute_size = get_vulkan_attribute_byte_size(attribute, vkvert.attribute_infos.at(attribute.regIndex));
+        const SceGxmVertexStream &stream = vertex_program.streams[attribute.streamIndex];
+        const SceGxmIndexSource index_source = static_cast<SceGxmIndexSource>(stream.indexSource);
+        const size_t data_passed_length = gxm::is_stream_instancing(index_source) ? ((instance_count - 1) * stream.stride) : (max_index * stream.stride);
+        const size_t data_length = attribute.offset + data_passed_length + attribute_size;
+        required_sizes[attribute.streamIndex] = std::max(required_sizes[attribute.streamIndex], data_length);
+    }
+
+    return required_sizes;
+}
+
+static void log_renderer_debug_textures(VKContext &context, const char *stage, const SceGxmTexture *textures, const bool *valid, uint16_t texture_count, uint32_t debug_draw_index) {
+    for (uint16_t texture_index = 0; texture_index < texture_count && texture_index < SCE_GXM_MAX_TEXTURE_UNITS; texture_index++) {
+        if (!valid[texture_index]) {
+            LOG_INFO("ThorRenderDump texture frame={} scene={} draw={} stage={} slot={} valid=0",
+                context.frame_timestamp,
+                context.scene_timestamp,
+                debug_draw_index,
+                stage,
+                texture_index);
+            continue;
+        }
+
+        const SceGxmTexture &texture = textures[texture_index];
+        const SceGxmTextureFormat format = gxm::get_format(texture);
+        const SceGxmTextureBaseFormat base_format = gxm::get_base_format(format);
+        const uint32_t stride = texture.texture_type() == SCE_GXM_TEXTURE_LINEAR_STRIDED ? gxm::get_stride_in_bytes(texture) : 0;
+        LOG_INFO("ThorRenderDump texture frame={} scene={} draw={} stage={} slot={} valid=1 addr=0x{:08X} type={} fmt=0x{:08X} base=0x{:08X} size={}x{} stride={} mips={} palette=0x{:08X} filters={}/{} mip_filter={} addr_mode={}/{} gamma={} normalize={}",
+            context.frame_timestamp,
+            context.scene_timestamp,
+            debug_draw_index,
+            stage,
+            texture_index,
+            static_cast<uint32_t>(texture.data_addr << 2),
+            static_cast<uint32_t>(texture.texture_type()),
+            static_cast<uint32_t>(format),
+            static_cast<uint32_t>(base_format),
+            gxm::get_width(texture),
+            gxm::get_height(texture),
+            stride,
+            texture.true_mip_count(),
+            static_cast<uint32_t>(texture.palette_addr << 6),
+            static_cast<uint32_t>(texture.mag_filter),
+            static_cast<uint32_t>(texture.min_filter),
+            static_cast<uint32_t>(texture.mip_filter),
+            static_cast<uint32_t>(texture.uaddr_mode),
+            static_cast<uint32_t>(texture.vaddr_mode),
+            static_cast<uint32_t>(texture.gamma_mode),
+            static_cast<uint32_t>(texture.normalize_mode));
+    }
+}
+
+static void log_renderer_debug_draw_dump(VKContext &context, MemState &mem, SceGxmPrimitiveType type, SceGxmIndexFormat format,
+    Ptr<void> indices, size_t count, uint32_t instance_count, uint32_t max_index, uint32_t debug_draw_index,
+    uint32_t debug_rt_width, uint32_t debug_rt_height, const std::string &hash_text_v, const std::string &hash_text_f) {
+    const SceGxmVertexProgram &vertex_program = *context.record.vertex_program.get(mem);
+    const VertexProgram &vkvert = *vertex_program.renderer_data.get();
+    const auto &vertex_data = context.record.vertex_program.get(mem)->renderer_data;
+    const auto &fragment_data = context.record.fragment_program.get(mem)->renderer_data;
+    const std::array<size_t, SCE_GXM_MAX_VERTEX_STREAMS> required_sizes = get_required_vertex_stream_sizes(vertex_program, vkvert, instance_count, max_index);
+    const int max_stream_idx = get_used_vertex_stream_count(vertex_program, vkvert);
+
+    LOG_INFO("ThorRenderDump draw frame={} scene={} rt={}x{} draw={} prim={} index_fmt={} index_addr=0x{:08X} count={} max_index={} instances={} memory_mapping={} mapping={} vhash={} fhash={} streams={} attrs={} vtex={} ftex={} color_addr=0x{:08X} depth_addr=0x{:08X} stencil_addr=0x{:08X}",
+        context.frame_timestamp,
+        context.scene_timestamp,
+        debug_rt_width,
+        debug_rt_height,
+        debug_draw_index,
+        static_cast<uint32_t>(type),
+        static_cast<uint32_t>(format),
+        indices.address(),
+        count,
+        max_index,
+        instance_count,
+        context.state.features.enable_memory_mapping,
+        static_cast<uint32_t>(context.state.mapping_method),
+        hash_text_v,
+        hash_text_f,
+        max_stream_idx,
+        vertex_program.attributes.size(),
+        vertex_data->texture_count,
+        fragment_data->texture_count,
+        context.record.color_surface.data.address(),
+        context.record.depth_stencil_surface.depth_data.address(),
+        context.record.depth_stencil_surface.stencil_data.address());
+
+    LOG_INFO("ThorRenderDump state frame={} scene={} draw={} depth_func={}/{} depth_write={}/{} stencil_func={}/{} cull={} two_sided={} vp_flat={} vp_flip={},{},{},{} z_offset={} z_scale={} writing_mask={}",
+        context.frame_timestamp,
+        context.scene_timestamp,
+        debug_draw_index,
+        static_cast<uint32_t>(context.record.front_depth_func),
+        static_cast<uint32_t>(context.record.back_depth_func),
+        static_cast<uint32_t>(context.record.front_depth_write_mode),
+        static_cast<uint32_t>(context.record.back_depth_write_mode),
+        static_cast<uint32_t>(context.record.front_stencil_state_op.func),
+        static_cast<uint32_t>(context.record.back_stencil_state_op.func),
+        static_cast<uint32_t>(context.record.cull_mode),
+        static_cast<uint32_t>(context.record.two_sided),
+        context.record.viewport_flat,
+        context.record.viewport_flip[0],
+        context.record.viewport_flip[1],
+        context.record.viewport_flip[2],
+        context.record.viewport_flip[3],
+        context.record.z_offset,
+        context.record.z_scale,
+        context.record.writing_mask);
+
+    for (int stream_index = 0; stream_index < max_stream_idx; stream_index++) {
+        const SceGxmVertexStream &stream = vertex_program.streams[stream_index];
+        const SceGxmIndexSource index_source = static_cast<SceGxmIndexSource>(stream.indexSource);
+        const GXMStreamInfo &stream_info = context.record.vertex_streams[stream_index];
+        LOG_INFO("ThorRenderDump stream frame={} scene={} draw={} slot={} data=0x{:08X} record_size={} required_size={} stride={} index_source={} instanced={}",
+            context.frame_timestamp,
+            context.scene_timestamp,
+            debug_draw_index,
+            stream_index,
+            stream_info.data.address(),
+            stream_info.size,
+            required_sizes[stream_index],
+            stream.stride,
+            static_cast<uint32_t>(stream.indexSource),
+            gxm::is_stream_instancing(index_source));
+    }
+
+    for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
+        if (!vkvert.attribute_infos.contains(attribute.regIndex)) {
+            LOG_INFO("ThorRenderDump attr frame={} scene={} draw={} reg={} stream={} offset={} format={} components={} used=0",
+                context.frame_timestamp,
+                context.scene_timestamp,
+                debug_draw_index,
+                attribute.regIndex,
+                attribute.streamIndex,
+                attribute.offset,
+                static_cast<uint32_t>(attribute.format),
+                attribute.componentCount);
+            continue;
+        }
+
+        const shader::usse::AttributeInformation &info = vkvert.attribute_infos.at(attribute.regIndex);
+        const SceGxmVertexStream &stream = vertex_program.streams[attribute.streamIndex];
+        LOG_INFO("ThorRenderDump attr frame={} scene={} draw={} reg={} loc={} stream={} stream_stride={} offset={} format={} components={} attr_bytes={} shader_type={} shader_components={} integer={} signed={} regformat={}",
+            context.frame_timestamp,
+            context.scene_timestamp,
+            debug_draw_index,
+            attribute.regIndex,
+            info.location,
+            attribute.streamIndex,
+            stream.stride,
+            attribute.offset,
+            static_cast<uint32_t>(attribute.format),
+            attribute.componentCount,
+            get_vulkan_attribute_byte_size(attribute, info),
+            static_cast<uint32_t>(info.gxm_type),
+            info.component_count,
+            info.is_integer,
+            info.is_signed,
+            info.regformat);
+    }
+
+    log_renderer_debug_textures(context, "vertex", context.vertex_gxm_textures, context.vertex_gxm_texture_valid, vertex_data->texture_count, debug_draw_index);
+    log_renderer_debug_textures(context, "fragment", context.fragment_gxm_textures, context.fragment_gxm_texture_valid, fragment_data->texture_count, debug_draw_index);
+}
+
 // vertex count is only used with double buffer mapping
 static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t instance_count, uint32_t max_index) {
     GxmRecordState &state = context.record;
     const SceGxmVertexProgram &vertex_program = *state.vertex_program.get(mem);
     VertexProgram *vkvert = vertex_program.renderer_data.get();
 
-    int max_stream_idx = -1;
-
-    for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
-        if (!vkvert->attribute_infos.contains(attribute.regIndex))
-            continue;
-        max_stream_idx = std::max<int>(max_stream_idx, attribute.streamIndex);
-    }
-    max_stream_idx++;
+    int max_stream_idx = get_used_vertex_stream_count(vertex_program, *vkvert);
 
     if (context.state.mapping_method == MappingMethod::DoubleBuffer) {
         for (int i = 0; i < max_stream_idx; i++)
             state.vertex_streams[i].size = 0;
 
         // same as in SceGxm.cpp
-        for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
-            if (!vkvert->attribute_infos.contains(attribute.regIndex))
-                continue;
-
-            const size_t attribute_size = get_vulkan_attribute_byte_size(attribute, vkvert->attribute_infos.at(attribute.regIndex));
-            const SceGxmVertexStream &stream = vertex_program.streams[attribute.streamIndex];
-            const SceGxmIndexSource index_source = static_cast<SceGxmIndexSource>(stream.indexSource);
-            const size_t data_passed_length = gxm::is_stream_instancing(index_source) ? ((instance_count - 1) * stream.stride) : (max_index * stream.stride);
-            const size_t data_length = attribute.offset + data_passed_length + attribute_size;
-            state.vertex_streams[attribute.streamIndex].size = std::max<size_t>(state.vertex_streams[attribute.streamIndex].size, data_length);
-        }
+        const std::array<size_t, SCE_GXM_MAX_VERTEX_STREAMS> required_sizes = get_required_vertex_stream_sizes(vertex_program, *vkvert, instance_count, max_index);
+        for (int i = 0; i < max_stream_idx; i++)
+            state.vertex_streams[i].size = required_sizes[i];
 
         for (int i = 0; i < max_stream_idx; i++) {
             if (state.vertex_streams[i].data)
@@ -728,6 +914,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     const uint32_t debug_rt_height = context.render_target != nullptr ? context.render_target->height : 0;
     const bool renderer_debug_skip = renderer_debug_range_matches(renderer_debug.skip, context.frame_timestamp, context.scene_timestamp, debug_rt_width, debug_rt_height, hash_text_v, hash_text_f, debug_draw_index);
     const bool renderer_debug_stop_after = renderer_debug_stop_after_matches(renderer_debug.stop_after, context.frame_timestamp, context.scene_timestamp, debug_rt_width, debug_rt_height, hash_text_v, hash_text_f, debug_draw_index);
+    const bool renderer_debug_dump = renderer_debug_range_matches(renderer_debug.dump, context.frame_timestamp, context.scene_timestamp, debug_rt_width, debug_rt_height, hash_text_v, hash_text_f, debug_draw_index);
     if (renderer_debug_skip || renderer_debug_stop_after) {
         const char *reason = renderer_debug_skip ? "skip" : "stop-after";
         if (context.state.renderer_trace_gxm_state || renderer_debug.trace) {
@@ -924,6 +1111,12 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         const size_t index_buffer_size = index_size * count;
         context.index_stream_ring_buffer.allocate(context.prerender_cmd, index_buffer_size, indices_ptr);
         context.render_cmd.bindIndexBuffer(context.index_stream_ring_buffer.handle(), context.index_stream_ring_buffer.data_offset, index_type);
+        if (renderer_debug_dump)
+            max_index = get_renderer_debug_max_index(indices, count, format, mem);
+    }
+
+    if (renderer_debug_dump) {
+        log_renderer_debug_draw_dump(context, mem, type, format, indices, count, instance_count, max_index, debug_draw_index, debug_rt_width, debug_rt_height, hash_text_v, hash_text_f);
     }
 
     // bind the vertex streams

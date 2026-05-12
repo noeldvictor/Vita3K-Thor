@@ -167,6 +167,8 @@ static bool renderer_debug_env_requested() {
         || renderer_debug_env_flag("VITA3K_RENDER_LABELS")
         || std::getenv("VITA3K_RENDER_SKIP") != nullptr
         || std::getenv("VITA3K_RENDER_STOP_AFTER") != nullptr
+        || std::getenv("VITA3K_RENDER_DUMP") != nullptr
+        || std::getenv("VITA3K_RENDER_CONTROL_FILE") != nullptr
         || std::getenv("VITA3K_RENDER_TRACE_LIMIT") != nullptr;
 }
 

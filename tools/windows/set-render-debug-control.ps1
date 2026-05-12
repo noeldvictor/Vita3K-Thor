@@ -1,6 +1,7 @@
 param(
     [string]$Skip = "",
     [string]$StopAfter = "",
+    [string]$Dump = "",
     [int]$TraceLimit = 512,
     [switch]$NoTrace,
     [switch]$NoLabels,
@@ -23,6 +24,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path $ControlFile) | Out-Null
     "labels=$([int](-not $NoLabels))"
     "skip=$Skip"
     "stop_after=$StopAfter"
+    "dump=$Dump"
 ) | Set-Content -LiteralPath $ControlFile -Encoding UTF8
 
 Write-Host "Updated renderer control:"
@@ -32,3 +34,4 @@ Write-Host "  traceLimit: $TraceLimit"
 Write-Host "  labels:     $(-not $NoLabels)"
 Write-Host "  skip:       $Skip"
 Write-Host "  stopAfter:  $StopAfter"
+Write-Host "  dump:       $Dump"
