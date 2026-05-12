@@ -502,6 +502,40 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem) {
         descriptors.size(), descriptors.data(), dynamic_offset_count, dynamic_offsets);
 }
 
+static size_t get_vulkan_attribute_byte_size(const SceGxmVertexAttribute &attribute, const shader::usse::AttributeInformation &info) {
+    SceGxmAttributeFormat attribute_format = static_cast<SceGxmAttributeFormat>(attribute.format);
+    uint8_t component_count = attribute.componentCount;
+
+    if (info.regformat) {
+        component_count = info.component_count;
+        switch (info.gxm_type) {
+        case SCE_GXM_PARAMETER_TYPE_U8:
+        case SCE_GXM_PARAMETER_TYPE_S8:
+        case SCE_GXM_PARAMETER_TYPE_C10:
+            attribute_format = SCE_GXM_ATTRIBUTE_FORMAT_U8;
+            break;
+        case SCE_GXM_PARAMETER_TYPE_U16:
+        case SCE_GXM_PARAMETER_TYPE_S16:
+        case SCE_GXM_PARAMETER_TYPE_F16:
+            attribute_format = SCE_GXM_ATTRIBUTE_FORMAT_U16;
+            break;
+        default:
+            attribute_format = SCE_GXM_ATTRIBUTE_FORMAT_UNTYPED;
+            break;
+        }
+
+        if (info.gxm_type == SCE_GXM_PARAMETER_TYPE_C10)
+            component_count = (component_count * 10 + 7) / 8;
+
+        if (component_count > 4) {
+            const uint32_t array_size = (component_count + 3) / 4;
+            return array_size * 4 * gxm::attribute_format_size(attribute_format);
+        }
+    }
+
+    return gxm::attribute_format_size(attribute_format) * component_count;
+}
+
 // vertex count is only used with double buffer mapping
 static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t instance_count, uint32_t max_index) {
     GxmRecordState &state = context.record;
@@ -523,8 +557,10 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
 
         // same as in SceGxm.cpp
         for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
-            const SceGxmAttributeFormat attribute_format = static_cast<SceGxmAttributeFormat>(attribute.format);
-            const size_t attribute_size = gxm::attribute_format_size(attribute_format) * attribute.componentCount;
+            if (!vkvert->attribute_infos.contains(attribute.regIndex))
+                continue;
+
+            const size_t attribute_size = get_vulkan_attribute_byte_size(attribute, vkvert->attribute_infos.at(attribute.regIndex));
             const SceGxmVertexStream &stream = vertex_program.streams[attribute.streamIndex];
             const SceGxmIndexSource index_source = static_cast<SceGxmIndexSource>(stream.indexSource);
             const size_t data_passed_length = gxm::is_stream_instancing(index_source) ? ((instance_count - 1) * stream.stride) : (max_index * stream.stride);
