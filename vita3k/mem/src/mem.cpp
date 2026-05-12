@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <utility>
 
@@ -51,6 +52,7 @@ static void register_access_violation_handler(const AccessViolationHandler &hand
 
 static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_count, const char *name, const bool force);
 static void delete_memory(uint8_t *memory);
+static bool commit_range_inner(MemState &state, Address addr, uint32_t size);
 
 #ifdef _WIN32
 static std::string get_error_msg() {
@@ -170,19 +172,7 @@ static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_c
     const uint32_t size = page_count * STANDARD_PAGE_SIZE;
     const Address addr = page_num * STANDARD_PAGE_SIZE;
 
-    const Address commit_start = align_down(addr, state.host_page_size);
-    const Address commit_end = align(addr + size, state.host_page_size);
-    const uint32_t commit_size = commit_end - commit_start;
-    uint8_t *const commit_ptr = &state.memory[commit_start];
-
-    // Make memory chunk available to access
-#ifdef _WIN32
-    const void *const ret = VirtualAlloc(commit_ptr, commit_size, MEM_COMMIT, PAGE_READWRITE);
-    LOG_CRITICAL_IF(!ret, "VirtualAlloc failed: {}", get_error_msg());
-#else
-    const int ret = mprotect(commit_ptr, commit_size, PROT_READ | PROT_WRITE);
-    LOG_CRITICAL_IF(ret == -1, "mprotect failed: {}", get_error_msg());
-#endif
+    LOG_CRITICAL_IF(!commit_range_inner(state, addr, size), "Failed to commit guest memory allocation at 0x{:X} ({} bytes)", addr, size);
     std::memset(&state.memory[addr], 0, size);
 
     AllocMemPage &page = state.alloc_table[page_num];
@@ -219,6 +209,42 @@ Address alloc_aligned(MemState &state, uint32_t size, const char *name, unsigned
     }
 
     return align_addr;
+}
+
+static bool commit_range_inner(MemState &state, Address addr, uint32_t size) {
+    if (size == 0)
+        return true;
+
+    if (addr > std::numeric_limits<Address>::max() - size)
+        return false;
+
+    const Address commit_start = align_down(addr, state.host_page_size);
+    const Address commit_end = align(addr + size, state.host_page_size);
+    if (commit_end <= commit_start)
+        return false;
+
+    const uint32_t commit_size = commit_end - commit_start;
+    uint8_t *const commit_ptr = &state.memory[commit_start];
+
+#ifdef _WIN32
+    const void *const ret = VirtualAlloc(commit_ptr, commit_size, MEM_COMMIT, PAGE_READWRITE);
+    if (!ret) {
+        LOG_ERROR("VirtualAlloc commit failed at 0x{:X} ({} bytes): {}", commit_start, commit_size, get_error_msg());
+        return false;
+    }
+#else
+    const int ret = mprotect(commit_ptr, commit_size, PROT_READ | PROT_WRITE);
+    if (ret == -1) {
+        LOG_ERROR("mprotect commit failed at 0x{:X} ({} bytes): {}", commit_start, commit_size, get_error_msg());
+        return false;
+    }
+#endif
+
+    return true;
+}
+
+bool commit_range(MemState &state, Address addr, uint32_t size) {
+    return commit_range_inner(state, addr, size);
 }
 
 static void align_to_page(MemState &state, Address &addr, Address &size) {

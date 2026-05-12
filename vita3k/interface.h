@@ -25,6 +25,7 @@
 #include <memory>
 #include <optional>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 struct GuiState;
@@ -56,6 +57,7 @@ bool handle_events(EmuEnvState &emuenv, GuiState &gui);
 bool runtime_osd_is_open();
 bool runtime_quick_state_slot_valid(const EmuEnvState &emuenv);
 uint64_t runtime_quick_state_slot_bytes();
+std::string runtime_quick_state_slot_status(EmuEnvState &emuenv);
 void runtime_osd_set_open(EmuEnvState &emuenv, bool open);
 void runtime_set_speed_percent(EmuEnvState &emuenv, uint32_t speed_percent);
 void runtime_toggle_fast_forward(EmuEnvState &emuenv);

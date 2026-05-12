@@ -318,6 +318,30 @@ bool TextureCache::init(const bool hashless_texture_cache, const fs::path &textu
     return true;
 }
 
+void TextureCache::reset_runtime_cache() {
+    texture_lookup.clear();
+    const size_t texture_cache_size = texture_queue.items.size();
+    if (texture_cache_size > 0) {
+        texture_queue.init(texture_cache_size);
+        for (size_t i = 0; i < texture_cache_size; i++)
+            texture_queue.items[i].content.index = static_cast<int>(i);
+    }
+
+    sampler_lookup.clear();
+    const size_t sampler_cache_size = sampler_queue.items.size();
+    if (sampler_cache_size > 0) {
+        sampler_queue.init(sampler_cache_size);
+        for (size_t i = 0; i < sampler_cache_size; i++)
+            sampler_queue.items[i].content.index = static_cast<int>(i);
+    }
+
+    current_info = nullptr;
+    importing_texture = false;
+    exporting_texture = false;
+    imported_texture_raw_data.clear();
+    imported_texture_decoded = nullptr;
+}
+
 void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &mem) {
     R_PROFILE(__func__);
 

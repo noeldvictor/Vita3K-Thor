@@ -589,7 +589,7 @@ static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &
 
     const uint32_t current_speed = emuenv.display.speed_percent.load();
     const uint32_t configured_speed = static_cast<uint32_t>(std::clamp(emuenv.cfg.fast_forward_speed_percent, 101, 1000));
-    const std::string quick_state_status = runtime_quick_state_slot_valid(emuenv) ? fmt::format("{} MiB", runtime_quick_state_slot_bytes() / (1024 * 1024)) : "empty";
+    const std::string quick_state_status = runtime_quick_state_slot_status(emuenv);
 
     ImGui::BeginChild("##runtime_status", ImVec2(0.f, 158.f), true);
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.92f, 0.58f, 1.0f));
@@ -603,7 +603,7 @@ static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &
 #ifdef __ANDROID__
     ImGui::Text("Driver: %s", emuenv.cfg.current_config.custom_driver_name.empty() ? "system" : emuenv.cfg.current_config.custom_driver_name.c_str());
 #endif
-    ImGui::Text("Quickstate slot 0: %s", quick_state_status.c_str());
+    ImGui::TextWrapped("Quickstate slot 0: %s", quick_state_status.c_str());
     if (emuenv.renderer) {
         bool renderer_trace = emuenv.renderer->renderer_trace_gxm_state;
         if (ImGui::Checkbox("Renderer Trace", &renderer_trace)) {

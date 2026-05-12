@@ -35,6 +35,7 @@
 #include <io/functions.h>
 #include <io/vfs.h>
 #include <kernel/state.h>
+#include <mem/functions.h>
 #include <mem/ptr.h>
 #include <packages/functions.h>
 #include <packages/license.h>
@@ -63,6 +64,7 @@
 #include <mutex>
 #include <optional>
 #include <regex>
+#include <set>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -933,12 +935,26 @@ struct QuickStateMemoryPage {
     std::vector<uint8_t> bytes;
 };
 
+struct QuickStateThreadContext {
+    SceUID id = 0;
+    std::string name;
+    Address entry_point = 0;
+    Address stack_address = 0;
+    uint32_t stack_size = 0;
+    Address tls_address = 0;
+    int priority = 0;
+    SceInt32 affinity_mask = 0;
+    CPUContext context;
+};
+
 struct QuickStateSlot {
     bool valid = false;
     std::string title_id;
     std::string title;
-    std::map<SceUID, CPUContext> thread_contexts;
+    std::vector<QuickStateThreadContext> thread_contexts;
     std::vector<QuickStateMemoryPage> memory_pages;
+    std::vector<uint32_t> allocator_words;
+    std::vector<uint32_t> allocation_pages;
     uint64_t byte_count = 0;
 };
 
@@ -951,6 +967,168 @@ static bool android_back_fast_forward_latched = false;
 static bool android_back_long_press_used = false;
 static uint64_t android_back_down_ticks = 0;
 constexpr uint64_t ANDROID_BACK_HOME_LONG_PRESS_MS = 400;
+constexpr char QUICKSTATE_MAGIC[] = { 'V', '3', 'K', 'T', 'H', 'O', 'R', 'S', 'T', 'A', 'T', 'E' };
+constexpr uint32_t QUICKSTATE_VERSION = 3;
+constexpr uint32_t QUICKSTATE_MAX_STRING_BYTES = 4096;
+constexpr uint32_t QUICKSTATE_COMPRESSION_NONE = 0;
+constexpr uint32_t QUICKSTATE_COMPRESSION_MINIZ = 1;
+
+struct QuickStateDiskHeader {
+    uint32_t version = 0;
+    std::string title_id;
+    std::string title;
+    uint64_t byte_count = 0;
+    uint32_t thread_count = 0;
+    uint64_t memory_page_count = 0;
+    uint32_t compression_level = 0;
+    uint32_t allocator_word_count = 0;
+    uint32_t allocation_page_count = 0;
+};
+
+static fs::path quick_state_root(EmuEnvState &emuenv) {
+    if (emuenv.cfg.save_state_dir.empty())
+        return emuenv.shared_path / "states";
+
+    fs::path configured = fs_utils::utf8_to_path(emuenv.cfg.save_state_dir);
+    if (configured.is_relative())
+        configured = emuenv.shared_path / configured;
+
+    return configured;
+}
+
+static fs::path quick_state_dir(EmuEnvState &emuenv, const std::string &title_id) {
+    return quick_state_root(emuenv) / title_id;
+}
+
+static fs::path quick_state_file(EmuEnvState &emuenv, const std::string &title_id) {
+    return quick_state_dir(emuenv, title_id) / "slot0.thorstate";
+}
+
+static fs::path quick_state_marker_file(EmuEnvState &emuenv, const std::string &title_id) {
+    return quick_state_dir(emuenv, title_id) / "slot0.thorstate.txt";
+}
+
+template <typename T>
+static bool quick_state_write_value(std::ostream &out, const T &value) {
+    out.write(reinterpret_cast<const char *>(&value), sizeof(T));
+    return out.good();
+}
+
+static bool quick_state_write_bytes(std::ostream &out, const void *data, const std::streamsize size) {
+    out.write(reinterpret_cast<const char *>(data), size);
+    return out.good();
+}
+
+static bool quick_state_write_string(std::ostream &out, const std::string &value) {
+    if (value.size() > QUICKSTATE_MAX_STRING_BYTES)
+        return false;
+
+    const auto size = static_cast<uint32_t>(value.size());
+    return quick_state_write_value(out, size) && quick_state_write_bytes(out, value.data(), size);
+}
+
+template <typename T>
+static bool quick_state_read_value(std::istream &in, T &value) {
+    in.read(reinterpret_cast<char *>(&value), sizeof(T));
+    return in.good();
+}
+
+static bool quick_state_read_bytes(std::istream &in, void *data, const std::streamsize size) {
+    in.read(reinterpret_cast<char *>(data), size);
+    return in.good();
+}
+
+static bool quick_state_read_string(std::istream &in, std::string &value) {
+    uint32_t size = 0;
+    if (!quick_state_read_value(in, size) || (size > QUICKSTATE_MAX_STRING_BYTES))
+        return false;
+
+    value.resize(size);
+    return size == 0 || quick_state_read_bytes(in, value.data(), size);
+}
+
+static bool quick_state_write_cpu_context(std::ostream &out, const CPUContext &context) {
+    return quick_state_write_bytes(out, context.cpu_registers.data(), static_cast<std::streamsize>(context.cpu_registers.size() * sizeof(context.cpu_registers[0])))
+        && quick_state_write_bytes(out, context.fpu_registers.data(), static_cast<std::streamsize>(context.fpu_registers.size() * sizeof(context.fpu_registers[0])))
+        && quick_state_write_value(out, context.cpsr)
+        && quick_state_write_value(out, context.fpscr);
+}
+
+static bool quick_state_read_cpu_context(std::istream &in, CPUContext &context) {
+    return quick_state_read_bytes(in, context.cpu_registers.data(), static_cast<std::streamsize>(context.cpu_registers.size() * sizeof(context.cpu_registers[0])))
+        && quick_state_read_bytes(in, context.fpu_registers.data(), static_cast<std::streamsize>(context.fpu_registers.size() * sizeof(context.fpu_registers[0])))
+        && quick_state_read_value(in, context.cpsr)
+        && quick_state_read_value(in, context.fpscr);
+}
+
+static bool quick_state_read_header(std::istream &in, QuickStateDiskHeader &header) {
+    char magic[sizeof(QUICKSTATE_MAGIC)]{};
+    uint32_t version = 0;
+    uint32_t page_size = 0;
+
+    if (!quick_state_read_bytes(in, magic, sizeof(magic)) || std::memcmp(magic, QUICKSTATE_MAGIC, sizeof(QUICKSTATE_MAGIC)) != 0)
+        return false;
+    if (!quick_state_read_value(in, version) || (version == 0) || (version > QUICKSTATE_VERSION))
+        return false;
+    if (!quick_state_read_value(in, page_size) || (page_size != QUICKSTATE_PAGE_SIZE))
+        return false;
+    if (version >= 2 && !quick_state_read_value(in, header.compression_level))
+        return false;
+    if (!quick_state_read_string(in, header.title_id) || !quick_state_read_string(in, header.title))
+        return false;
+    if (!quick_state_read_value(in, header.byte_count))
+        return false;
+    if (!quick_state_read_value(in, header.thread_count))
+        return false;
+    if (!quick_state_read_value(in, header.memory_page_count))
+        return false;
+    if (version >= 3) {
+        if (!quick_state_read_value(in, header.allocator_word_count))
+            return false;
+        if (!quick_state_read_value(in, header.allocation_page_count))
+            return false;
+    }
+
+    header.version = version;
+    return true;
+}
+
+static uint32_t pack_quick_state_alloc_page(const AllocMemPage &page) {
+    return (static_cast<uint32_t>(page.allocated) << 28) | (page.size & 0x0FFFFFFFU);
+}
+
+static void unpack_quick_state_alloc_page(const uint32_t packed, AllocMemPage &page) {
+    page.allocated = (packed >> 28) & 0xFU;
+    page.size = packed & 0x0FFFFFFFU;
+}
+
+static uint64_t quick_state_file_size(EmuEnvState &emuenv, const std::string &title_id) {
+    const fs::path state_file = quick_state_file(emuenv, title_id);
+    boost::system::error_code ec;
+    const auto size = fs::file_size(state_file, ec);
+    return ec ? 0 : size;
+}
+
+static bool quick_state_compress_page(const std::vector<uint8_t> &input, std::vector<uint8_t> &output, const int compression_level) {
+    if (compression_level <= 0)
+        return false;
+
+    mz_ulong compressed_size = mz_compressBound(static_cast<mz_ulong>(input.size()));
+    output.resize(static_cast<size_t>(compressed_size));
+    const int result = mz_compress2(output.data(), &compressed_size, input.data(), static_cast<mz_ulong>(input.size()), std::clamp(compression_level, 1, 9));
+    if (result != MZ_OK || compressed_size >= input.size())
+        return false;
+
+    output.resize(static_cast<size_t>(compressed_size));
+    return true;
+}
+
+static bool quick_state_decompress_page(const std::vector<uint8_t> &input, std::vector<uint8_t> &output, const uint32_t raw_size) {
+    output.resize(raw_size);
+    mz_ulong output_size = static_cast<mz_ulong>(raw_size);
+    const int result = mz_uncompress(output.data(), &output_size, input.data(), static_cast<mz_ulong>(input.size()));
+    return result == MZ_OK && output_size == raw_size;
+}
 
 static bool memory_page_is_allocated(const MemState &mem, const uint32_t page) {
     const uint32_t word = mem.allocator.words[page >> 5];
@@ -993,12 +1171,14 @@ static bool capture_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         return false;
 
     const bool already_paused = emuenv.kernel.is_threads_paused();
-    if (!already_paused) {
+    if (!already_paused)
         emuenv.kernel.pause_threads();
-        if (!wait_for_guest_threads_paused(emuenv.kernel)) {
+
+    if (!wait_for_guest_threads_paused(emuenv.kernel)) {
+        if (!already_paused)
             emuenv.kernel.resume_threads();
-            return false;
-        }
+        LOG_WARN("Failed to capture quickstate for {} because guest threads did not pause in time.", emuenv.io.title_id);
+        return false;
     }
 
     QuickStateSlot captured;
@@ -1009,12 +1189,32 @@ static bool capture_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     {
         const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
         for (const auto &[thread_id, thread] : emuenv.kernel.threads) {
-            if (thread->cpu)
-                captured.thread_contexts[thread_id] = save_context(*thread->cpu);
+            if (!thread->cpu)
+                continue;
+
+            QuickStateThreadContext thread_context;
+            thread_context.id = thread_id;
+            thread_context.name = thread->name;
+            thread_context.entry_point = thread->entry_point;
+            thread_context.stack_address = thread->stack.get();
+            thread_context.stack_size = static_cast<uint32_t>(thread->stack_size);
+            thread_context.tls_address = thread->tls.get();
+            thread_context.priority = thread->priority;
+            thread_context.affinity_mask = thread->affinity_mask;
+            thread_context.context = save_context(*thread->cpu);
+            captured.thread_contexts.push_back(std::move(thread_context));
         }
     }
 
     const auto page_count = static_cast<uint32_t>(emuenv.mem.allocator.max_offset);
+    {
+        const std::lock_guard<std::mutex> mem_lock(emuenv.mem.generation_mutex);
+        captured.allocator_words = emuenv.mem.allocator.words;
+        captured.allocation_pages.reserve(page_count);
+        for (uint32_t page = 0; page < page_count; page++)
+            captured.allocation_pages.push_back(pack_quick_state_alloc_page(emuenv.mem.alloc_table[page]));
+    }
+
     captured.memory_pages.reserve(page_count / 8);
     for (uint32_t page = 1; page < page_count; page++) {
         if (!memory_page_is_allocated(emuenv.mem, page))
@@ -1039,25 +1239,357 @@ static bool capture_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     return true;
 }
 
+static bool save_quick_state_to_disk(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    if (!slot.valid || slot.title_id.empty())
+        return false;
+
+    const fs::path state_dir = quick_state_dir(emuenv, slot.title_id);
+    const fs::path state_file = quick_state_file(emuenv, slot.title_id);
+    const fs::path tmp_file = state_file.string() + ".tmp";
+    fs::create_directories(state_dir);
+
+    {
+        fs::ofstream out(tmp_file, std::ios::binary | std::ios::trunc);
+        if (!out)
+            return false;
+
+        const uint32_t compression_level = static_cast<uint32_t>(std::clamp(emuenv.cfg.save_state_compression_level, 0, 9));
+        const uint32_t thread_count = static_cast<uint32_t>(slot.thread_contexts.size());
+        const uint64_t memory_page_count = static_cast<uint64_t>(slot.memory_pages.size());
+        const uint32_t allocator_word_count = static_cast<uint32_t>(slot.allocator_words.size());
+        const uint32_t allocation_page_count = static_cast<uint32_t>(slot.allocation_pages.size());
+        if (!quick_state_write_bytes(out, QUICKSTATE_MAGIC, sizeof(QUICKSTATE_MAGIC))
+            || !quick_state_write_value(out, QUICKSTATE_VERSION)
+            || !quick_state_write_value(out, QUICKSTATE_PAGE_SIZE)
+            || !quick_state_write_value(out, compression_level)
+            || !quick_state_write_string(out, slot.title_id)
+            || !quick_state_write_string(out, slot.title)
+            || !quick_state_write_value(out, slot.byte_count)
+            || !quick_state_write_value(out, thread_count)
+            || !quick_state_write_value(out, memory_page_count)
+            || !quick_state_write_value(out, allocator_word_count)
+            || !quick_state_write_value(out, allocation_page_count)) {
+            return false;
+        }
+
+        for (const auto word : slot.allocator_words) {
+            if (!quick_state_write_value(out, word))
+                return false;
+        }
+
+        for (const auto page : slot.allocation_pages) {
+            if (!quick_state_write_value(out, page))
+                return false;
+        }
+
+        for (const auto &thread_context : slot.thread_contexts) {
+            if (!quick_state_write_value(out, thread_context.id)
+                || !quick_state_write_string(out, thread_context.name)
+                || !quick_state_write_value(out, thread_context.entry_point)
+                || !quick_state_write_value(out, thread_context.stack_address)
+                || !quick_state_write_value(out, thread_context.stack_size)
+                || !quick_state_write_value(out, thread_context.tls_address)
+                || !quick_state_write_value(out, thread_context.priority)
+                || !quick_state_write_value(out, thread_context.affinity_mask)
+                || !quick_state_write_cpu_context(out, thread_context.context)) {
+                return false;
+            }
+        }
+
+        for (const auto &page : slot.memory_pages) {
+            const uint32_t raw_page_size = static_cast<uint32_t>(page.bytes.size());
+            uint32_t compression_method = QUICKSTATE_COMPRESSION_NONE;
+            std::vector<uint8_t> compressed_page;
+            const std::vector<uint8_t> *page_bytes = &page.bytes;
+            if (quick_state_compress_page(page.bytes, compressed_page, static_cast<int>(compression_level))) {
+                compression_method = QUICKSTATE_COMPRESSION_MINIZ;
+                page_bytes = &compressed_page;
+            }
+
+            const uint32_t stored_page_size = static_cast<uint32_t>(page_bytes->size());
+            if (!quick_state_write_value(out, page.address)
+                || !quick_state_write_value(out, raw_page_size)
+                || !quick_state_write_value(out, stored_page_size)
+                || !quick_state_write_value(out, compression_method)
+                || !quick_state_write_bytes(out, page_bytes->data(), stored_page_size)) {
+                return false;
+            }
+        }
+    }
+
+    boost::system::error_code ec;
+    fs::remove(state_file, ec);
+    ec.clear();
+    fs::rename(tmp_file, state_file, ec);
+    if (ec) {
+        fs::remove(tmp_file);
+        LOG_WARN("Failed to finalize durable quickstate {}: {}", state_file, ec.message());
+        return false;
+    }
+
+    return true;
+}
+
+static bool read_quick_state_disk_header(EmuEnvState &emuenv, const std::string &title_id, QuickStateDiskHeader &header) {
+    const fs::path state_file = quick_state_file(emuenv, title_id);
+    fs::ifstream in(state_file, std::ios::binary);
+    if (!in)
+        return false;
+
+    return quick_state_read_header(in, header) && (header.title_id == title_id);
+}
+
+static bool load_quick_state_from_disk(EmuEnvState &emuenv, const std::string &title_id, QuickStateSlot &slot) {
+    const fs::path state_file = quick_state_file(emuenv, title_id);
+    fs::ifstream in(state_file, std::ios::binary);
+    if (!in)
+        return false;
+
+    QuickStateDiskHeader header;
+    if (!quick_state_read_header(in, header) || (header.title_id != title_id))
+        return false;
+    if (header.thread_count > 1024 || header.memory_page_count > emuenv.mem.allocator.max_offset)
+        return false;
+    if ((header.allocator_word_count > emuenv.mem.allocator.words.size()) || (header.allocation_page_count > emuenv.mem.allocator.max_offset))
+        return false;
+
+    QuickStateSlot loaded;
+    loaded.valid = true;
+    loaded.title_id = header.title_id;
+    loaded.title = header.title;
+    loaded.byte_count = header.byte_count;
+    loaded.thread_contexts.reserve(header.thread_count);
+    loaded.memory_pages.reserve(static_cast<size_t>(header.memory_page_count));
+    loaded.allocator_words.reserve(header.allocator_word_count);
+    loaded.allocation_pages.reserve(header.allocation_page_count);
+
+    for (uint32_t i = 0; i < header.allocator_word_count; i++) {
+        uint32_t word = 0;
+        if (!quick_state_read_value(in, word))
+            return false;
+        loaded.allocator_words.push_back(word);
+    }
+
+    for (uint32_t i = 0; i < header.allocation_page_count; i++) {
+        uint32_t page = 0;
+        if (!quick_state_read_value(in, page))
+            return false;
+        loaded.allocation_pages.push_back(page);
+    }
+
+    for (uint32_t i = 0; i < header.thread_count; i++) {
+        QuickStateThreadContext thread_context;
+        if (!quick_state_read_value(in, thread_context.id)
+            || !quick_state_read_string(in, thread_context.name)
+            || !quick_state_read_value(in, thread_context.entry_point)
+            || !quick_state_read_value(in, thread_context.stack_address)
+            || !quick_state_read_value(in, thread_context.stack_size)
+            || !quick_state_read_value(in, thread_context.tls_address)
+            || !quick_state_read_value(in, thread_context.priority)
+            || !quick_state_read_value(in, thread_context.affinity_mask)
+            || !quick_state_read_cpu_context(in, thread_context.context)) {
+            return false;
+        }
+        loaded.thread_contexts.push_back(std::move(thread_context));
+    }
+
+    uint64_t byte_count = 0;
+    for (uint64_t i = 0; i < header.memory_page_count; i++) {
+        QuickStateMemoryPage page;
+        uint32_t raw_page_size = 0;
+        uint32_t stored_page_size = 0;
+        uint32_t compression_method = QUICKSTATE_COMPRESSION_NONE;
+        if (!quick_state_read_value(in, page.address) || !quick_state_read_value(in, raw_page_size))
+            return false;
+        if (header.version >= 2) {
+            if (!quick_state_read_value(in, stored_page_size) || !quick_state_read_value(in, compression_method))
+                return false;
+        } else {
+            stored_page_size = raw_page_size;
+        }
+
+        if ((page.address % QUICKSTATE_PAGE_SIZE) != 0 || (raw_page_size != QUICKSTATE_PAGE_SIZE) || (stored_page_size == 0))
+            return false;
+
+        std::vector<uint8_t> stored_page(stored_page_size);
+        if (!quick_state_read_bytes(in, stored_page.data(), stored_page_size))
+            return false;
+
+        if (compression_method == QUICKSTATE_COMPRESSION_NONE) {
+            if (stored_page_size != raw_page_size)
+                return false;
+            page.bytes = std::move(stored_page);
+        } else if (compression_method == QUICKSTATE_COMPRESSION_MINIZ) {
+            if (!quick_state_decompress_page(stored_page, page.bytes, raw_page_size))
+                return false;
+        } else {
+            return false;
+        }
+
+        byte_count += raw_page_size;
+        loaded.memory_pages.push_back(std::move(page));
+    }
+
+    if (byte_count != header.byte_count)
+        return false;
+
+    slot = std::move(loaded);
+    return true;
+}
+
+static ThreadStatePtr find_quick_state_restore_thread(KernelState &kernel, const QuickStateThreadContext &saved_thread, std::set<SceUID> &matched_threads) {
+    const auto exact_thread = kernel.threads.find(saved_thread.id);
+    if ((exact_thread != kernel.threads.end()) && exact_thread->second->cpu && !matched_threads.contains(exact_thread->first))
+        return exact_thread->second;
+
+    for (const auto &[thread_id, thread] : kernel.threads) {
+        if (matched_threads.contains(thread_id) || !thread->cpu)
+            continue;
+        if ((thread->name == saved_thread.name) && (thread->entry_point == saved_thread.entry_point))
+            return thread;
+    }
+
+    for (const auto &[thread_id, thread] : kernel.threads) {
+        if (matched_threads.contains(thread_id) || !thread->cpu)
+            continue;
+        if (thread->name == saved_thread.name)
+            return thread;
+    }
+
+    return nullptr;
+}
+
+static bool quick_state_alloc_page_is_allocated(const uint32_t packed) {
+    return ((packed >> 28) & 0xFU) != 0;
+}
+
+static uint32_t quick_state_alloc_page_size(const uint32_t packed) {
+    return packed & 0x0FFFFFFFU;
+}
+
+static bool quick_state_commit_guest_pages(MemState &mem, const uint32_t start_page, const uint32_t end_page) {
+    if (end_page <= start_page)
+        return true;
+
+    const Address address = start_page * QUICKSTATE_PAGE_SIZE;
+    const uint32_t size = (end_page - start_page) * QUICKSTATE_PAGE_SIZE;
+    return commit_range(mem, address, size);
+}
+
+static bool restore_quick_state_allocation_map(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    if (slot.allocator_words.empty() || slot.allocation_pages.empty())
+        return true;
+
+    MemState &mem = emuenv.mem;
+    if ((slot.allocator_words.size() != mem.allocator.words.size()) || (slot.allocation_pages.size() != mem.allocator.max_offset)) {
+        LOG_WARN("Refused quickstate restore for {} because the saved allocation map does not match this emulator memory layout.", slot.title_id);
+        return false;
+    }
+
+    for (uint32_t page = 1; page < slot.allocation_pages.size();) {
+        const uint32_t packed = slot.allocation_pages[page];
+        if (!quick_state_alloc_page_is_allocated(packed)) {
+            page++;
+            continue;
+        }
+
+        const uint32_t block_pages = std::max(quick_state_alloc_page_size(packed), 1U);
+        const uint32_t end_page = std::min<uint32_t>(page + block_pages, static_cast<uint32_t>(slot.allocation_pages.size()));
+        if (!quick_state_commit_guest_pages(mem, page, end_page)) {
+            LOG_WARN("Refused quickstate restore for {} because guest memory pages {}-{} could not be committed.", slot.title_id, page, end_page);
+            return false;
+        }
+        page = end_page;
+    }
+
+    {
+        const std::lock_guard<std::mutex> mem_lock(mem.generation_mutex);
+        mem.allocator.words = slot.allocator_words;
+        for (uint32_t page = 0; page < slot.allocation_pages.size(); page++)
+            unpack_quick_state_alloc_page(slot.allocation_pages[page], mem.alloc_table[page]);
+    }
+
+    {
+        const std::lock_guard<std::mutex> protect_lock(mem.protect_mutex);
+        mem.protect_tree.clear();
+    }
+
+    for (uint32_t page = 1; page < slot.allocation_pages.size();) {
+        const uint32_t packed = slot.allocation_pages[page];
+        if (!quick_state_alloc_page_is_allocated(packed)) {
+            page++;
+            continue;
+        }
+
+        const uint32_t block_pages = std::max(quick_state_alloc_page_size(packed), 1U);
+        const Address address = page * QUICKSTATE_PAGE_SIZE;
+        unprotect_inner(mem, address, block_pages * QUICKSTATE_PAGE_SIZE);
+        page = std::min<uint32_t>(page + block_pages, static_cast<uint32_t>(slot.allocation_pages.size()));
+    }
+
+    protect_inner(mem, 0, mem.host_page_size, MemPerm::None);
+
+    return true;
+}
+
+static bool quick_state_page_can_restore(const MemState &mem, const QuickStateMemoryPage &page, uint32_t &missing_pages) {
+    const auto page_size = static_cast<uint32_t>(page.bytes.size());
+    if (valid_quick_state_page(mem, page.address, page_size))
+        return true;
+
+    missing_pages++;
+    return true;
+}
+
+static void reset_quick_state_runtime_render_state(EmuEnvState &emuenv) {
+    emuenv.gxm.display_queue.reset();
+
+    if (!emuenv.renderer)
+        return;
+
+    emuenv.renderer->command_buffer_queue.reset();
+    emuenv.renderer->last_scene_id = 0;
+    emuenv.renderer->should_display = false;
+    if (auto texture_cache = emuenv.renderer->get_texture_cache())
+        texture_cache->reset_runtime_cache();
+}
+
 static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     if (!slot.valid || (slot.title_id != emuenv.io.title_id))
         return false;
 
     const bool already_paused = emuenv.kernel.is_threads_paused();
-    if (!already_paused) {
+    if (!already_paused)
         emuenv.kernel.pause_threads();
-        if (!wait_for_guest_threads_paused(emuenv.kernel)) {
+
+    if (!wait_for_guest_threads_paused(emuenv.kernel)) {
+        if (!already_paused)
             emuenv.kernel.resume_threads();
-            return false;
-        }
+        LOG_WARN("Failed to restore quickstate for {} because guest threads did not pause in time.", slot.title_id);
+        return false;
     }
 
+    if (!restore_quick_state_allocation_map(emuenv, slot)) {
+        if (!already_paused)
+            emuenv.kernel.resume_threads();
+        return false;
+    }
+
+    uint32_t missing_pages = 0;
     for (const auto &page : slot.memory_pages) {
-        if (!valid_quick_state_page(emuenv.mem, page.address, static_cast<uint32_t>(page.bytes.size()))) {
+        if (!quick_state_page_can_restore(emuenv.mem, page, missing_pages)) {
             if (!already_paused)
                 emuenv.kernel.resume_threads();
             return false;
         }
+    }
+
+    if (missing_pages > 0) {
+        if (!already_paused)
+            emuenv.kernel.resume_threads();
+        LOG_WARN("Refused quickstate restore for {} because {} guest memory page(s) are not allocated in the current session. Restart/load-state support needs full kernel object and allocation-map serialization before this can be restored safely.",
+            slot.title_id, missing_pages);
+        return false;
     }
 
     for (const auto &page : slot.memory_pages)
@@ -1065,18 +1597,22 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
 
     {
         const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
-        for (const auto &[thread_id, context] : slot.thread_contexts) {
-            const auto thread = emuenv.kernel.threads.find(thread_id);
-            if ((thread == emuenv.kernel.threads.end()) || !thread->second->cpu) {
+        std::set<SceUID> matched_threads;
+        for (const auto &thread_context : slot.thread_contexts) {
+            const auto thread = find_quick_state_restore_thread(emuenv.kernel, thread_context, matched_threads);
+            if (!thread || !thread->cpu) {
                 if (!already_paused)
                     emuenv.kernel.resume_threads();
+                LOG_WARN("Failed to match quickstate thread {} ({}) for restore", thread_context.id, thread_context.name);
                 return false;
             }
 
-            load_context(*thread->second->cpu, context);
+            matched_threads.insert(thread->id);
+            load_context(*thread->cpu, thread_context.context);
         }
     }
 
+    reset_quick_state_runtime_render_state(emuenv);
     emuenv.kernel.invalidate_jit_cache(0, std::numeric_limits<Address>::max());
     if (!already_paused)
         emuenv.kernel.resume_threads();
@@ -1084,16 +1620,26 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     return true;
 }
 
+static bool quick_state_has_avplayer_threads(const QuickStateSlot &slot) {
+    return std::any_of(slot.thread_contexts.begin(), slot.thread_contexts.end(), [](const QuickStateThreadContext &thread) {
+        return thread.name.rfind("avPlayer ", 0) == 0;
+    });
+}
+
 static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &slot) {
-    const fs::path state_dir = emuenv.shared_path / "states" / slot.title_id;
+    const fs::path state_dir = quick_state_dir(emuenv, slot.title_id);
     fs::create_directories(state_dir);
-    fs::ofstream marker(state_dir / "slot0.same-session.txt");
-    marker << "Vita3K Thor same-session quickstate\n";
+    fs::ofstream marker(quick_state_marker_file(emuenv, slot.title_id));
+    marker << "Vita3K Thor durable quickstate\n";
     marker << "Title ID: " << slot.title_id << "\n";
     marker << "Title: " << slot.title << "\n";
     marker << "Guest memory bytes: " << slot.byte_count << "\n";
     marker << "Thread contexts: " << slot.thread_contexts.size() << "\n";
-    marker << "Note: this is not a durable disk save state yet.\n";
+    marker << "Compression level: " << std::clamp(emuenv.cfg.save_state_compression_level, 0, 9) << "\n";
+    marker << "State file bytes: " << quick_state_file_size(emuenv, slot.title_id) << "\n";
+    marker << "State root: " << quick_state_root(emuenv) << "\n";
+    marker << "State file: " << quick_state_file(emuenv, slot.title_id) << "\n";
+    marker << "Note: this is an experimental durable state and still needs full GPU/audio/IO/kernel-object serialization for emulator-perfect resumes.\n";
 }
 
 } // namespace
@@ -1108,6 +1654,27 @@ bool runtime_quick_state_slot_valid(const EmuEnvState &emuenv) {
 
 uint64_t runtime_quick_state_slot_bytes() {
     return quick_state_slot0.byte_count;
+}
+
+std::string runtime_quick_state_slot_status(EmuEnvState &emuenv) {
+    const auto title_id = emuenv.io.title_id.empty() ? std::string("unknown-title") : emuenv.io.title_id;
+    if (quick_state_slot0.valid && (quick_state_slot0.title_id == title_id)) {
+        QuickStateDiskHeader header;
+        const bool has_disk_state = read_quick_state_disk_header(emuenv, title_id, header);
+        if (has_disk_state) {
+            const uint64_t disk_size = quick_state_file_size(emuenv, title_id);
+            return fmt::format("durable {} MiB ({} MiB raw)", disk_size / (1024 * 1024), quick_state_slot0.byte_count / (1024 * 1024));
+        }
+        return fmt::format("RAM {} MiB", quick_state_slot0.byte_count / (1024 * 1024));
+    }
+
+    QuickStateDiskHeader header;
+    if (read_quick_state_disk_header(emuenv, title_id, header)) {
+        const uint64_t disk_size = quick_state_file_size(emuenv, title_id);
+        return fmt::format("disk {} MiB ({} MiB raw)", disk_size / (1024 * 1024), header.byte_count / (1024 * 1024));
+    }
+
+    return "empty";
 }
 
 void runtime_osd_set_open(EmuEnvState &emuenv, bool open) {
@@ -1155,12 +1722,21 @@ void runtime_toggle_fast_forward(EmuEnvState &emuenv) {
 
 void runtime_request_save_state(EmuEnvState &emuenv) {
     const auto title_id = emuenv.io.title_id.empty() ? std::string("unknown-title") : emuenv.io.title_id;
-    const fs::path state_dir = emuenv.shared_path / "states" / title_id;
+    const fs::path state_dir = quick_state_dir(emuenv, title_id);
     fs::create_directories(state_dir);
     if (capture_quick_state(emuenv, quick_state_slot0)) {
-        write_quick_state_marker(emuenv, quick_state_slot0);
-        LOG_INFO("Captured same-session quickstate slot 0 for {} at {} ({} bytes, {} threads)",
-            title_id, state_dir / "slot0.same-session.txt", quick_state_slot0.byte_count, quick_state_slot0.thread_contexts.size());
+        const bool saved_to_disk = save_quick_state_to_disk(emuenv, quick_state_slot0);
+        if (saved_to_disk)
+            write_quick_state_marker(emuenv, quick_state_slot0);
+
+        LOG_INFO("Captured {} quickstate slot 0 for {} at {} ({} bytes, {} threads)",
+            saved_to_disk ? "durable" : "RAM-only",
+            title_id,
+            saved_to_disk ? quick_state_file(emuenv, title_id) : state_dir,
+            quick_state_slot0.byte_count,
+            quick_state_slot0.thread_contexts.size());
+        if (!saved_to_disk)
+            LOG_WARN("Failed to write durable quickstate slot 0 for {}", title_id);
     } else {
         LOG_WARN("Failed to capture same-session quickstate slot 0 for {}", title_id);
     }
@@ -1168,11 +1744,26 @@ void runtime_request_save_state(EmuEnvState &emuenv) {
 
 void runtime_request_load_state(EmuEnvState &emuenv) {
     const auto title_id = emuenv.io.title_id.empty() ? std::string("unknown-title") : emuenv.io.title_id;
-    const fs::path state_dir = emuenv.shared_path / "states" / title_id;
+    bool loaded_from_disk = false;
+    if (!quick_state_slot0.valid || (quick_state_slot0.title_id != title_id)) {
+        loaded_from_disk = load_quick_state_from_disk(emuenv, title_id, quick_state_slot0);
+        if (loaded_from_disk) {
+            LOG_INFO("Loaded durable quickstate slot 0 for {} from {}", title_id, quick_state_file(emuenv, title_id));
+        }
+    }
+
+    if (loaded_from_disk && quick_state_has_avplayer_threads(quick_state_slot0)) {
+        LOG_WARN("Refused durable quickstate restore for {} because this state contains AVPlayer movie/audio threads. Same-session AVPlayer states can load, but app-restart restores need AVPlayer host object serialization before they are safe.", title_id);
+        return;
+    }
+
     if (restore_quick_state(emuenv, quick_state_slot0)) {
-        LOG_INFO("Restored same-session quickstate slot 0 for {} from {}", title_id, state_dir / "slot0.same-session.txt");
+        LOG_INFO("Restored {} quickstate slot 0 for {} from {}",
+            loaded_from_disk ? "durable" : "same-session",
+            title_id,
+            loaded_from_disk ? quick_state_file(emuenv, title_id) : quick_state_marker_file(emuenv, title_id));
     } else {
-        LOG_WARN("Failed to restore same-session quickstate slot 0 for {}", title_id);
+        LOG_WARN("Failed to restore quickstate slot 0 for {}", title_id);
     }
 }
 

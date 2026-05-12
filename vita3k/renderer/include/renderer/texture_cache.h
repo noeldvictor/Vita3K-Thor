@@ -136,6 +136,7 @@ public:
 
     bool init(const bool hashless_texture_cache, const fs::path &texture_folder, const std::string_view game_id, const size_t sampler_cache_size = 0);
     void set_replacement_state(bool import_textures, bool export_textures, bool export_as_png);
+    void reset_runtime_cache();
 
     virtual void select(size_t index, const SceGxmTexture &texture) = 0;
     virtual void configure_texture(const SceGxmTexture &texture) = 0;
