@@ -202,6 +202,11 @@ static inline uint64_t current_time() {
         .count();
 }
 
+static uint64_t scaled_video_frame_interval(const EmuEnvState &emuenv, const uint64_t frame_interval_us) {
+    const uint64_t speed_percent = std::max<uint32_t>(emuenv.kernel.speed_percent.load(), 1);
+    return std::max<uint64_t>(1, (frame_interval_us * 100) / speed_percent);
+}
+
 static Ptr<uint8_t> get_buffer(const PlayerPtr &player, MediaType media_type,
     MemState &mem, uint32_t size, bool new_frame = true) {
     uint32_t &buffer_size = media_type == MediaType::VIDEO ? player->video_buffer_size : player->audio_buffer_size;
@@ -394,7 +399,7 @@ EXPORT(bool, sceAvPlayerGetVideoData, SceUID player_handle, SceAvPlayerFrameInfo
 
     DecoderSize size = player_info->player.get_size();
 
-    uint64_t framerate = player_info->player.get_framerate_microseconds();
+    uint64_t framerate = scaled_video_frame_interval(emuenv, player_info->player.get_framerate_microseconds());
 
     // needs new frame
     if (player_info->last_frame_time + framerate < current_time()) {
