@@ -392,9 +392,13 @@ EXPORT(int, sceAppUtilSaveDataSlotDelete, unsigned int slotId, SceAppUtilMountPo
 
 EXPORT(int, sceAppUtilSaveDataSlotGetParam, unsigned int slotId, SceAppUtilSaveDataSlotParam *param, SceAppUtilMountPoint *mountPoint) {
     TRACY_FUNC(sceAppUtilSaveDataSlotGetParam, slotId, param, mountPoint);
+    if (!param)
+        return RET_ERROR(SCE_APPUTIL_ERROR_PARAMETER);
+
     const auto fd = open_file(emuenv.io, construct_slotparam_path(slotId).c_str(), SCE_O_RDONLY, emuenv.pref_path, export_name);
     if (fd < 0)
         return RET_ERROR(SCE_APPUTIL_ERROR_SAVEDATA_SLOT_NOT_FOUND);
+
     read_file(param, emuenv.io, fd, sizeof(SceAppUtilSaveDataSlotParam), export_name);
     close_file(emuenv.io, fd, export_name);
     param->status = 0;

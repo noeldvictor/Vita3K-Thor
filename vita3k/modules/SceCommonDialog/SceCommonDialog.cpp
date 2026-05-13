@@ -31,6 +31,8 @@
 
 #include <SDL3/SDL_timer.h>
 
+#include <cstring>
+
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceCommonDialog);
 
@@ -494,10 +496,20 @@ EXPORT(int, sceNetCheckDialogGetPS3ConnectInfo) {
 
 EXPORT(int, sceNetCheckDialogGetResult, SceNetCheckDialogResult *result) {
     TRACY_FUNC(sceNetCheckDialogGetResult, result);
-    result->result = emuenv.common_dialog.result;
+    if (!result)
+        return RET_ERROR(SCE_COMMON_DIALOG_ERROR_NULL);
+
+    std::memset(result, 0, sizeof(SceNetCheckDialogResult));
+    const bool psn_mode = emuenv.common_dialog.netcheck.mode == SCE_NETCHECK_DIALOG_MODE_PSN
+        || emuenv.common_dialog.netcheck.mode == SCE_NETCHECK_DIALOG_MODE_PSN_ONLINE;
+    result->result = (psn_mode && !emuenv.cfg.current_config.psn_signed_in) ? SCE_NETCHECK_DIALOG_ERROR_SIGN_OUT : emuenv.common_dialog.result;
+    result->psnModeSucceeded = (emuenv.common_dialog.netcheck.mode == SCE_NETCHECK_DIALOG_MODE_PSN
+                                   || emuenv.common_dialog.netcheck.mode == SCE_NETCHECK_DIALOG_MODE_PSN_ONLINE)
+        ? (emuenv.cfg.current_config.psn_signed_in ? SCE_TRUE : SCE_FALSE)
+        : SCE_FALSE;
 
     if (emuenv.common_dialog.netcheck.mode != SCE_NETCHECK_DIALOG_MODE_ADHOC_CONN)
-        STUBBED("result->result = 0");
+        STUBBED("netcheck result synthesized");
 
     return 0;
 }
@@ -528,6 +540,11 @@ EXPORT(int, sceNetCheckDialogInit, const SceNetCheckDialogParam *param) {
         emuenv.netctl.adhocCondVar.notify_all();
         emuenv.netctl.adhocState = SCE_NET_CTL_STATE_CONNECTING;
         emuenv.common_dialog.status = SCE_COMMON_DIALOG_STATUS_RUNNING;
+        break;
+    case SCE_NETCHECK_DIALOG_MODE_PSN:
+    case SCE_NETCHECK_DIALOG_MODE_PSN_ONLINE:
+        emuenv.common_dialog.status = SCE_COMMON_DIALOG_STATUS_FINISHED;
+        emuenv.common_dialog.result = SCE_COMMON_DIALOG_RESULT_OK;
         break;
     default:
         emuenv.common_dialog.status = SCE_COMMON_DIALOG_STATUS_FINISHED;

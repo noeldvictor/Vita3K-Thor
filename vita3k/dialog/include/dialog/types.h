@@ -397,6 +397,8 @@ struct SceNetCheckDialogResult {
     SceUInt8 reserved[124];
 };
 
+#define SCE_NETCHECK_DIALOG_ERROR_SIGN_OUT 0x80100C06
+
 struct SceSaveDataDialogFixedParam {
     SceAppUtilSaveDataSlot targetSlot;
     SceChar8 reserved[32];

@@ -63,6 +63,7 @@ These are the practical differences you should notice first compared with upstre
 - Fast-forward presets: choose Off, 2x, 3x, or 4x from the OSD. Fast-forward avoids high-pitched chipmunk audio by using pitch-preserving tempo filtering when available, or normal-pitch buffer skipping when that filter is missing.
 - Per-game quickstate slot: save/load slot 0 for the current game from the OSD or shortcuts.
 - VitaCheat panel: load `.psv` cheat files from supported cheat folders, show available cheats in the OSD, and toggle individual cheats per game.
+- Offline PSN compatibility: new configs default to Vita3K's local `psn-signed-in` mode and NetCheck PSN dialogs report the signed-in result consistently, avoiding games that show PSN sign-out errors during offline play.
 - Thor testing tools: ADB scripts can capture screenshots, logs, crash info, memory info, frame stats, and renderer trace notes while testing on the real device.
 
 ## Experimental Or Unfinished Features

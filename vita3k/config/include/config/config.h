@@ -214,7 +214,7 @@ inline std::vector<std::string> default_virtual_cartridge_dirs() {
     code(bool, "spirv-shader", false, spirv_shader)                                                     \
     code(bool, "fps-hack", false, fps_hack)                                                             \
     code(uint64_t, "current-ime-lang", 4, current_ime_lang)                                             \
-    code(int, "psn-signed-in", false, psn_signed_in)                                                    \
+    code(int, "psn-signed-in", 1, psn_signed_in)                                                        \
     code(bool, "http-enable", true, http_enable)                                                        \
     code(int, "http-timeout-attempts", 50, http_timeout_attempts)                                       \
     code(int, "http-timeout-sleep-ms", 100, http_timeout_sleep_ms)                                      \
