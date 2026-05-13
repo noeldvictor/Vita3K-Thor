@@ -12,7 +12,7 @@ Use this skill when a debug loop needs repeatable button presses instead of manu
 ## General Rules
 
 - Use scripts, not hand-typed one-off ADB commands, whenever possible.
-- Keep sequences short and observable. Capture a screenshot/log after meaningful automation.
+- Keep sequences short and observable. After meaningful automation, capture a screenshot burst/log for emulator or render state changes; use a single screenshot only for static UI proof.
 - Record useful automation steps in `reports/debug_knowledge.sqlite` with `tools/debug_knowledge.py entry add`.
 - Do not use input automation to bypass ownership, login, DRM, online systems, anti-cheat, or account gates.
 
@@ -39,9 +39,17 @@ Use `tools/windows/send-vita3k-input.ps1`. It focuses the newest window whose ti
 .\tools\windows\send-vita3k-input.ps1 -Sequence down:2,cross
 .\tools\windows\send-vita3k-input.ps1 -Sequence osd
 .\tools\windows\send-vita3k-input.ps1 -Sequence fast_forward
+.\tools\windows\send-vita3k-input.ps1 -Sequence click
 ```
 
 If the user changed Vita3K keyboard bindings, update the script mapping or pass manual keyboard input; do not assume the defaults still apply.
+Use `click` for Vita3K/ImGui modal buttons that do not respond to Vita controls. `click:x,y` clicks window-relative coordinates; `click@x,y` clicks absolute desktop coordinates.
+
+After reaching a render repro on Windows, capture a burst:
+
+```powershell
+.\tools\windows\capture-vita3k-burst.ps1 -Topic <case-slug> -Count 10 -IntervalMs 250
+```
 
 ## Android / AYN Thor
 
@@ -63,6 +71,12 @@ Use `tools/android/send-thor-input.ps1`.
 For Asian/Japanese Vita games, Circle/O is often confirm and Cross/X is cancel. For DOA Venus prompts, try `circle` before `cross`.
 
 For Android quickstate actions, prefer runtime control or OSD automation over fake right-stick axis events until the exact Thor axis codes are captured for the current firmware. `send-thor-input.ps1` intentionally handles buttons only.
+
+After reaching a render repro on Thor, capture a burst:
+
+```powershell
+.\tools\android\capture-thor-burst.ps1 -Adb $adb -Serial c3ca0370 -Topic <case-slug> -Count 10 -IntervalMs 350
+```
 
 ## SQLite Note
 

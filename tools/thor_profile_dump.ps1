@@ -19,7 +19,10 @@ param(
     [switch]$NoKnowledgeEntry,
     [switch]$NoClearLogcat,
     [switch]$NoForceStop,
-    [switch]$NoScreenshot
+    [switch]$NoScreenshot,
+    [int]$ScreenshotBurstCount = 10,
+    [int]$ScreenshotIntervalMs = 350,
+    [string]$DisplayId = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -50,6 +53,21 @@ function Write-AdbOutput($Path, [string[]]$AdbArgs) {
 function Get-AdbText([string[]]$AdbArgs) {
     $output = & $Adb @AdbArgs 2>&1
     return (($output | Out-String).Trim())
+}
+
+function Invoke-AdbNoStop([string[]]$AdbArgs) {
+    $oldErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = & $Adb @AdbArgs 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $oldErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "adb $($AdbArgs -join ' ') failed:`n$($output -join "`n")"
+    }
+    return $output
 }
 
 function Get-FocusSummary($WindowPath, $Package) {
@@ -125,6 +143,7 @@ $topPath = Join-Path $sessionDir "top-threads.txt"
 $propsPath = Join-Path $sessionDir "device-props.txt"
 $saveListPath = Join-Path $sessionDir "savedata-list.txt"
 $screenPath = Join-Path $sessionDir "screen.png"
+$screenBurstDir = Join-Path $sessionDir "screen-burst"
 
 Write-AdbOutput $logPath @("logcat", "-d", "-v", "threadtime", "-t", "$LogcatLines")
 Write-AdbOutput $crashPath @("logcat", "-b", "crash", "-d", "-v", "threadtime", "-t", "400")
@@ -151,10 +170,27 @@ if (-not [string]::IsNullOrWhiteSpace($TitleId)) {
 }
 
 if (-not $NoScreenshot) {
-    $remoteScreenPath = "/sdcard/vita3k-thor-profile-$stamp.png"
-    & $Adb shell screencap -p $remoteScreenPath | Out-Null
-    & $Adb pull $remoteScreenPath $screenPath | Out-Null
-    & $Adb shell rm $remoteScreenPath | Out-Null
+    $ScreenshotBurstCount = [Math]::Max($ScreenshotBurstCount, 1)
+    $ScreenshotIntervalMs = [Math]::Max($ScreenshotIntervalMs, 0)
+    New-Item -ItemType Directory -Force -Path $screenBurstDir | Out-Null
+    $screenFrames = @()
+    for ($i = 1; $i -le $ScreenshotBurstCount; $i++) {
+        $remoteScreenPath = "/sdcard/vita3k-thor-profile-$stamp-$('{0:D4}' -f $i).png"
+        $framePath = Join-Path $screenBurstDir ("frame_{0:D4}.png" -f $i)
+        $screenArgs = @("shell", "screencap")
+        if (-not [string]::IsNullOrWhiteSpace($DisplayId)) {
+            $screenArgs += @("-d", $DisplayId)
+        }
+        $screenArgs += @("-p", $remoteScreenPath)
+        Invoke-AdbNoStop $screenArgs | Out-Null
+        Invoke-AdbNoStop @("pull", $remoteScreenPath, $framePath) | Out-Null
+        Invoke-AdbNoStop @("shell", "rm", $remoteScreenPath) | Out-Null
+        $screenFrames += $framePath
+        if ($i -lt $ScreenshotBurstCount -and $ScreenshotIntervalMs -gt 0) {
+            Start-Sleep -Milliseconds $ScreenshotIntervalMs
+        }
+    }
+    Copy-Item -Force -LiteralPath $screenFrames[-1] -Destination $screenPath
 }
 
 if ($RenderTrace -and -not $KeepRenderTrace) {
@@ -185,6 +221,8 @@ $report += "- Logcat lines: ``$LogcatLines``"
 $report += "- Warmup seconds: ``$Seconds``"
 $report += "- Render trace requested: ``$RenderTrace``"
 $report += "- Render trace left enabled: ``$(if ($RenderTrace -and $KeepRenderTrace) { 'true' } else { 'false' })``"
+$report += "- Screenshot burst count: ``$(if ($NoScreenshot) { 0 } else { $ScreenshotBurstCount })``"
+$report += "- Screenshot burst interval ms: ``$ScreenshotIntervalMs``"
 $report += "- Focus: ``$focusSummary``"
 $report += ""
 $report += "## Profile Summary"
@@ -212,7 +250,8 @@ $report += "- Top threads: ``$topPath``"
 $report += "- Device props: ``$propsPath``"
 $report += "- Save list: ``$saveListPath``"
 if (-not $NoScreenshot) {
-    $report += "- Screenshot: ``$screenPath``"
+    $report += "- Screenshot compatibility copy: ``$screenPath``"
+    $report += "- Screenshot burst: ``$screenBurstDir``"
 }
 $report += ""
 $report += "## Suspicious Render Lines"
@@ -296,6 +335,7 @@ if (-not $NoKnowledgeEntry) {
         )
         if (-not $NoScreenshot) {
             $entryArgs += @("--artifact", $screenPath)
+            $entryArgs += @("--artifact", $screenBurstDir)
         }
         & python @entryArgs | Out-Host
     } catch {

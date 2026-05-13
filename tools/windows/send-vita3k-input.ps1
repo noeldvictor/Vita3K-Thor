@@ -4,6 +4,7 @@ param(
     [string]$WindowTitle = "Vita3K",
     [int]$PressMs = 90,
     [int]$GapMs = 90,
+    [int]$ClickYFromBottom = 125,
     [switch]$NoFocus,
     [switch]$DryRun
 )
@@ -23,11 +24,31 @@ public static class Vita3KInputWin32 {
 
     [DllImport("user32.dll")]
     public static extern void keybd_event(byte bVk, byte bScan, int dwFlags, UIntPtr dwExtraInfo);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetCursorPos(int X, int Y);
+
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, UIntPtr dwExtraInfo);
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct RECT {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
 }
 "@
 
 $KEYEVENTF_KEYUP = 0x0002
+$MOUSEEVENTF_LEFTDOWN = 0x0002
+$MOUSEEVENTF_LEFTUP = 0x0004
 $SW_RESTORE = 9
+$script:TargetWindow = [IntPtr]::Zero
 
 $KeyMap = @{
     "cross" = 0x58; "x" = 0x58; "confirm" = 0x58
@@ -74,6 +95,7 @@ function Focus-Vita3KWindow {
 
     [Vita3KInputWin32]::ShowWindow($proc.MainWindowHandle, $SW_RESTORE) | Out-Null
     [Vita3KInputWin32]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
+    $script:TargetWindow = $proc.MainWindowHandle
     Start-Sleep -Milliseconds 120
 }
 
@@ -128,6 +150,36 @@ function Invoke-Press([string]$Token, [int]$Repeat) {
     }
 }
 
+function Invoke-Click([string]$Token) {
+    if ($script:TargetWindow -eq [IntPtr]::Zero) {
+        Focus-Vita3KWindow
+    }
+
+    $rect = New-Object RECT
+    [Vita3KInputWin32]::GetWindowRect($script:TargetWindow, [ref]$rect) | Out-Null
+    $x = [int](($rect.Left + $rect.Right) / 2)
+    $y = [int]($rect.Bottom - $ClickYFromBottom)
+
+    if ($Token -match "^click@(?<x>-?\d+),(?<y>-?\d+)$") {
+        $x = [int]$Matches["x"]
+        $y = [int]$Matches["y"]
+    } elseif ($Token -match "^click:(?<x>-?\d+),(?<y>-?\d+)$") {
+        $x = $rect.Left + [int]$Matches["x"]
+        $y = $rect.Top + [int]$Matches["y"]
+    }
+
+    if ($DryRun) {
+        Write-Host "click $x,$y"
+        return
+    }
+
+    [Vita3KInputWin32]::SetCursorPos($x, $y) | Out-Null
+    Start-Sleep -Milliseconds 40
+    [Vita3KInputWin32]::mouse_event($MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds $PressMs
+    [Vita3KInputWin32]::mouse_event($MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+}
+
 Focus-Vita3KWindow
 
 foreach ($item in $Sequence) {
@@ -146,7 +198,11 @@ foreach ($item in $Sequence) {
 
     for ($i = 0; $i -lt $repeat; $i++) {
         Write-Host "press $token"
-        Invoke-Press $token $repeat
+        if ((Normalize-Token $token) -eq "click" -or $token -match "^click[@:]") {
+            Invoke-Click $token
+        } else {
+            Invoke-Press $token $repeat
+        }
         Start-Sleep -Milliseconds $GapMs
     }
 }

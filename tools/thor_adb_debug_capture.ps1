@@ -10,6 +10,9 @@ param(
     [string]$Activity = "org.vita3k.emulator.Emulator",
     [string]$Adb = "adb",
     [string]$OutDir = "tmp/thor-adb-debug",
+    [int]$ScreenshotBurstCount = 10,
+    [int]$ScreenshotIntervalMs = 350,
+    [string]$DisplayId = "",
     [switch]$NoClearLogcat,
     [switch]$NoForceStop
 )
@@ -34,6 +37,21 @@ function Slug($Value) {
     return $slug
 }
 
+function Invoke-AdbNoStop([string[]]$AdbArgs) {
+    $oldErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = & $Adb @AdbArgs 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $oldErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "adb $($AdbArgs -join ' ') failed:`n$($output -join "`n")"
+    }
+    return $output
+}
+
 Require-Command $Adb
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
@@ -46,6 +64,7 @@ $crashPath = "$prefix-crashbuffer.txt"
 $windowPath = "$prefix-window.txt"
 $memPath = "$prefix-meminfo.txt"
 $screenPath = "$prefix-screen.png"
+$screenBurstDir = "$prefix-screen-burst"
 $reportPath = "$prefix.md"
 
 $devices = & $Adb devices -l
@@ -84,10 +103,27 @@ Start-Sleep -Seconds $Seconds
 & $Adb logcat -b crash -d -v threadtime | Set-Content -Encoding UTF8 -Path $crashPath
 & $Adb shell dumpsys window | Set-Content -Encoding UTF8 -Path $windowPath
 & $Adb shell dumpsys meminfo $Package | Set-Content -Encoding UTF8 -Path $memPath
-$remoteScreenPath = "/sdcard/vita3k-thor-debug-$stamp.png"
-& $Adb shell screencap -p $remoteScreenPath | Out-Null
-& $Adb pull $remoteScreenPath $screenPath | Out-Null
-& $Adb shell rm $remoteScreenPath | Out-Null
+$ScreenshotBurstCount = [Math]::Max($ScreenshotBurstCount, 1)
+$ScreenshotIntervalMs = [Math]::Max($ScreenshotIntervalMs, 0)
+New-Item -ItemType Directory -Force -Path $screenBurstDir | Out-Null
+$screenFrames = @()
+for ($i = 1; $i -le $ScreenshotBurstCount; $i++) {
+    $remoteScreenPath = "/sdcard/vita3k-thor-debug-$stamp-$('{0:D4}' -f $i).png"
+    $framePath = Join-Path $screenBurstDir ("frame_{0:D4}.png" -f $i)
+    $screenArgs = @("shell", "screencap")
+    if (-not [string]::IsNullOrWhiteSpace($DisplayId)) {
+        $screenArgs += @("-d", $DisplayId)
+    }
+    $screenArgs += @("-p", $remoteScreenPath)
+    Invoke-AdbNoStop $screenArgs | Out-Null
+    Invoke-AdbNoStop @("pull", $remoteScreenPath, $framePath) | Out-Null
+    Invoke-AdbNoStop @("shell", "rm", $remoteScreenPath) | Out-Null
+    $screenFrames += $framePath
+    if ($i -lt $ScreenshotBurstCount -and $ScreenshotIntervalMs -gt 0) {
+        Start-Sleep -Milliseconds $ScreenshotIntervalMs
+    }
+}
+Copy-Item -Force -LiteralPath $screenFrames[-1] -Destination $screenPath
 foreach ($path in @($logPath, $crashPath, $windowPath, $memPath, $screenPath)) {
     if (-not (Test-Path -LiteralPath $path)) {
         New-Item -ItemType File -Path $path | Out-Null
@@ -130,6 +166,8 @@ $report += "- Seconds captured: ``$Seconds``"
 $report += "- Log level: ``$LogLevel``"
 $report += "- Render trace: ``$RenderTrace``"
 $report += "- ADB trace property: ``debug.vita3k.thor_render_trace=$(if ($RenderTrace) { '1' } else { 'unchanged' })``"
+$report += "- Screenshot burst count: ``$ScreenshotBurstCount``"
+$report += "- Screenshot burst interval ms: ``$ScreenshotIntervalMs``"
 $report += ""
 $report += "## Artifacts"
 $report += ""
@@ -137,7 +175,8 @@ $report += "- Logcat: ``$logPath``"
 $report += "- Crash buffer: ``$crashPath``"
 $report += "- Window dump: ``$windowPath``"
 $report += "- Meminfo: ``$memPath``"
-$report += "- Screenshot: ``$screenPath``"
+$report += "- Screenshot compatibility copy: ``$screenPath``"
+$report += "- Screenshot burst: ``$screenBurstDir``"
 $report += ""
 $report += "## Key Lines"
 $report += ""
