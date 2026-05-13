@@ -94,10 +94,29 @@ static std::string normalize_archive_path(const fs::path &path) {
     auto normalized = path.generic_path().string();
     string_utils::replace(normalized, "\\", "/");
 
-    while (!normalized.empty() && normalized.front() == '/')
-        normalized.erase(normalized.begin());
-    while (!normalized.empty() && normalized.back() == '/')
-        normalized.pop_back();
+    std::vector<std::string> segments;
+    size_t start = 0;
+    while (start < normalized.size()) {
+        const auto slash = normalized.find('/', start);
+        const auto end = slash == std::string::npos ? normalized.size() : slash;
+        if (end > start) {
+            const auto segment = normalized.substr(start, end - start);
+            if (segment != ".")
+                segments.push_back(segment);
+        }
+
+        if (slash == std::string::npos)
+            break;
+
+        start = slash + 1;
+    }
+
+    normalized.clear();
+    for (const auto &segment : segments) {
+        if (!normalized.empty())
+            normalized += "/";
+        normalized += segment;
+    }
 
     return normalized;
 }

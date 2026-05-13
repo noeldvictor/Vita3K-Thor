@@ -2691,6 +2691,17 @@ EXPORT(int, sceGxmGetRenderTargetMemSize, const SceGxmRenderTargetParams *params
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 
     *hostMemSize = static_cast<uint32_t>(KiB(64));
+    if (emuenv.renderer && emuenv.renderer->renderer_trace_gxm_state) {
+        LOG_INFO("sceGxmGetRenderTargetMemSize params: flags=0x{:08X}, width={}, height={}, scenesPerFrame={}, multisampleMode={}, multisampleLocations=0x{:08X}, driverMemBlock=0x{:08X}, returned={} bytes",
+            params->flags,
+            params->width,
+            params->height,
+            params->scenesPerFrame,
+            static_cast<uint16_t>(params->multisampleMode),
+            params->multisampleLocations,
+            static_cast<uint32_t>(params->driverMemBlock),
+            *hostMemSize);
+    }
     return STUBBED("64KiB emuenv mem");
 }
 

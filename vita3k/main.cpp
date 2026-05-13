@@ -993,6 +993,9 @@ int main(int argc, char *argv[]) {
     }
     if (cfg.thor_renderer_trace && emuenv.renderer) {
         emuenv.renderer->renderer_trace_gxm_state = true;
+        emuenv.kernel.debugger.log_imports = true;
+        emuenv.kernel.debugger.log_exports = true;
+        emuenv.kernel.debugger.dump_elfs = true;
         LOG_INFO("Thor renderer GXM trace enabled from command line");
     }
 
