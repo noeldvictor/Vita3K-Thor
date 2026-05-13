@@ -562,14 +562,16 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force
     std::array<vk::SubpassDependency, 4> dependencies;
 
     // external dependency
-    // we want the previous render pass to be done when we reach the fragment stage / stencil*depth testing
+    // We want previous render-pass attachment writes to be visible before this
+    // pass either renders to attachments or samples a previously-rendered
+    // surface as a texture.
     dependencies[0] = {
         .srcSubpass = VK_SUBPASS_EXTERNAL,
         .dstSubpass = 0,
         .srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eLateFragmentTests,
-        .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eEarlyFragmentTests,
+        .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eEarlyFragmentTests | vk::PipelineStageFlagBits::eFragmentShader,
         .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eDepthStencilAttachmentWrite,
-        .dstAccessMask = vk::AccessFlagBits::eColorAttachmentRead | vk::AccessFlagBits::eDepthStencilAttachmentRead
+        .dstAccessMask = vk::AccessFlagBits::eColorAttachmentRead | vk::AccessFlagBits::eDepthStencilAttachmentRead | vk::AccessFlagBits::eShaderRead
     };
 
     if (state.features.support_shader_interlock && no_color) {
