@@ -343,19 +343,35 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
     bool overlap = true;
     // Of course, this works under the assumption that range must be unique :D
     auto ite = color_address_lookup.upper_bound(address);
+    const auto next_ite = ite;
+    bool has_prev_surface = false;
     if (ite == color_address_lookup.begin())
         // no match
         overlap = false;
-    else
+    else {
         --ite;
+        has_prev_surface = true;
+    }
     // ite is now the first item with an address lower or equal to key
 
-    overlap = (overlap && (ite->first + ite->second->total_bytes) > address);
+    overlap = (overlap && has_prev_surface && (ite->first + ite->second->total_bytes) > address);
 
     if (!overlap) {
         if (trace_surface_texture) {
-            LOG_INFO("ThorRenderTrace surface texture miss scene={} reason=no-overlap tex_addr=0x{:08X} tex={}x{} fmt=0x{:08X} type=0x{:08X}",
+            if (has_prev_surface) {
+                const ColorSurfaceCacheInfo &prev_info = *ite->second;
+                LOG_INFO("ThorRenderTrace surface texture miss scene={} reason=no-overlap tex_addr=0x{:08X} tex={}x{} fmt=0x{:08X} type=0x{:08X} prev_surface=0x{:08X}-0x{:08X} prev={}x{} stride={} total={} prev_fmt=0x{:08X}",
+                    scene_timestamp, address, original_width, original_height, static_cast<uint32_t>(gxm::get_format(texture)), static_cast<uint32_t>(texture.texture_type()),
+                    ite->first, ite->first + prev_info.total_bytes, prev_info.original_width, prev_info.original_height, prev_info.stride_bytes, prev_info.total_bytes, static_cast<uint32_t>(prev_info.format));
+            } else if (next_ite != color_address_lookup.end()) {
+                const ColorSurfaceCacheInfo &next_info = *next_ite->second;
+                LOG_INFO("ThorRenderTrace surface texture miss scene={} reason=no-overlap tex_addr=0x{:08X} tex={}x{} fmt=0x{:08X} type=0x{:08X} next_surface=0x{:08X}-0x{:08X} next={}x{} stride={} total={} next_fmt=0x{:08X}",
+                    scene_timestamp, address, original_width, original_height, static_cast<uint32_t>(gxm::get_format(texture)), static_cast<uint32_t>(texture.texture_type()),
+                    next_ite->first, next_ite->first + next_info.total_bytes, next_info.original_width, next_info.original_height, next_info.stride_bytes, next_info.total_bytes, static_cast<uint32_t>(next_info.format));
+            } else {
+                LOG_INFO("ThorRenderTrace surface texture miss scene={} reason=no-overlap tex_addr=0x{:08X} tex={}x{} fmt=0x{:08X} type=0x{:08X}",
                 scene_timestamp, address, original_width, original_height, static_cast<uint32_t>(gxm::get_format(texture)), static_cast<uint32_t>(texture.texture_type()));
+            }
         }
         return std::nullopt;
     }
