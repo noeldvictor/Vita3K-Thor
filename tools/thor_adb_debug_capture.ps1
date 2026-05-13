@@ -40,7 +40,7 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $topicSlug = Slug $Topic
-$prefix = Join-Path $OutDir "$($topicSlug)_$stamp"
+$prefix = Join-Path $OutDir "$($stamp)_$topicSlug"
 $logPath = "$prefix-logcat.txt"
 $crashPath = "$prefix-crashbuffer.txt"
 $windowPath = "$prefix-window.txt"

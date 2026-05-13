@@ -74,7 +74,7 @@ if ($connected.Count -eq 0) {
 
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $topicSlug = Slug "save-$TitleId"
-$sessionDir = Join-Path $OutDir "$($topicSlug)_$stamp"
+$sessionDir = Join-Path $OutDir "$($stamp)_$topicSlug"
 New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ReportDir | Out-Null
 
@@ -130,7 +130,7 @@ if (-not [string]::IsNullOrWhiteSpace($InstallPath)) {
 }
 
 if (-not $NoReport) {
-    $reportPath = Join-Path $ReportDir "$($topicSlug)_$stamp.md"
+    $reportPath = Join-Path $ReportDir "$($stamp)_$topicSlug.md"
     $report = @()
     $report += "# Save Sync $TitleId - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
     $report += ""

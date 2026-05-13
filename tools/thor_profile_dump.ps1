@@ -69,7 +69,7 @@ if ($connected.Count -eq 0) {
 
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $topicSlug = Slug $Topic
-$sessionDir = Join-Path $OutDir "$($topicSlug)_$stamp"
+$sessionDir = Join-Path $OutDir "$($stamp)_$topicSlug"
 New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ReportDir | Out-Null
 
@@ -164,7 +164,7 @@ $weirdMacroblockLines = @($sceneLines | Where-Object { $_.Line -match "macrobloc
 $largeDrawLines = @(Select-String -Path $logPath -Pattern "ThorRenderTrace draw" | Where-Object { $_.Line -match "count=([2-9][0-9]{3,}|[1-9][0-9]{4,})" })
 $errorLines = @(Select-String -Path $logPath -Pattern @("ERROR", "CRITICAL", "FATAL EXCEPTION", "AndroidRuntime", "SIGSEGV", "SIGABRT", "Killed", "lowmemorykiller") | Select-Object -Last 80)
 
-$reportPath = Join-Path $ReportDir "$($topicSlug)_$stamp.md"
+$reportPath = Join-Path $ReportDir "$($stamp)_$topicSlug.md"
 $report = @()
 $report += "# $Topic - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 $report += ""
