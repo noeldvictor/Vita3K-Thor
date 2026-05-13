@@ -9,6 +9,7 @@ These notes are for work in Vita3K Thor Experiment, a personal Android-focused V
 - Performance work should be measured with logs, screenshots, profiles, frame pacing data, or before/after reports. Do not assume a change is faster or smoother without evidence.
 - Debug tooling is part of the product direction. Keep improving the Windows and ADB loops so the user can play while Codex quickly captures evidence, isolates issues, patches, rebuilds, and verifies.
 - End-user polish matters: features should be discoverable, controller-first, readable on handheld screens, and explained in plain README language separate from technical implementation notes.
+- Stable, fast debugging is a primary project goal. Build and use durable knowledge tooling before chasing renderer/game issues in circles.
 
 ## Source Control
 
@@ -18,7 +19,23 @@ These notes are for work in Vita3K Thor Experiment, a personal Android-focused V
 - Do not push to upstream Vita3K from this checkout.
 - Commit and push often. Prefer small pushed checkpoints after a buildable code change, a useful report, an Android/Thor install, a debug-tool improvement, or a confirmed investigation result instead of letting local work pile up.
 - Keep Thor-specific changes easy to identify so broadly useful fixes can be proposed upstream separately.
-- Do not commit APK outputs, build folders, downloaded driver ZIPs, extracted drivers, caches, SDKs, firmware, license files, or game content.
+- Do not commit APK outputs, build folders, downloaded driver ZIPs, extracted drivers, caches, SDKs, firmware, license files, saves, shader caches, ELF dumps, screenshots/log dumps, or game content unless the user explicitly requests a narrow proof asset.
+
+## Debug Knowledge Base
+
+- `reports/debug_knowledge.sqlite` is the canonical report and RAG store for emulator/game debugging. Markdown reports are legacy context or human exports only; do not create new durable Markdown reports by default.
+- Use the committed skill `.agents/skills/vita3k-debug-rag/SKILL.md` for emulator/game issue work. It encodes the expected SQLite-first, Windows-first, Android-final workflow.
+- Use `tools/debug_knowledge.py` before code edits on any recurring bug:
+
+```powershell
+python tools/debug_knowledge.py search "doa venus black terrain android 564cd0" --recent-days 30
+python tools/debug_knowledge.py search "doa venus black terrain android 564cd0" --long-term
+```
+
+- Split reports inside SQLite by `domain`: use `domain=game` with a Vita title ID for game-specific behavior, and `domain=emulator` for renderer/core/tooling architecture that spans games.
+- Record observations, decisions, fixes, tests, regression risks, and commit hashes in SQLite. Keep raw screenshots, burst captures, logcat dumps, profile dumps, save experiments, and shader dumps under ignored `tmp/` unless explicitly promoted.
+- Local issue ROMs live under ignored `roms/issues/<TITLEID>/`; regression ROMs live under ignored `roms/regression/<TITLEID>/`. Use `tools/sync_issue_rom.ps1` to copy or pull games there as needed. Never commit `roms/`.
+- Current first active case is DOA Venus (`PCSH00250`) renderer corruption. Pause renderer chasing until the SQLite/debug harness is available and the case has a current observation in the DB.
 
 ## Safety Scope
 
@@ -79,6 +96,15 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - If local Android SDK, NDK, Java, vcpkg, or signing setup is missing, do not claim an APK was built.
 - For C++ changes, run the lightest practical checks first, such as `git diff --check` and a targeted configure/build when the local toolchain is available.
 
+## Fast Debug Loop Strategy
+
+- Default to the fastest loop that can prove the hypothesis: live renderer controls first, Windows incremental build second, Android APK/native validation third.
+- Shader caches, game content, issue saves, screenshots, and profile dumps are not part of the APK and should stay in ignored local storage. Clearing or regenerating a shader cache is faster than rebuilding and reinstalling when the shader translator code did not change.
+- Renderer/shader-translator C++ changes currently require at least a process restart and native rebuild. Do not pretend a running Android process can hot-swap already-loaded C++ renderer code unless a debug-only dynamic override loader has been implemented and verified.
+- Investigate a debug-only Android native-library fast path for renderer work: build the changed native library, push it to app-local storage, and have debug startup load the override before normal emulator init. Keep it disabled for release builds, require an app restart, and verify it cannot load untrusted external paths.
+- Built-in/screen shader text or SPIR-V assets may be candidates for app-local override loading so shader experiments can be pushed without a full APK. Treat this as tooling work with explicit validation on Windows and Thor before relying on it.
+- Do not use Android as the primary loop for emulator-core bugs unless the bug is Adreno/Turnip, SurfaceFlinger, Android input, APK packaging, or device-performance specific.
+
 ## Playing Without Install
 
 - Vita3K Thor's preferred game flow is ZIP/cartridge mode, not install mode: use `--cartridge <path-to-vpk-or-zip>` to mount game content as a read-only virtual game card for the session instead of adding it to the installed app library.
@@ -127,7 +153,7 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - OSD first-level actions currently include Resume, Pause/Resume, Settings, Save State slot 0, Load State slot 0, Screenshot, Renderer Trace, Off/2x/3x/4x fast-forward presets, and disabled placeholders for Reset Game and Close Game.
 - Keep the OSD readable over bright or glitchy game frames: dim the game behind it, use an opaque high-contrast panel, and size text/buttons for handheld viewing rather than desktop mouse precision.
 - Renderer Trace is a runtime diagnostic switch. When enabled it emits `ThorRenderTrace` logcat lines for Vulkan scene setup, the first 32 draws per scene, and texture configure/upload events. Include render target, color/depth surface addresses, formats, depth/stencil state, shader hashes, texture counts, texture address/format/type/stride/upload bytes, mapping mode, surface sync state, and driver flags.
-- For ADB-only render/crash investigations, launch with `--thor-render-trace` to enable the same renderer trace at startup, or use `tools/thor_adb_debug_capture.ps1 -GamePath <zip> -RenderTrace` to clear logcat, launch, capture screenshot/logcat/crash-buffer/window/meminfo artifacts, and write a timestamped Markdown report under `reports/`.
+- For ADB-only render/crash investigations, launch with `--thor-render-trace` to enable the same renderer trace at startup, or use `tools/thor_adb_debug_capture.ps1 -GamePath <zip> -RenderTrace` to clear logcat, launch, and capture screenshot/logcat/crash-buffer/window/meminfo artifacts under ignored `tmp/`. Summarize durable findings into `reports/debug_knowledge.sqlite`.
 - The Cheats panel lists detected cheats for the current title, shows enabled/disabled state, allows toggling individual cheats, shows unsupported-code counts, and provides a reload-cheat-file action.
 - The status area shows title ID, current speed percentage, selected custom driver on Android, quickstate slot status, and whether a matching cheat file was loaded.
 - Keep the OSD usable with controller only: D-pad/left stick navigates, Cross/A confirms, Circle/B cancels, Back/Select closes. It should also work with touch/mouse when available. ImGui navigation must remain enabled, and the SDL backend must use real SDL3 gamepad instance IDs/player index instead of assuming gamepad index `0`.
@@ -139,12 +165,12 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - AYN Thor can report separate focus lines per display; Vita3K may be running on the second screen while the launcher remains focused on another display. Prefer the focus line and screenshot that include `org.vita3k.emulator.debug` before declaring a capture wrong.
 - The default fix loop for serious renderer/game failures is Windows first, Android second. First reproduce the game or scene on Windows with the same ZIP/cartridge path, save data, shader logs, and Vulkan trace controls; fix emulator-core, shader translator, CPU, module, or VFS issues there because rebuild/restart cycles are faster and Ghidra/static analysis is practical. Only after the Windows/core behavior is understood should Android/Thor-specific issues be chased, such as Adreno/Turnip behavior, SurfaceFlinger presentation, SurfaceView alpha/composition, Android input routing, and APK asset packaging.
 - Treat black screens as a classification problem before editing code. A black screenshot with active shaders and `PC: 0x00000000`/invalid memory reads points toward a guest CPU/module/import/null-function-pointer problem; a valid Windows frame that is black only on Android points toward presentation, driver, or swapchain/composition logic like the UPPERS present-alpha issue.
-- A repeatable AI-assisted fix cycle should produce artifacts at every step: Thor screenshot/log/profile dump, Windows repro notes, Ghidra/API-call-site notes when needed, a minimal emulator patch, Windows proof screenshot/log, Android APK install proof, Thor screenshot/log proof, and a timestamp-first report. Do not skip the proof step just because a hypothesis feels likely.
-- For renderer bugs that are not obviously Adreno/Turnip-only, use the Windows desktop loop before rebuilding Android: build `cmake --preset windows-vs2022` and `cmake --build build/windows-vs2022 --config RelWithDebInfo --target vita3k --parallel`, pull the target ZIP to ignored `tmp/local-games/`, mirror only needed Thor firmware/user/save data into the local Windows Vita3K profile, then launch `build/windows-vs2022/bin/RelWithDebInfo/Vita3K.exe --config-location tmp/vita3k-win-debug/config.yml --cartridge --thor-render-trace --backend-renderer Vulkan <zip>`. This can reproduce cartridge/VFS and many renderer traces in seconds; still verify final fixes on AYN Thor because NVIDIA Vulkan and Adreno/Turnip may diverge.
+- A repeatable AI-assisted fix cycle should produce artifacts at every step: Thor screenshot/log/profile dump, Windows repro notes, Ghidra/API-call-site notes when needed, a minimal emulator patch, Windows proof screenshot/log, Android APK install proof, Thor screenshot/log proof, and SQLite entries for observation, decision, fix, and regression risk. Do not skip the proof step just because a hypothesis feels likely.
+- For renderer bugs that are not obviously Adreno/Turnip-only, use the Windows desktop loop before rebuilding Android: build `cmake --preset windows-vs2022` and `cmake --build build/windows-vs2022 --config RelWithDebInfo --target vita3k --parallel`, stage the target ZIP under ignored `roms/issues/<TITLEID>/`, mirror only needed Thor firmware/user/save data into the local Windows Vita3K profile, then launch with `tools/windows/start-game-render-debug.ps1 -TitleId <TITLEID> -CaseSlug <case-slug>`. This can reproduce cartridge/VFS and many renderer traces in seconds; still verify final fixes on AYN Thor because NVIDIA Vulkan and Adreno/Turnip may diverge.
 - `--thor-render-trace` also enables debugger import/export logging and loaded ELF dumps for Windows-first diagnosis. Use the generated `elfdumps/` files only as ignored local evidence for Ghidra/API-call-site work; never commit dumped commercial game binaries or decrypted content.
 - Windows desktop renderer testing uses a real controller connected to Windows, not the Thor controls over USB/ADB. Prefer an Xbox Wireless/XInput controller paired to Windows; confirm it appears in Windows before blaming Vita3K input. Quick checks: `Get-PnpDevice -PresentOnly | ? FriendlyName -match 'Xbox|XInput|Controller|Gamepad'`, Windows Bluetooth/game controller settings, and Vita3K/SDL logs for `gamepad`/`controller` lines. If the pad is paired after Vita3K is already running, restart Vita3K or verify SDL hotplug sees it.
-- For Vita3K graphics bugs, capture a timestamped report with screenshot, title ID, renderer, selected custom driver, resolution multiplier, texture/surface settings, logcat tail, and whether the issue is in the launcher/OSD or in-game Vita rendering.
-- For flicker, intermittent corruption, menus with moving backgrounds, or "check now" render investigations, do not rely on a single screencap. Capture a burst of at least 8-12 screenshots over a few seconds, then compare the sequence for frame-to-frame changes before deciding what broke. Keep burst PNGs under `tmp/` and summarize the useful frames in the report.
+- For Vita3K graphics bugs, record a SQLite observation with screenshot path, title ID, renderer, selected custom driver, resolution multiplier, texture/surface settings, logcat tail path, and whether the issue is in the launcher/OSD or in-game Vita rendering.
+- For flicker, intermittent corruption, menus with moving backgrounds, or "check now" render investigations, do not rely on a single screencap. Capture a burst of at least 8-12 screenshots over a few seconds, then compare the sequence for frame-to-frame changes before deciding what broke. Keep burst PNGs under `tmp/` and summarize the useful frames in SQLite.
 - Serious renderer debugging should be pause-first whenever the scene allows it. Once the user reaches a broken scene, pause guest execution through OSD/runtime control, capture screenshot/log/render state while the frame is stable, then test one diagnostic variable at a time before resuming. Avoid restart-heavy loops unless the code path only initializes at boot.
 - Treat emulator pause as a debugging primitive, not only a user feature. Paused evaluation should support screenshot capture, logcat pull, render trace toggles, draw skip/stop-after changes for the next frame, surface/texture cache summaries, save-state attempts, and Ghidra/API-call-site note taking without forcing the user to replay long intros.
 - If pausing changes or hides the bug, record that explicitly. Some glitches are timing, presentation, movie, or synchronization dependent; in those cases use burst capture plus a quick pause/resume check rather than assuming a still frame tells the whole story.
@@ -155,7 +181,7 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - For suspected texture upload/render corruption, use `--thor-render-trace` and look for `ThorRenderTrace texture configure` and `ThorRenderTrace texture upload` lines near the bad frame. Compare texture address, format, type, stride, upload bytes, hash, and staging-buffer use before editing renderer cache logic.
 - For render-to-texture corruption where the surface cache correctly hits a prior color surface but later sampling flickers or shows stale/partial contents, inspect Vulkan render-pass dependencies and image visibility before changing texture lookup policy. Attachment writes that are sampled by a later fragment shader need a dependency that reaches `eFragmentShader`/`eShaderRead`, especially on Adreno/Turnip.
 - For Adreno/Turnip corruption on Vita `U2F10F10F10` render targets, check whether the sampled source was rendered as an MSAA-downscaled color surface. Direct or texture-viewport sampling can show black, split, or partially stale output on Thor; prefer a copied sampled image for that narrow surface class before broader shader, depth, or game-specific hacks.
-- Keep a living research trail for Vita CPU/GPU behavior when bugs point beyond obvious renderer code: GXM draw semantics, PowerVR SGX tiling/deferred rendering behavior, shader patcher/GXP translation, CPU/GPU sync, memory mapping, vertex/index stream lifetimes, and texture/surface formats should be documented in timestamped reports before risky renderer rewrites.
+- Keep a living research trail for Vita CPU/GPU behavior when bugs point beyond obvious renderer code: GXM draw semantics, PowerVR SGX tiling/deferred rendering behavior, shader patcher/GXP translation, CPU/GPU sync, memory mapping, vertex/index stream lifetimes, and texture/surface formats should be documented in SQLite before risky renderer rewrites.
 - Android profiling should start with non-invasive captures: logcat, `dumpsys SurfaceFlinger`, `dumpsys gfxinfo`, Perfetto/simpleperf when available, and renderer timing counters. Do not clear app data or remove game content just to profile.
 - Ghidra is appropriate for legally dumped personal Vita executables/modules when emulator behavior needs to be compared against a game's imported Vita APIs. Use Vita-aware loaders/NID databases, keep findings as notes, and do not commit commercial game binaries or decrypted content.
 - Local Ghidra is at `C:\Users\leanerdesigner\Documents\SteamPortableTools\toolchains\ghidra_12.0.4_PUBLIC`; headless is `support\analyzeHeadless.bat`. VitaLoaderRedux 1.09 is installed locally under `Ghidra\Extensions\VitaLoaderRedux` for Vita ELF/PRX work.
@@ -171,7 +197,7 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 ## ADB Thor Testing
 
 - For game-specific Thor repros, bypass the Android game list/launcher and start Vita3K directly in cartridge mode. In PowerShell, do not paste Bash-style one-liners or hand-write comma-separated string-array extras; game filenames often contain spaces, brackets, parentheses, and commas.
-- Prefer the checked-in PowerShell helpers for launch/capture, for example `.\tools\thor_profile_dump.ps1 -Topic doa-venus-title -TitleId PCSH00250 -GamePath $game -RenderTrace -Adb $adb`. The helpers should own ADB quoting and write timestamp-first reports.
+- Prefer the checked-in PowerShell helpers for launch/capture, for example `.\tools\thor_profile_dump.ps1 -Topic doa-venus-title -TitleId PCSH00250 -GamePath $game -RenderTrace -Adb $adb`. The helpers should own ADB quoting; durable conclusions belong in `reports/debug_knowledge.sqlite`.
 - For raw PowerShell commands, invoke executable paths stored in variables with the call operator, for example `& $adb ...`; do not type `$adb ...` as though it were Bash. PowerShell line continuation is a backtick, not `\`, but prefer variables/arrays over fragile multi-line continuations.
 - If a raw direct-launch command is needed, build the Vita3K argument list as a PowerShell array, encode it as JSON, base64 the JSON, and pass it through `--es AppStartParametersJsonBase64`. Do not create renamed no-comma duplicate ZIPs just to satisfy ADB quoting:
 
@@ -188,14 +214,14 @@ $argJsonBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($argJs
 - For Japanese/Asian Vita games, remember the Vita region convention: Circle/O can be confirm and Cross/X can be cancel. On Android `adb shell input keyevent 97` sends Circle/B, while `96` sends Cross/A. Use Circle/O for prompts like DOA Venus autosave notices when Cross does nothing.
 - Virtual cartridge scanning de-duplicates by Vita title ID. If a scanned ZIP and an installed `ux0/app/<TITLEID>` entry both exist, prefer the ZIP/cartridge card in the frontend so users do not see duplicate games or accidentally run the installed copy.
 - When an APK is built and an AYN Thor is connected, push/install it to the Thor with ADB for real-device testing.
-- After every Android-affecting commit/push with a successful APK build, also install the latest APK to the connected Android/AYN Thor with `adb install -r` unless no device is connected or the build failed. Record the result in `reports/`.
+- After every Android-affecting commit/push with a successful APK build, also install the latest APK to the connected Android/AYN Thor with `adb install -r` unless no device is connected or the build failed. Record the result in SQLite.
 - Start with `adb devices` and verify the connected device is the user's AYN Thor before installing.
 - Prefer non-destructive installs such as `adb install -r path\to\apk`. Do not uninstall the existing app or clear Vita3K data unless the user explicitly accepts data loss.
 - For debug/reldebug APKs, expect the `.debug` package slot unless the build config says otherwise.
 - After installing, launch through ADB or the device UI, then capture proof with screenshots, `logcat`, selected driver, renderer settings, and any game/title ID tested.
-- Save durable Markdown test notes and report artifacts as `reports/YYYYMMDD_HHMMSS_semantic-topic.md`; use short lowercase kebab-case topics, keep the timestamp first so reports sort chronologically, and keep bulky raw logs/screenshots out of git unless the user asks to commit them.
+- Save durable test notes and proof summaries in `reports/debug_knowledge.sqlite`; keep bulky raw logs/screenshots under ignored `tmp/` unless the user asks to commit them.
 - Prefer `tools/thor_adb_debug_capture.ps1` for repeatable crash/render captures. It should be the first tool for suspected renderer hangs, Android kills, or game-specific startup crashes because it captures normal logcat, crash buffer, current window focus, meminfo, and a screenshot together.
-- Use `tools/thor_live_debug_stream.ps1` when the user is actively playing and Codex needs a stream of evidence. It writes rolling samples under `tmp/thor-live/<timestamp>_<topic>/`, keeps `latest.txt` and `latest-screen.png` fresh, and writes a timestamp-first Markdown report in `reports/`. This is the preferred "play while Codex watches logs/screenshots" workflow.
+- Use `tools/thor_live_debug_stream.ps1` when the user is actively playing and Codex needs a stream of evidence. It writes rolling samples under `tmp/thor-live/<timestamp>_<topic>/` and keeps `latest.txt` and `latest-screen.png` fresh. This is the preferred "play while Codex watches logs/screenshots" workflow; summarize durable findings in SQLite.
 - Use `tools/thor_profile_dump.ps1 -Topic <semantic-topic> [-RenderTrace] [-TitleId <TITLEID>]` for a one-shot profile bundle from a running repro. It captures screenshot, logcat, crash buffer, window focus, gfxinfo/frame stats, meminfo, cpuinfo, thermal state, SurfaceFlinger, top threads, device props, and a renderer-trace summary.
 - When checking a live render issue from ADB, take a burst snapshot set before and after any live property change. A good default is 10 screenshots at 250-500 ms spacing, plus logcat/window focus, so flicker, alternating surfaces, bad clears, and transient composite failures are visible instead of hidden by one lucky frame.
 - On Windows PowerShell, avoid `adb exec-out screencap -p > file.png` for proof captures because binary redirection can produce invalid PNG files. Use device-side `screencap -p /sdcard/...png`, then `adb pull`, then remove the temporary device file.
@@ -210,6 +236,7 @@ $argJsonBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($argJs
 - Record device model, Android version, Vita3K commit, APK/build type, renderer, selected driver, title ID, game version/update, settings, screenshots, and logs.
 - A "works" claim should include proof for boot, rendering, input, audio, save/load, suspend/resume, and exit when those areas matter.
 - Do not send Thor-experiment regressions to upstream Vita3K unless the issue is reproduced cleanly on upstream too.
-- Write repo work reports as timestamp-first Markdown files under `reports/`, using names like `20260510_172815_fast-forward-guest-clock-follow-up.md`.
-- Avoid bare timestamp-only Markdown report names; every report should have a semantic slug after the timestamp.
-- Reports should briefly state what changed, why, verification performed, and any remaining blockers.
+- Write durable reports to `reports/debug_knowledge.sqlite` with `tools/debug_knowledge.py entry add`.
+- Use `domain=game` plus `title_id` for game-specific results; use `domain=emulator` for broad emulator/tooling results.
+- Entries should briefly state what changed, why, verification performed, regression risk, and any remaining blockers.
+- Markdown reports are allowed only as explicit human-readable exports or legacy references; they are not the source of truth.

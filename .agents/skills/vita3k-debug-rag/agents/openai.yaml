@@ -1,0 +1,6 @@
+interface:
+  display_name: "Vita3K Debug RAG"
+  short_description: "SQLite-first emulator bug workflow"
+  default_prompt: "Use $vita3k-debug-rag to investigate a Vita3K Thor renderer, game, Android, or Windows regression with the SQLite knowledge base."
+policy:
+  allow_implicit_invocation: true
