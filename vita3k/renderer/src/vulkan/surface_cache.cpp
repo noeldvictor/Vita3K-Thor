@@ -337,6 +337,8 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
 
     const uint32_t width = static_cast<uint32_t>(original_width * state.res_multiplier);
     const uint32_t height = static_cast<uint32_t>(original_height * state.res_multiplier);
+    const bool trace_surface_texture = state.renderer_trace_gxm_state && original_width >= 256 && original_height >= 128;
+    const auto scene_timestamp = reinterpret_cast<VKContext *>(state.context)->scene_timestamp;
 
     bool overlap = true;
     // Of course, this works under the assumption that range must be unique :D
@@ -350,12 +352,25 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
 
     overlap = (overlap && (ite->first + ite->second->total_bytes) > address);
 
-    if (!overlap)
+    if (!overlap) {
+        if (trace_surface_texture) {
+            LOG_INFO("ThorRenderTrace surface texture miss scene={} reason=no-overlap tex_addr=0x{:08X} tex={}x{} fmt=0x{:08X} type=0x{:08X}",
+                scene_timestamp, address, original_width, original_height, static_cast<uint32_t>(gxm::get_format(texture)), static_cast<uint32_t>(texture.texture_type()));
+        }
         return std::nullopt;
+    }
 
-    if (*ite->second->dirty)
+    if (*ite->second->dirty) {
         // Guest wrote to the surface backing memory since it was rendered, so GPU data is stale.
+        if (trace_surface_texture) {
+            const ColorSurfaceCacheInfo &dirty_info = *ite->second;
+            LOG_INFO("ThorRenderTrace surface texture miss scene={} reason=dirty tex_addr=0x{:08X} tex={}x{} surface_addr=0x{:08X} surface={}x{} stride={} total={} fmt=0x{:08X} need_sync={}",
+                scene_timestamp, address, original_width, original_height, ite->first, dirty_info.original_width, dirty_info.original_height,
+                dirty_info.stride_bytes, dirty_info.total_bytes, static_cast<uint32_t>(dirty_info.format),
+                dirty_info.need_surface_sync ? *dirty_info.need_surface_sync : false);
+        }
         return std::nullopt;
+    }
 
     const vk::ComponentMapping swizzle = texture::translate_swizzle(gxm::get_format(texture));
     vk::Format vk_format = color::translate_format(base_format);
@@ -400,28 +415,48 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
     ColorSurfaceCacheInfo &info = *ite->second;
 
     if ((base_format == SCE_GXM_COLOR_BASE_FORMAT_U8U8U8 || info.format == SCE_GXM_COLOR_BASE_FORMAT_U8U8U8)
-        && base_format != info.format)
+        && base_format != info.format) {
         // don't even try to match u8u8u8 with something else
+        if (trace_surface_texture) {
+            LOG_INFO("ThorRenderTrace surface texture miss scene={} reason=u8-format tex_addr=0x{:08X} tex={}x{} surface_addr=0x{:08X} requested_fmt=0x{:08X} surface_fmt=0x{:08X}",
+                scene_timestamp, address, original_width, original_height, ite->first, static_cast<uint32_t>(base_format), static_cast<uint32_t>(info.format));
+        }
         return std::nullopt;
+    }
 
-    if (tiling != info.tiling || info.stride_bytes != stride_bytes)
+    if (tiling != info.tiling || info.stride_bytes != stride_bytes) {
         // if the tiling is different, also don't try to match them
         // about the strides, I've yet to see a case where the byte stride is different
+        if (trace_surface_texture) {
+            LOG_INFO("ThorRenderTrace surface texture miss scene={} reason=layout tex_addr=0x{:08X} tex={}x{} surface_addr=0x{:08X} stride={}/{} tiling={}/{}",
+                scene_timestamp, address, original_width, original_height, ite->first, stride_bytes, info.stride_bytes, static_cast<int>(tiling), static_cast<int>(info.tiling));
+        }
         return std::nullopt;
+    }
 
     // Check if we can use this surface
     bool addr_in_range_of_cache = ((address + total_surface_size) <= (ite->first + info.total_bytes + 4));
 
-    if (ite->first != address && !addr_in_range_of_cache)
+    if (ite->first != address && !addr_in_range_of_cache) {
         // persona 4 sample from the top of a texture while the bottom wasn't rendered to, the fact that both the surface and
         // the texture start at the same location should be enough
+        if (trace_surface_texture) {
+            LOG_INFO("ThorRenderTrace surface texture miss scene={} reason=range tex_addr=0x{:08X} tex={}x{} total={} surface_addr=0x{:08X} surface_total={}",
+                scene_timestamp, address, original_width, original_height, total_surface_size, ite->first, info.total_bytes);
+        }
         return std::nullopt;
+    }
 
     uint32_t bytes_per_pixel_requested = gxm::bits_per_pixel(base_format) / 8;
     uint32_t bytes_per_pixel_in_store = gxm::bits_per_pixel(info.format) / 8;
 
-    if (std::max(bytes_per_pixel_requested, bytes_per_pixel_in_store) % std::min(bytes_per_pixel_requested, bytes_per_pixel_in_store) != 0)
+    if (std::max(bytes_per_pixel_requested, bytes_per_pixel_in_store) % std::min(bytes_per_pixel_requested, bytes_per_pixel_in_store) != 0) {
+        if (trace_surface_texture) {
+            LOG_INFO("ThorRenderTrace surface texture miss scene={} reason=bpp tex_addr=0x{:08X} tex={}x{} surface_addr=0x{:08X} requested_bpp={} surface_bpp={}",
+                scene_timestamp, address, original_width, original_height, ite->first, bytes_per_pixel_requested, bytes_per_pixel_in_store);
+        }
         return std::nullopt;
+    }
 
     // TODO: this is true only for linear textures (and also kind of for tiled textures) (and in this case start_x = 0),
     // for swizzled textures this is different
@@ -448,12 +483,17 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         };
 
         // if everything matches
-        if (vk_format == info.texture.format && swizzle == info.swizzle)
+        if (vk_format == info.texture.format && swizzle == info.swizzle) {
+            if (trace_surface_texture) {
+                LOG_INFO("ThorRenderTrace surface texture hit scene={} mode=viewport-direct tex_addr=0x{:08X} tex={}x{} surface_addr=0x{:08X} surface={}x{} fmt=0x{:08X}",
+                    scene_timestamp, address, original_width, original_height, ite->first, info.original_width, info.original_height, static_cast<uint32_t>(info.format));
+            }
             return TextureLookupResult{
                 info.texture.view,
                 info.texture.layout,
                 info.texture.format
             };
+        }
 
         // use the other view with the correct swizzle / gamma correction
         if (!info.alternate_view) {
@@ -469,6 +509,10 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
             info.alternate_view = state.device.createImageView(view_info);
         }
 
+        if (trace_surface_texture) {
+            LOG_INFO("ThorRenderTrace surface texture hit scene={} mode=viewport-alt tex_addr=0x{:08X} tex={}x{} surface_addr=0x{:08X} surface={}x{} requested_fmt=0x{:08X} surface_fmt=0x{:08X}",
+                scene_timestamp, address, original_width, original_height, ite->first, info.original_width, info.original_height, static_cast<uint32_t>(base_format), static_cast<uint32_t>(info.format));
+        }
         return TextureLookupResult{
             info.alternate_view,
             info.texture.layout,
@@ -490,6 +534,10 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
 
                 if (casted->scene_timestamp == scene_timestamp) {
                     // already copied for this scene, don't do it again
+                    if (trace_surface_texture) {
+                        LOG_INFO("ThorRenderTrace surface texture hit scene={} mode=casted-reuse tex_addr=0x{:08X} tex={}x{} surface_addr=0x{:08X} crop={}x{}+{},{}",
+                            scene_timestamp, address, original_width, original_height, ite->first, width, height, start_x, start_sourced_line);
+                    }
                     return TextureLookupResult{
                         casted->texture.view,
                         casted->texture.layout,
@@ -592,6 +640,11 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         }
         casted->texture.transition_to(cmd_buffer, vkutil::ImageLayout::ColorAttachmentReadWrite);
 
+        if (trace_surface_texture) {
+            LOG_INFO("ThorRenderTrace surface texture hit scene={} mode=casted-copy tex_addr=0x{:08X} tex={}x{} surface_addr=0x{:08X} surface={}x{} crop={}x{}+{},{} requested_fmt=0x{:08X} surface_fmt=0x{:08X}",
+                scene_timestamp, address, original_width, original_height, ite->first, info.original_width, info.original_height, width, height, start_x, start_sourced_line,
+                static_cast<uint32_t>(base_format), static_cast<uint32_t>(info.format));
+        }
         return TextureLookupResult{
             casted->texture.view,
             casted->texture.layout,
@@ -599,13 +652,18 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         };
     } else {
         // the renderpass external dependencies should take care of the barrier
-        if (swizzle == info.swizzle && vk_format == info.texture.format)
+        if (swizzle == info.swizzle && vk_format == info.texture.format) {
             // we can use the same texture view
+            if (trace_surface_texture) {
+                LOG_INFO("ThorRenderTrace surface texture hit scene={} mode=direct tex_addr=0x{:08X} tex={}x{} surface_addr=0x{:08X} surface={}x{} fmt=0x{:08X}",
+                    scene_timestamp, address, original_width, original_height, ite->first, info.original_width, info.original_height, static_cast<uint32_t>(info.format));
+            }
             return TextureLookupResult{
                 info.texture.view,
                 info.texture.layout,
                 info.texture.format
             };
+        }
 
         if (!info.alternate_view) {
             vk::ComponentMapping resulting_mapping = vkutil::color_to_texture_swizzle(info.swizzle, swizzle);
@@ -620,6 +678,10 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
             info.alternate_view = state.device.createImageView(view_info);
         }
 
+        if (trace_surface_texture) {
+            LOG_INFO("ThorRenderTrace surface texture hit scene={} mode=direct-alt tex_addr=0x{:08X} tex={}x{} surface_addr=0x{:08X} surface={}x{} requested_fmt=0x{:08X} surface_fmt=0x{:08X}",
+                scene_timestamp, address, original_width, original_height, ite->first, info.original_width, info.original_height, static_cast<uint32_t>(base_format), static_cast<uint32_t>(info.format));
+        }
         return TextureLookupResult{
             info.alternate_view,
             vkutil::ImageLayout::ColorAttachmentReadWrite,

@@ -114,6 +114,8 @@ COMMAND(handle_create_render_target) {
     }
     (*render_target)->multisample_mode = params->multisampleMode;
     (*render_target)->has_macroblock_sync = (params->flags & SCE_GXM_RENDER_TARGET_MACROTILE_SYNC);
+    (*render_target)->macroblock_width = 0;
+    (*render_target)->macroblock_height = 0;
     if ((*render_target)->has_macroblock_sync) {
         // there are between 1 and 4 macroblocks in the x and y direction
         uint16_t nb_macroblocks_x = (params->flags >> 8) & 0b111;

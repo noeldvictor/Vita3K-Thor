@@ -64,7 +64,7 @@
 
 namespace gui {
 
-static constexpr uint32_t APPS_CACHE_VERSION = 4;
+static constexpr uint32_t APPS_CACHE_VERSION = 5;
 
 static size_t write_archive_to_buffer(void *pOpaque, mz_uint64 file_ofs, const void *pBuf, size_t n) {
     vfs::FileBuffer *const buffer = static_cast<vfs::FileBuffer *>(pOpaque);
@@ -286,6 +286,53 @@ static bool virtual_cartridge_source_unchanged(const App &app) {
         && app.source_mtime == virtual_cartridge_source_mtime(source_path);
 }
 
+static std::string virtual_cartridge_title_key(const App &app) {
+    return string_utils::toupper(app.title_id);
+}
+
+static bool source_name_starts_with_title_id(const App &app) {
+    const auto source_path = fs_utils::utf8_to_path(app.source_path);
+    const auto filename = string_utils::tolower(source_path.filename().generic_string());
+    return !app.title_id.empty() && filename.starts_with(string_utils::tolower(app.title_id));
+}
+
+static bool virtual_cartridge_candidate_is_better(const App &candidate, const App &current) {
+    if (!current.virtual_cartridge)
+        return true;
+
+    if (candidate.encrypted_content != current.encrypted_content)
+        return !candidate.encrypted_content;
+
+    const bool candidate_title_id_name = source_name_starts_with_title_id(candidate);
+    const bool current_title_id_name = source_name_starts_with_title_id(current);
+    if (candidate_title_id_name != current_title_id_name)
+        return !candidate_title_id_name;
+
+    if (candidate.source_size != current.source_size)
+        return candidate.source_mtime > current.source_mtime;
+
+    if (candidate.source_path.size() != current.source_path.size())
+        return candidate.source_path.size() > current.source_path.size();
+
+    return candidate.source_path < current.source_path;
+}
+
+static void add_virtual_cartridge_candidate(std::map<std::string, App> &candidates, const App &app) {
+    const auto title_key = virtual_cartridge_title_key(app);
+    if (title_key.empty())
+        return;
+
+    auto it = candidates.find(title_key);
+    if (it == candidates.end()) {
+        candidates[title_key] = app;
+    } else if (virtual_cartridge_candidate_is_better(app, it->second)) {
+        LOG_INFO("Replacing duplicate virtual cartridge {} source {} with {}", app.title_id, it->second.source_path, app.source_path);
+        it->second = app;
+    } else {
+        LOG_INFO("Skipping duplicate virtual cartridge {} source {}", app.title_id, app.source_path);
+    }
+}
+
 static std::optional<App> app_from_param(const EmuEnvState &emuenv, const vfs::FileBuffer &param_sfo, const fs::path &source_path, const std::string &source_root) {
     sfo::SfoAppInfo app_info;
     sfo::get_param_info(app_info, param_sfo, emuenv.cfg.sys_lang);
@@ -428,13 +475,24 @@ static void append_virtual_cartridge_apps(GuiState &gui, EmuEnvState &emuenv) {
         return false;
     };
 
-    gui.app_selector.user_apps.erase(std::remove_if(gui.app_selector.user_apps.begin(), gui.app_selector.user_apps.end(), [&](const App &app) {
-        return app.virtual_cartridge && (!source_is_in_scan_roots(app) || !virtual_cartridge_source_unchanged(app));
-    }), gui.app_selector.user_apps.end());
+    std::map<std::string, App> virtual_candidates;
+    std::vector<App> installed_apps;
+    installed_apps.reserve(gui.app_selector.user_apps.size());
 
     std::set<std::string> indexed_paths;
-    for (const auto &app : gui.app_selector.user_apps)
-        indexed_paths.insert(app.path);
+    for (const auto &app : gui.app_selector.user_apps) {
+        if (!app.virtual_cartridge) {
+            installed_apps.push_back(app);
+            continue;
+        }
+
+        if (source_is_in_scan_roots(app) && virtual_cartridge_source_unchanged(app)) {
+            indexed_paths.insert(app.path);
+            add_virtual_cartridge_candidate(virtual_candidates, app);
+        }
+    }
+
+    gui.app_selector.user_apps = std::move(installed_apps);
 
     for (const auto &scan_root : scan_roots) {
         if (!fs::exists(scan_root))
@@ -442,11 +500,11 @@ static void append_virtual_cartridge_apps(GuiState &gui, EmuEnvState &emuenv) {
 
         try {
             const auto add_app = [&](std::optional<App> app) {
-                if (!app.has_value() || indexed_paths.contains(app->path))
+                if (!app.has_value())
                     return;
 
                 indexed_paths.insert(app->path);
-                gui.app_selector.user_apps.push_back(*app);
+                add_virtual_cartridge_candidate(virtual_candidates, *app);
             };
 
             for (const auto &entry : fs::directory_iterator(scan_root)) {
@@ -479,6 +537,17 @@ static void append_virtual_cartridge_apps(GuiState &gui, EmuEnvState &emuenv) {
             LOG_WARN("Could not scan virtual cartridge directory {}: {}", scan_root, e.what());
         }
     }
+
+    std::set<std::string> virtual_title_keys;
+    for (const auto &[title_key, app] : virtual_candidates)
+        virtual_title_keys.insert(title_key);
+
+    gui.app_selector.user_apps.erase(std::remove_if(gui.app_selector.user_apps.begin(), gui.app_selector.user_apps.end(), [&](const App &app) {
+        return virtual_title_keys.contains(virtual_cartridge_title_key(app));
+    }), gui.app_selector.user_apps.end());
+
+    for (const auto &[title_key, app] : virtual_candidates)
+        gui.app_selector.user_apps.push_back(app);
 }
 
 void draw_info_message(GuiState &gui, EmuEnvState &emuenv) {

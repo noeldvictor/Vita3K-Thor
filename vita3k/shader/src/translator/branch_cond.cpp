@@ -21,6 +21,8 @@
 #include <shader/usse_types.h>
 #include <util/log.h>
 
+#include <cstdlib>
+
 using namespace shader;
 using namespace usse;
 
@@ -477,6 +479,16 @@ bool USSETranslatorVisitor::vtstmsk(
     const bool output_4 = (alu_sel == 0 && tst_mask_type == 2);
 
     spv::Id pred_result = vtst_impl(inst, pred, zero_test, sign_test, (is_vdp || output_4) ? 0b1111 : 0b1, true);
+
+    if (std::getenv("VITA3K_SHADER_FORCE_CMPMSK_GT_F32_ONE") != nullptr
+        && load_data_type == DataType::F32
+        && sign_test == 2
+        && zero_test != 1
+        && output_4) {
+        const spv::Id bool_true = m_b.makeBoolConstant(true);
+        const spv::Id bool_v4 = m_b.makeVectorType(m_b.makeBoolType(), 4);
+        pred_result = m_b.makeCompositeConstant(bool_v4, { bool_true, bool_true, bool_true, bool_true });
+    }
 
     spv::Id output_type;
     spv::Id zeros;

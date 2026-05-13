@@ -27,7 +27,33 @@
 #include <util/align.h>
 #include <vkutil/vkutil.h>
 
+#include <cstdlib>
+
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
+
 namespace renderer::vulkan {
+
+static bool vulkan_texture_debug_flag(const char *env_name, const char *android_prop_name) {
+    const char *env_value = std::getenv(env_name);
+    if (env_value != nullptr && env_value[0] != '\0') {
+        const std::string_view value(env_value);
+        return value != "0" && value != "false" && value != "False" && value != "FALSE" && value != "off" && value != "OFF" && value != "no" && value != "NO";
+    }
+
+#ifdef __ANDROID__
+    char prop_value[PROP_VALUE_MAX] = {};
+    if (__system_property_get(android_prop_name, prop_value) > 0) {
+        const std::string_view value(prop_value);
+        return value != "0" && value != "false" && value != "False" && value != "FALSE" && value != "off" && value != "OFF" && value != "no" && value != "NO";
+    }
+#else
+    (void)android_prop_name;
+#endif
+
+    return false;
+}
 
 // return if this format can be used to read a depth stencil buffer
 // Only return the formats we support and make sense for now
@@ -277,6 +303,10 @@ bool VKTextureCache::init(const bool hashless_texture_cache, const fs::path &tex
     const vk::FormatProperties dxt_support = state.physical_device.getFormatProperties(vk::Format::eBc1RgbaSrgbBlock);
     // support_dxt might have already been set by the bcn patch on android
     support_dxt |= static_cast<bool>(dxt_support.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage);
+    if (vulkan_texture_debug_flag("VITA3K_FORCE_BCN_DECOMPRESS", "debug.vita3k.force_bcn_decompress")) {
+        support_dxt = false;
+        LOG_INFO("BCn/DXT native texture sampling disabled; BCn textures will be CPU-decompressed");
+    }
 
     // check for astc support
     const vk::FormatProperties astc_support = state.physical_device.getFormatProperties(vk::Format::eAstc4x4SrgbBlock);

@@ -1059,7 +1059,12 @@ int main(int argc, char *argv[]) {
         const auto is_directory = fs::is_directory(*cfg.content_path);
 
         const auto content_is_app = [&]() {
-            if (cfg.cartridge_mode) {
+#ifdef __ANDROID__
+            const bool use_cartridge_mode = cfg.cartridge_mode || is_archive;
+#else
+            const bool use_cartridge_mode = cfg.cartridge_mode;
+#endif
+            if (use_cartridge_mode) {
                 const ContentInfo content = mount_archive_as_cartridge(emuenv, *cfg.content_path);
                 if (content.state) {
                     emuenv.app_info.app_title_id = content.title_id;

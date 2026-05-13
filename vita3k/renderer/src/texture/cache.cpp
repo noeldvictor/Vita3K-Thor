@@ -290,6 +290,7 @@ using namespace texture;
 
 bool TextureCache::init(const bool hashless_texture_cache, const fs::path &texture_folder, std::string_view game_id, const size_t sampler_cache_size) {
     use_protect = hashless_texture_cache;
+    LOG_INFO("Texture cache dirty tracking: {}", use_protect ? "write-protect" : "hash");
 
     // initialize the texture queue
     texture_queue.init(TextureCacheSize);

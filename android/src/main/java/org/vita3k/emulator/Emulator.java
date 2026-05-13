@@ -15,6 +15,7 @@ import android.provider.Settings;
 import android.provider.OpenableColumns;
 import android.system.ErrnoException;
 import android.system.Os;
+import android.util.Base64;
 import android.util.Log;
 import android.view.Surface;
 import android.view.ViewGroup;
@@ -36,6 +37,7 @@ import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Locale;
@@ -43,6 +45,8 @@ import java.util.Locale;
 import org.libsdl.app.SDLActivity;
 import org.libsdl.app.SDLSurface;
 import org.vita3k.emulator.overlay.InputOverlay;
+import org.json.JSONArray;
+import org.json.JSONException;
 
 public class Emulator extends SDLActivity
 {
@@ -85,12 +89,52 @@ public class Emulator extends SDLActivity
     }
 
     static private final String APP_RESTART_PARAMETERS = "AppStartParameters";
+    static private final String APP_RESTART_PARAMETERS_JSON = "AppStartParametersJson";
+    static private final String APP_RESTART_PARAMETERS_JSON_BASE64 = "AppStartParametersJsonBase64";
+
+    private String[] parseJsonLaunchArguments(String json, String source) {
+        if (json == null || json.isEmpty())
+            return null;
+
+        try {
+            JSONArray array = new JSONArray(json);
+            String[] args = new String[array.length()];
+            for (int i = 0; i < array.length(); i++)
+                args[i] = array.getString(i);
+            return args;
+        } catch (JSONException e) {
+            Log.e(TAG, "Invalid " + source + ": " + json, e);
+            return null;
+        }
+    }
+
+    private String[] getJsonLaunchArguments(Intent intent) {
+        return parseJsonLaunchArguments(intent.getStringExtra(APP_RESTART_PARAMETERS_JSON), APP_RESTART_PARAMETERS_JSON);
+    }
+
+    private String[] getBase64JsonLaunchArguments(Intent intent) {
+        String encoded = intent.getStringExtra(APP_RESTART_PARAMETERS_JSON_BASE64);
+        if (encoded == null || encoded.isEmpty())
+            return null;
+
+        try {
+            String json = new String(Base64.decode(encoded, Base64.DEFAULT), StandardCharsets.UTF_8);
+            return parseJsonLaunchArguments(json, APP_RESTART_PARAMETERS_JSON_BASE64);
+        } catch (IllegalArgumentException e) {
+            Log.e(TAG, "Invalid " + APP_RESTART_PARAMETERS_JSON_BASE64 + ": " + encoded, e);
+            return null;
+        }
+    }
 
     @Override
     protected String[] getArguments() {
         Intent intent = getIntent();
 
         String[] args = intent.getStringArrayExtra(APP_RESTART_PARAMETERS);
+        if(args == null)
+            args = getBase64JsonLaunchArguments(intent);
+        if(args == null)
+            args = getJsonLaunchArguments(intent);
         if(args == null)
             args = getArchiveLaunchArguments(intent);
         if(args == null)

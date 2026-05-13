@@ -36,6 +36,10 @@
 #include <string>
 #include <string_view>
 
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
+
 namespace renderer::vulkan {
 
 struct RendererDebugRange {
@@ -255,6 +259,68 @@ static void poll_renderer_debug_control_file(RendererDebugConfig &cfg) {
     cfg = next;
 }
 
+#ifdef __ANDROID__
+static std::string android_debug_property(const char *name) {
+    char value[PROP_VALUE_MAX] = {};
+    if (__system_property_get(name, value) <= 0)
+        return {};
+
+    return value;
+}
+
+static bool parse_disabled_debug_value(const std::string &value) {
+    return value.empty() || value == "0" || value == "false" || value == "False" || value == "FALSE" || value == "off" || value == "OFF" || value == "no" || value == "NO";
+}
+
+static void poll_renderer_debug_android_properties(RendererDebugConfig &cfg) {
+    static uint64_t poll_counter = 0;
+    if ((poll_counter++ % 128) != 0)
+        return;
+
+    RendererDebugConfig next = cfg;
+
+    const std::string labels = android_debug_property("debug.vita3k.render_labels");
+    if (!labels.empty())
+        next.labels = parse_debug_bool(labels);
+
+    const std::string trace = android_debug_property("debug.vita3k.render_trace");
+    if (!trace.empty())
+        next.trace = parse_debug_bool(trace);
+
+    const std::string trace_limit = android_debug_property("debug.vita3k.render_trace_limit");
+    if (!trace_limit.empty()) {
+        uint64_t parsed = 0;
+        if (parse_u64_at(trace_limit.c_str(), parsed) && parsed != 0)
+            next.trace_limit = clamp_draw_index(parsed);
+    }
+
+    const std::string skip = android_debug_property("debug.vita3k.render_skip");
+    if (!skip.empty())
+        next.skip = parse_disabled_debug_value(skip) ? RendererDebugRange{} : parse_renderer_debug_range_spec(skip);
+
+    const std::string stop_after = android_debug_property("debug.vita3k.render_stop_after");
+    if (!stop_after.empty())
+        next.stop_after = parse_disabled_debug_value(stop_after) ? RendererDebugRange{} : parse_renderer_debug_range_spec(stop_after);
+
+    const std::string dump = android_debug_property("debug.vita3k.render_dump");
+    if (!dump.empty())
+        next.dump = parse_disabled_debug_value(dump) ? RendererDebugRange{} : parse_renderer_debug_range_spec(dump);
+
+    if (next.labels != cfg.labels || next.trace != cfg.trace || next.trace_limit != cfg.trace_limit
+        || next.skip.spec != cfg.skip.spec || next.stop_after.spec != cfg.stop_after.spec || next.dump.spec != cfg.dump.spec) {
+        LOG_INFO("ThorRenderDebug android-props labels={} trace={} trace_limit={} skip={} stop_after={} dump={}",
+            next.labels,
+            next.trace,
+            next.trace_limit,
+            next.skip.spec,
+            next.stop_after.spec,
+            next.dump.spec);
+    }
+
+    cfg = next;
+}
+#endif
+
 static RendererDebugConfig &renderer_debug_config() {
     static RendererDebugConfig config = [] {
         RendererDebugConfig cfg;
@@ -277,6 +343,9 @@ static RendererDebugConfig &renderer_debug_config() {
         return cfg;
     }();
     poll_renderer_debug_control_file(config);
+#ifdef __ANDROID__
+    poll_renderer_debug_android_properties(config);
+#endif
     return config;
 }
 
@@ -1253,7 +1322,15 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     if (context.state.renderer_trace_gxm_state || renderer_debug.trace) {
         const uint32_t trace_draw_limit = renderer_debug.trace_limit;
         if (debug_draw_index < trace_draw_limit) {
-                LOG_INFO("ThorRenderTrace draw frame={} scene={} draw={} prim={} index_fmt={} count={} instances={} pipeline={} framebuffer_fetch={} vhash={} fhash={} vtex={} ftex={} vbufs={} fbufs={} depth_func={}/{} depth_write={}/{} stencil_func={}/{} cull={} two_sided={} vp_flat={} z_offset={} z_scale={} writing_mask={}",
+            float debug_frag_res_multiplier = context.state.res_multiplier;
+            const bool debug_has_msaa = context.render_target != nullptr && context.render_target->multisample_mode;
+            const bool debug_has_downscale = context.record.color_surface.downscale;
+            if (debug_has_msaa && !debug_has_downscale)
+                debug_frag_res_multiplier *= 2;
+            else if (!debug_has_msaa && debug_has_downscale)
+                debug_frag_res_multiplier /= 2;
+
+            LOG_INFO("ThorRenderTrace draw frame={} scene={} draw={} prim={} index_fmt={} count={} instances={} pipeline={} framebuffer_fetch={} vhash={} fhash={} vtex={} ftex={} vbufs={} fbufs={} depth_func={}/{} depth_write={}/{} stencil_func={}/{} cull={} two_sided={} vp_flat={} z_offset={} z_scale={} writing_mask={} viewport={},{},{},{} scissor={},{},{},{} frag_res_multiplier={} color_downscale={}",
                 context.frame_timestamp,
                 context.scene_timestamp,
                 debug_draw_index,
@@ -1280,7 +1357,17 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
                 context.record.viewport_flat,
                 context.record.z_offset,
                 context.record.z_scale,
-                context.record.writing_mask);
+                context.record.writing_mask,
+                context.viewport.x,
+                context.viewport.y,
+                context.viewport.width,
+                context.viewport.height,
+                context.scissor.offset.x,
+                context.scissor.offset.y,
+                context.scissor.extent.width,
+                context.scissor.extent.height,
+                debug_frag_res_multiplier,
+                debug_has_downscale);
         } else if (debug_draw_index == trace_draw_limit) {
             LOG_INFO("ThorRenderTrace draw frame={} scene={} draw_limit={} reached; suppressing remaining draws for this scene",
                 context.frame_timestamp,

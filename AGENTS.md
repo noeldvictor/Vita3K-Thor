@@ -81,7 +81,9 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 
 ## Playing Without Install
 
-- Vita3K Thor now has an experimental cartridge launch path for archives: use `--cartridge <path-to-vpk-or-zip>` to mount game content as a read-only virtual game card for the session instead of adding it to the installed app library.
+- Vita3K Thor's preferred game flow is ZIP/cartridge mode, not install mode: use `--cartridge <path-to-vpk-or-zip>` to mount game content as a read-only virtual game card for the session instead of adding it to the installed app library.
+- Do not install ROM ZIPs/VPKs into `ux0/app` for normal Thor testing. Preserve install code for upstream compatibility and explicit package-management tests only; day-to-day game launch, scan, debug, and frontend work should use virtual cartridges.
+- On Android, archive startup should default to virtual cartridge mounting even if a caller forgets `--cartridge`; do not reintroduce install-first handling for ZIP/VPK game launches.
 - Android builds shallow-scan `/sdcard/roms/psvita`, `/sdcard/Roms/psvita`, `/storage/emulated/0/roms/psvita`, and `/storage/emulated/0/Roms/psvita` by default when `scan-virtual-cartridges` is enabled. The scanner should also discover removable SD card roots under `/storage/<card>/Roms/psvita`, `/storage/<card>/roms/psvita`, and common Emulation folder variants. Compatible `.zip`/`.vpk` archives in the root or one direct child folder, plus extracted direct child folders containing `sce_sys/param.sfo`, are listed as virtual cartridges in the app grid.
 - Virtual cartridge app entries are part of the normal app-list cache. Keep unchanged ZIP/VPK entries by source path, size, and mtime instead of re-opening every archive on startup, and cache archive icon/background assets under app-local cache storage. Invalidate when the source archive/param changes or the scan root no longer covers the source path.
 - Some cartridge/NoNpDrm-style ZIPs have readable `param.sfo` but PFS-encrypted app files. Detect these by checking app `eboot.bin` and `sce_sys/icon0.png` headers, show an `E` encrypted-content badge in the app list, and fail launch with a clear diagnostic instead of trying to run encrypted bytes. Do not add DRM, license, or key bypass code.
@@ -142,6 +144,7 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - `--thor-render-trace` also enables debugger import/export logging and loaded ELF dumps for Windows-first diagnosis. Use the generated `elfdumps/` files only as ignored local evidence for Ghidra/API-call-site work; never commit dumped commercial game binaries or decrypted content.
 - Windows desktop renderer testing uses a real controller connected to Windows, not the Thor controls over USB/ADB. Prefer an Xbox Wireless/XInput controller paired to Windows; confirm it appears in Windows before blaming Vita3K input. Quick checks: `Get-PnpDevice -PresentOnly | ? FriendlyName -match 'Xbox|XInput|Controller|Gamepad'`, Windows Bluetooth/game controller settings, and Vita3K/SDL logs for `gamepad`/`controller` lines. If the pad is paired after Vita3K is already running, restart Vita3K or verify SDL hotplug sees it.
 - For Vita3K graphics bugs, capture a timestamped report with screenshot, title ID, renderer, selected custom driver, resolution multiplier, texture/surface settings, logcat tail, and whether the issue is in the launcher/OSD or in-game Vita rendering.
+- For flicker, intermittent corruption, menus with moving backgrounds, or "check now" render investigations, do not rely on a single screencap. Capture a burst of at least 8-12 screenshots over a few seconds, then compare the sequence for frame-to-frame changes before deciding what broke. Keep burst PNGs under `tmp/` and summarize the useful frames in the report.
 - Prefer targeted emulator dumps over guessing: add per-title toggles for GXM call trace, display frame info, surface cache state, shader/GXP translation info, pipeline state, texture upload metadata, and optional frame screenshots.
 - For Windows-first renderer debugging, use `VITA3K_RUNTIME_CONTROL_FILE` or the existing `VITA3K_RENDER_CONTROL_FILE` to trigger runtime actions while the game is running. Supported `action=` values include `save_state`, `load_state`, `pause`, `resume`, `toggle_pause`, `open_osd`, and `close_osd`; include a fresh `action_id=` when repeating the same action. `tools/windows/set-render-debug-control.ps1 -Action save_state` writes the shared control file for the common UPPERS debug launch.
 - Keep runtime-control polling before any paused-frame wait in the game loop. External `pause` must not strand follow-up `load_state`, `resume`, screenshot, or renderer-toggle actions during Windows-first debugging.
@@ -162,6 +165,22 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 
 ## ADB Thor Testing
 
+- For game-specific Thor repros, bypass the Android game list/launcher and start Vita3K directly in cartridge mode. In PowerShell, do not paste Bash-style one-liners or hand-write comma-separated string-array extras; game filenames often contain spaces, brackets, parentheses, and commas.
+- Prefer the checked-in PowerShell helpers for launch/capture, for example `.\tools\thor_profile_dump.ps1 -Topic doa-venus-title -TitleId PCSH00250 -GamePath $game -RenderTrace -Adb $adb`. The helpers should own ADB quoting and write timestamp-first reports.
+- For raw PowerShell commands, invoke executable paths stored in variables with the call operator, for example `& $adb ...`; do not type `$adb ...` as though it were Bash. PowerShell line continuation is a backtick, not `\`, but prefer variables/arrays over fragile multi-line continuations.
+- If a raw direct-launch command is needed, build the Vita3K argument list as a PowerShell array, encode it as JSON, base64 the JSON, and pass it through `--es AppStartParametersJsonBase64`. Do not create renamed no-comma duplicate ZIPs just to satisfy ADB quoting:
+
+```powershell
+$adb = 'C:\Users\leanerdesigner\Documents\SteamPortableTools\toolchains\android-sdk\platform-tools\adb.exe'
+$activity = 'org.vita3k.emulator.debug/org.vita3k.emulator.Emulator'
+$game = '/storage/2664-21DE/Roms/psvita/Dead or Alive Xtreme 3 - Venus (Asia)(v1.15)(En,Zh,Ko)[vita3k].zip'
+$vitaArgs = @('-a', 'true', '--cartridge', $game, '--log-level', '0', '--thor-render-trace')
+$argJson = ConvertTo-Json -Compress -InputObject $vitaArgs
+$argJsonBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($argJson))
+& $adb shell am force-stop org.vita3k.emulator.debug
+& $adb shell am start -n $activity --es AppStartParametersJsonBase64 $argJsonBase64
+```
+- Virtual cartridge scanning de-duplicates by Vita title ID. If a scanned ZIP and an installed `ux0/app/<TITLEID>` entry both exist, prefer the ZIP/cartridge card in the frontend so users do not see duplicate games or accidentally run the installed copy.
 - When an APK is built and an AYN Thor is connected, push/install it to the Thor with ADB for real-device testing.
 - After every Android-affecting commit/push with a successful APK build, also install the latest APK to the connected Android/AYN Thor with `adb install -r` unless no device is connected or the build failed. Record the result in `reports/`.
 - Start with `adb devices` and verify the connected device is the user's AYN Thor before installing.
@@ -172,8 +191,12 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - Prefer `tools/thor_adb_debug_capture.ps1` for repeatable crash/render captures. It should be the first tool for suspected renderer hangs, Android kills, or game-specific startup crashes because it captures normal logcat, crash buffer, current window focus, meminfo, and a screenshot together.
 - Use `tools/thor_live_debug_stream.ps1` when the user is actively playing and Codex needs a stream of evidence. It writes rolling samples under `tmp/thor-live/<timestamp>_<topic>/`, keeps `latest.txt` and `latest-screen.png` fresh, and writes a timestamp-first Markdown report in `reports/`. This is the preferred "play while Codex watches logs/screenshots" workflow.
 - Use `tools/thor_profile_dump.ps1 -Topic <semantic-topic> [-RenderTrace] [-TitleId <TITLEID>]` for a one-shot profile bundle from a running repro. It captures screenshot, logcat, crash buffer, window focus, gfxinfo/frame stats, meminfo, cpuinfo, thermal state, SurfaceFlinger, top threads, device props, and a renderer-trace summary.
+- When checking a live render issue from ADB, take a burst snapshot set before and after any live property change. A good default is 10 screenshots at 250-500 ms spacing, plus logcat/window focus, so flicker, alternating surfaces, bad clears, and transient composite failures are visible instead of hidden by one lucky frame.
 - Use `tools/thor_save_sync.ps1 -TitleId <TITLEID> -Backup` before risky repro work, and `tools/thor_save_sync.ps1 -TitleId <TITLEID> -InstallPath <folder-or-zip> [-Replace]` only for decrypted Vita savedata exports. Use `-Replace` when restoring an exact save snapshot so stale extra files are removed. Do not commit pulled saves or public/user save archives.
 - On Android, renderer trace can be toggled while a game is already running with `adb shell setprop debug.vita3k.thor_render_trace 1` and disabled with `adb shell setprop debug.vita3k.thor_render_trace 0`. `tools/thor_live_debug_stream.ps1 -RenderTrace` sets the property before sampling so Codex can capture `ThorRenderTrace` scene/draw/texture lines without making the user restart the game.
+- For Vulkan draw isolation on Android, use live system properties instead of rebuilding when possible: `debug.vita3k.render_trace`, `debug.vita3k.render_trace_limit`, `debug.vita3k.render_skip`, `debug.vita3k.render_stop_after`, and `debug.vita3k.render_dump`. Range specs accept filters such as `rt=960x544:draw=0-4`, `scene=123:draw=8`, `fhash=<prefix>:draw=0`, or `vhash=<prefix>:draw=0`. Clear skip/dump/stop-after with value `0`.
+- Android live depth experiments also support `debug.vita3k.render_force_depth_clear_ds`, `debug.vita3k.render_force_depth_clear_value`, `debug.vita3k.render_force_depth_always_fhash`, and `debug.vita3k.render_force_depth_lequal_fhash`. Treat these as diagnostics only until the root cause is understood and converted into a narrow code fix.
+- Android live texture experiments support `debug.vita3k.force_bcn_decompress=1` to disable native BCn/DXT Vulkan sampling and force Vita3K's CPU decompression path on the next renderer startup. Use it only as a diagnostic/comparison switch unless a device-specific compatibility decision is backed by burst screenshots and logs.
 
 ## Reporting Thor Results
 

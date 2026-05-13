@@ -67,15 +67,16 @@ if ($RenderTrace) {
 }
 
 if (-not [string]::IsNullOrWhiteSpace($GamePath)) {
-    $args = @("-a", "true", "--cartridge", $GamePath, "--log-level", "$LogLevel")
+    $vitaArgs = @("-a", "true", "--cartridge", $GamePath, "--log-level", "$LogLevel")
     if ($RenderTrace) {
-        $args += "--thor-render-trace"
+        $vitaArgs += "--thor-render-trace"
     }
-    $argString = $args -join ","
+    $argJson = ConvertTo-Json -Compress -InputObject $vitaArgs
+    $argJsonBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($argJson))
     $component = "$Package/$Activity"
-    $remoteStart = "am start -n $component --esa AppStartParameters $(Quote-AndroidShell $argString)"
+    $remoteStart = "am start -n $component --es AppStartParametersJsonBase64 $argJsonBase64"
     Write-Host "Launching $GamePath"
-    Write-Host "ADB args: $argString"
+    Write-Host "ADB args JSON: $argJson"
     & $Adb shell $remoteStart | Tee-Object -FilePath (Join-Path $sessionDir "launch.txt")
 }
 

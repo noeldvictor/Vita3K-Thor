@@ -27,7 +27,51 @@
 #include <util/log.h>
 #include <util/overloaded.h>
 
+#include <cstdlib>
+#include <string>
+
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
+
 namespace renderer::vulkan {
+
+static std::string thor_debug_setting(const char *env_name, const char *android_prop_name) {
+    const char *env_value = std::getenv(env_name);
+    if (env_value != nullptr && env_value[0] != '\0')
+        return env_value;
+
+#ifdef __ANDROID__
+    char prop_value[PROP_VALUE_MAX] = {};
+    if (__system_property_get(android_prop_name, prop_value) > 0)
+        return prop_value;
+#else
+    (void)android_prop_name;
+#endif
+
+    return {};
+}
+
+static bool thor_debug_force_depth_clear(const SceGxmDepthStencilSurface *surface) {
+    const std::string prefix = thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_CLEAR_DS", "debug.vita3k.render_force_depth_clear_ds");
+    if (prefix.empty() || surface == nullptr)
+        return false;
+
+    return fmt::format("{:08X}", surface->depth_data.address()).rfind(prefix, 0) == 0;
+}
+
+static float thor_debug_depth_clear_value(float default_value) {
+    const std::string value_text = thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_CLEAR_VALUE", "debug.vita3k.render_force_depth_clear_value");
+    if (value_text.empty())
+        return default_value;
+
+    char *end = nullptr;
+    const float value = std::strtof(value_text.c_str(), &end);
+    if (end == value_text.c_str())
+        return default_value;
+
+    return value;
+}
 
 void VKContext::wait_thread_function(const MemState &mem) {
     // try to wait for multiple fences at the same time if possible
@@ -166,6 +210,17 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
         force_load = false;
         force_store = false;
     }
+    if (thor_debug_force_depth_clear(ds_surface_fin)) {
+        force_load = false;
+    }
+    const bool force_full_macroblock = rt->has_macroblock_sync
+        && rt->multisample_mode
+        && context.record.color_surface.downscale
+        && state.is_adreno_turnip;
+    if (force_full_macroblock && ds_surface_fin != nullptr) {
+        force_load = true;
+        force_store = true;
+    }
     if (context.state.features.support_shader_interlock)
         // we must always store the depth stencil
         force_store = true;
@@ -193,7 +248,7 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
         const uint32_t ds_type = ds_surface_fin ? static_cast<uint32_t>(ds_surface_fin->get_type()) : 0;
         const uint32_t ds_stride = ds_surface_fin ? ds_surface_fin->get_stride() : 0;
 
-        LOG_INFO("ThorRenderTrace scene frame={} scene={} rt={}x{} msaa={} macroblock={}x{} sync={} mapping={} shader_interlock={} texture_viewport={} adreno_stock={} adreno_turnip={} color_addr=0x{:08X} color={}x{} stride={} fmt=0x{:08X} type=0x{:08X} downscale={} ds_depth=0x{:08X} ds_stencil=0x{:08X} ds_stride={} ds_fmt=0x{:08X} ds_type=0x{:08X} ds_load={} ds_store={}",
+        LOG_INFO("ThorRenderTrace scene frame={} scene={} rt={}x{} msaa={} macroblock={}x{} macroblock_sync={} force_full_macroblock={} sync={} mapping={} shader_interlock={} texture_viewport={} adreno_stock={} adreno_turnip={} color_addr=0x{:08X} color={}x{} stride={} fmt=0x{:08X} type=0x{:08X} downscale={} ds_depth=0x{:08X} ds_stencil=0x{:08X} ds_stride={} ds_fmt=0x{:08X} ds_type=0x{:08X} ds_load={} ds_store={} ds_effective_load={} ds_effective_store={} ds_clear_depth={}",
             context.frame_timestamp,
             context.scene_timestamp,
             rt->width,
@@ -201,6 +256,8 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
             static_cast<uint32_t>(rt->multisample_mode),
             rt->macroblock_width,
             rt->macroblock_height,
+            rt->has_macroblock_sync,
+            force_full_macroblock,
             state.disable_surface_sync ? "off" : "on",
             static_cast<int>(state.mapping_method),
             state.features.support_shader_interlock,
@@ -220,7 +277,10 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
             ds_format,
             ds_type,
             ds_surface_fin ? static_cast<bool>(ds_surface_fin->force_load) : false,
-            ds_surface_fin ? static_cast<bool>(ds_surface_fin->force_store) : false);
+            ds_surface_fin ? static_cast<bool>(ds_surface_fin->force_store) : false,
+            force_load,
+            force_store,
+            ds_surface_fin ? thor_debug_depth_clear_value(ds_surface_fin->background_depth) : 0.0f);
     }
 
     // make sure we are not keeping any texture from the previous pass
@@ -237,7 +297,7 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.is_first_scene_draw = true;
     context.last_macroblock_x = ~0;
     context.last_macroblock_y = ~0;
-    context.ignore_macroblock = false;
+    context.ignore_macroblock = force_full_macroblock;
 }
 
 void VKContext::start_recording(bool first_in_scene) {
@@ -382,9 +442,13 @@ void VKContext::start_render_pass(bool create_descriptor_set) {
     }
 
     // only the depth-stencil attachment may be clear if not force loaded
+    float clear_depth = record.depth_stencil_surface.background_depth;
+    if (thor_debug_force_depth_clear(&record.depth_stencil_surface))
+        clear_depth = thor_debug_depth_clear_value(clear_depth);
+
     std::array<vk::ClearValue, 2> curr_clear_values{};
     curr_clear_values[1].depthStencil = vk::ClearDepthStencilValue{
-        .depth = record.depth_stencil_surface.background_depth,
+        .depth = clear_depth,
         .stencil = record.depth_stencil_surface.stencil
     };
     curr_renderpass_info.setClearValues(curr_clear_values);

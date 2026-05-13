@@ -31,6 +31,13 @@
 
 #include <SDL3/SDL_cpuinfo.h>
 
+#include <cstdlib>
+#include <string>
+
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
+
 // don't use the dispatch version, because we always hash a small amount
 // with a known size
 #define XXH_INLINE_ALL
@@ -393,6 +400,30 @@ static const vk::SpecializationInfo srgb_info_false = {
     .dataSize = sizeof(uint32_t),
     .pData = &srgb_entry_false
 };
+
+static std::string thor_debug_setting(const char *env_name, const char *android_prop_name) {
+    const char *env_value = std::getenv(env_name);
+    if (env_value != nullptr && env_value[0] != '\0')
+        return env_value;
+
+#ifdef __ANDROID__
+    char prop_value[PROP_VALUE_MAX] = {};
+    if (__system_property_get(android_prop_name, prop_value) > 0)
+        return prop_value;
+#else
+    (void)android_prop_name;
+#endif
+
+    return {};
+}
+
+static bool thor_debug_hash_prefix_matches(const Sha256Hash &hash, const std::string &prefix) {
+    if (prefix.empty())
+        return false;
+
+    const std::string hash_text = hex_string(hash);
+    return hash_text.rfind(prefix, 0) == 0;
+}
 
 vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmProgram *program, const Sha256Hash &hash, bool is_vertex, bool maskupdate, MemState &mem, const shader::Hints &hints, bool is_srgb) {
     if (maskupdate)
@@ -795,10 +826,14 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     };
     // depth and stencil tests are always enabled on the ps vita as there is almost no cost in doing so
     // on a tiled renderer
+    const std::string thor_depth_always_prefix = thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_ALWAYS_FHASH", "debug.vita3k.render_force_depth_always_fhash");
+    const std::string thor_depth_lequal_prefix = thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_LEQUAL_FHASH", "debug.vita3k.render_force_depth_lequal_fhash");
+    const bool thor_force_depth_always = thor_debug_hash_prefix_matches(fragment_program.hash, thor_depth_always_prefix);
+    const bool thor_force_depth_lequal = thor_debug_hash_prefix_matches(fragment_program.hash, thor_depth_lequal_prefix);
     const vk::PipelineDepthStencilStateCreateInfo ds_info{
         .depthTestEnable = VK_TRUE,
         .depthWriteEnable = (record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED),
-        .depthCompareOp = translate_depth_func(record.front_depth_func),
+        .depthCompareOp = thor_force_depth_always ? vk::CompareOp::eAlways : (thor_force_depth_lequal ? vk::CompareOp::eLessOrEqual : translate_depth_func(record.front_depth_func)),
         .depthBoundsTestEnable = VK_FALSE,
         .stencilTestEnable = VK_TRUE,
         .front = convert_op_state(record.front_stencil_state_op),
@@ -881,6 +916,12 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     const VKFragmentProgram &fragment_program = *reinterpret_cast<VKFragmentProgram *>(
         fragment_program_gxm.renderer_data.get());
     key ^= fragment_program.blending_hash;
+    if (thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_ALWAYS_FHASH", "debug.vita3k.render_force_depth_always_fhash"))) {
+        key ^= 0x54A14151D0B16A1DULL;
+    }
+    if (thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_LEQUAL_FHASH", "debug.vita3k.render_force_depth_lequal_fhash"))) {
+        key ^= 0xD75CEB1DCE9F4C2BULL;
+    }
 
     // add the hash of the attribute and stream layout
     SceGxmVertexProgram &vertex_program_gxm = *record.vertex_program.get(mem);
