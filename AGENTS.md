@@ -37,6 +37,16 @@ python tools/debug_knowledge.py search "doa venus black terrain android 564cd0" 
 - Local issue ROMs live under ignored `roms/issues/<TITLEID>/`; regression ROMs live under ignored `roms/regression/<TITLEID>/`. Use `tools/sync_issue_rom.ps1` to copy or pull games there as needed. Never commit `roms/`.
 - Current first active case is DOA Venus (`PCSH00250`) renderer corruption. Pause renderer chasing until the SQLite/debug harness is available and the case has a current observation in the DB.
 
+## Input Automation
+
+- Use committed input helpers instead of asking the user to repeatedly press obvious buttons during repro setup.
+- Windows desktop debug loop: use `tools/windows/send-vita3k-input.ps1`, which focuses the Vita3K window and sends the default keyboard-mapped Vita controls. Examples: `-Sequence circle,wait:500,start`, `-Sequence down:2,cross`, `-Sequence osd`, `-Sequence fast_forward`.
+- Android/AYN Thor loop: use `tools/android/send-thor-input.ps1`. Default `KeyEvent` mode is best for simple prompts; `-Mode Sendevent` is best for raw Odin Controller routing, Back/Select conflicts, OSD chords, and cases where Android keyevents do not reach SDL like a real controller.
+- Supported common button names include `cross`, `circle`, `square`, `triangle`, `start`, `select`, `back`, `up`, `down`, `left`, `right`, `l1`, `r1`, `l2`, `r2`, `l3`, and `r3`; use `button:count`, `wait:ms`, or `button+button` chords for short sequences.
+- Useful aliases are `osd` for L3+R3 and `fast_forward` for Select+R1. Windows also supports `save_state` and `load_state` through the default keyboard right-stick mapping. On Android, prefer runtime control or OSD automation for quickstates until the exact Thor right-stick axis events are captured for the current firmware.
+- For Japanese/Asian Vita games, Circle/O can be confirm and Cross/X can be cancel. Prefer `circle` for DOA Venus autosave/title prompts unless a screenshot/log proves Cross is expected.
+- After input automation materially changes a repro state, add a SQLite `test` or `observation` entry with the exact script, sequence, platform, and result.
+
 ## Safety Scope
 
 - Work only on emulator compatibility, Android handheld UX, controller/touch behavior, renderer settings, driver selection, diagnostics, and build/test documentation.

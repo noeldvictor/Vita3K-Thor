@@ -1,0 +1,6 @@
+interface:
+  display_name: "Vita3K Input Automation"
+  short_description: "Automated Windows and Thor button presses"
+  default_prompt: "Use $vita3k-input-automation to drive repeatable Vita3K button presses during a Windows or Android debug repro."
+policy:
+  allow_implicit_invocation: true

@@ -1,6 +1,6 @@
 ---
 name: vita3k-debug-rag
-description: Use for Vita3K Thor emulator/game bug resolution, renderer regressions, Windows-first/Android-second repro loops, SQLite debug knowledge searches, and recording durable observations, decisions, fixes, and regression checks without relying on aging Markdown reports.
+description: Use for Vita3K Thor emulator/game bug resolution, renderer regressions, Windows-first/Android-second repro loops, SQLite debug knowledge search/read/write, input automation evidence, and recording durable observations, decisions, fixes, and regression checks without relying on aging Markdown reports.
 metadata:
   short-description: SQLite RAG workflow for Vita3K Thor debugging
 ---
@@ -12,7 +12,7 @@ Use this skill whenever debugging a Vita3K Thor emulator or game issue, especial
 ## Source Of Truth
 
 - The canonical report store is `reports/debug_knowledge.sqlite`.
-- Use `tools/debug_knowledge.py` to query and update it.
+- Use `tools/debug_knowledge.py` to search, read, and write it.
 - Treat existing Markdown reports as legacy context only. Do not rely on them until the SQLite DB has no relevant recent or long-term answer.
 - Never commit commercial games, saves, firmware, decrypted binaries, ELF dumps, shader caches, APKs, raw log dumps, or screenshots unless the user explicitly asks for a specific proof asset.
 
@@ -61,6 +61,14 @@ Use the generic launcher:
 
 Use the generated control file to pause/resume, save/load state, toggle draw filters, dump shader/texture/pipeline state, and run stop-after/skip sweeps without rebuilding or relaunching when possible.
 
+Automate button presses against the Vita3K window:
+
+```powershell
+.\tools\windows\send-vita3k-input.ps1 -Sequence circle,wait:500,start
+.\tools\windows\send-vita3k-input.ps1 -Sequence osd
+.\tools\windows\send-vita3k-input.ps1 -Sequence fast_forward
+```
+
 ## Android Final Gate
 
 Android/Thor remains required for:
@@ -72,6 +80,17 @@ Android/Thor remains required for:
 - Real handheld performance and thermals.
 
 Use `tools/thor_profile_dump.ps1` and `tools/thor_live_debug_stream.ps1` for device evidence. Record final Android observations and test results in SQLite.
+
+Automate Thor button presses:
+
+```powershell
+.\tools\android\send-thor-input.ps1 -Adb $adb -Serial c3ca0370 -Sequence circle,wait:500,start
+.\tools\android\send-thor-input.ps1 -Adb $adb -Serial c3ca0370 -Mode Sendevent -Sequence back
+.\tools\android\send-thor-input.ps1 -Adb $adb -Serial c3ca0370 -Mode Sendevent -Sequence osd
+```
+
+Use `KeyEvent` mode for simple UI/game prompts. Use `Sendevent` mode when debugging Thor/Odin controller routing, Back/Select conflicts, or OSD chords.
+For Android quickstate actions, prefer runtime control or OSD automation over fake right-stick axis events until the exact Thor axis codes are captured for the current firmware.
 
 ## SQLite Commands
 
@@ -91,4 +110,10 @@ Show the current case:
 
 ```powershell
 python tools/debug_knowledge.py case show doa-venus-render-corruption
+```
+
+Record an automation step:
+
+```powershell
+python tools/debug_knowledge.py entry add --case doa-venus-render-corruption --type test --platform android --summary "Automated Circle then Start to reach title prompt" --body "Used tools/android/send-thor-input.ps1 -Mode KeyEvent -Sequence circle,wait:500,start. Result: prompt advanced without manual input."
 ```
