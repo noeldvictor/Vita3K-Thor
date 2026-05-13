@@ -97,15 +97,15 @@ This section is for people changing the emulator code, debugging games, or compa
 - Which performance changes are general Vita3K improvements, and which ones should stay Thor-only?
 - What proof is enough before calling a game or setting working: screenshot, logcat, frame pacing, controller proof, save proof, or all of them?
 
-## Thor Screenshot
+## UPPERS Working On Thor
 
-No live Thor screenshot is checked in yet. When one is added, use a real device screenshot from this fork and make clear that no games are bundled with this repository.
+![UPPERS running on Vita3K-Thor on AYN Thor](docs/screenshots/uppers-thor-android-working-20260512_224811.png)
 
-Suggested path:
+UPPERS (`PCSG00633`) is now rendering on AYN Thor with this fork. The Windows debugging loop needed the core renderer/shader fixes first: vertex trap sizing for register-format attributes, depth clamp behavior, disabled-channel blend translation, and repeat-aware `i32mad2` shader translation.
 
-```text
-docs/media/screenshots/vita3k-thor-android.png
-```
+The Android-specific blocker was different: Vulkan screen-present shaders had to force opaque alpha so Android SurfaceFlinger would not composite a valid game frame as black. Thor should also use an Adreno 7xx-compatible Turnip driver profile, not the old A8xx driver path.
+
+This screenshot is from a local legally owned test copy. No game content, firmware, license files, or commercial content is included in this repository.
 
 ## Build Locally
 
