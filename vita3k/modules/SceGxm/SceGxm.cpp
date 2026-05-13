@@ -19,6 +19,7 @@
 
 #include <modules/module_parent.h>
 
+#include <cstdint>
 #include <span>
 #include <stack>
 #if defined(__x86_64__) && !defined(__APPLE__)
@@ -1535,6 +1536,28 @@ EXPORT(int, sceGxmBeginScene, SceGxmContext *context, uint32_t flags, const SceG
     return 0;
 }
 
+static void thor_trace_begin_scene_ex_surface(const char *label, const SceGxmDepthStencilSurface *surface) {
+    if (!surface) {
+        LOG_INFO("ThorRenderTrace BeginSceneEx {} ptr=null", label);
+        return;
+    }
+
+    LOG_INFO("ThorRenderTrace BeginSceneEx {} ptr=0x{:X} enabled={} depth=0x{:08X} stencil=0x{:08X} stride={} fmt=0x{:08X} type=0x{:08X} force_load={} force_store={} bg_depth={} bg_stencil={} bg_mask={}",
+        label,
+        reinterpret_cast<std::uintptr_t>(surface),
+        !surface->disabled(),
+        surface->depth_data.address(),
+        surface->stencil_data.address(),
+        surface->get_stride(),
+        static_cast<uint32_t>(surface->get_format()),
+        static_cast<uint32_t>(surface->get_type()),
+        static_cast<bool>(surface->force_load),
+        static_cast<bool>(surface->force_store),
+        surface->background_depth,
+        surface->stencil,
+        surface->mask);
+}
+
 EXPORT(int, sceGxmBeginSceneEx, SceGxmContext *immediateContext, uint32_t flags, const SceGxmRenderTarget *renderTarget, const SceGxmValidRegion *validRegion, SceGxmSyncObject *vertexSyncObject, Ptr<SceGxmSyncObject> fragmentSyncObject, const SceGxmColorSurface *colorSurface, const SceGxmDepthStencilSurface *loadDepthStencilSurface, const SceGxmDepthStencilSurface *storeDepthStencilSurface) {
     TRACY_FUNC(sceGxmBeginSceneEx, immediateContext, flags, renderTarget, validRegion, vertexSyncObject, fragmentSyncObject, colorSurface, loadDepthStencilSurface, storeDepthStencilSurface);
     // storeDepthStencilSurface
@@ -1556,6 +1579,38 @@ EXPORT(int, sceGxmBeginSceneEx, SceGxmContext *immediateContext, uint32_t flags,
 
     if (immediateContext->state.active) {
         return RET_ERROR(SCE_GXM_ERROR_WITHIN_SCENE);
+    }
+
+    if (emuenv.renderer && emuenv.renderer->renderer_trace_gxm_state) {
+        const uint32_t rt_width = renderTarget ? renderTarget->width : 0;
+        const uint32_t rt_height = renderTarget ? renderTarget->height : 0;
+        const uint32_t color_width = colorSurface ? colorSurface->width : 0;
+        const uint32_t color_height = colorSurface ? colorSurface->height : 0;
+        const uint32_t color_stride = colorSurface ? colorSurface->strideInPixels : 0;
+        const uint32_t color_format = colorSurface ? static_cast<uint32_t>(colorSurface->colorFormat) : 0;
+        const uint32_t color_type = colorSurface ? static_cast<uint32_t>(colorSurface->surfaceType) : 0;
+        const uint32_t color_address = colorSurface ? colorSurface->data.address() : 0;
+        const bool depth_same_pointer = loadDepthStencilSurface && storeDepthStencilSurface && (loadDepthStencilSurface == storeDepthStencilSurface);
+        const bool depth_same_address = loadDepthStencilSurface && storeDepthStencilSurface
+            && (loadDepthStencilSurface->depth_data.address() == storeDepthStencilSurface->depth_data.address())
+            && (loadDepthStencilSurface->stencil_data.address() == storeDepthStencilSurface->stencil_data.address());
+
+        LOG_INFO("ThorRenderTrace BeginSceneEx context=0x{:X} flags=0x{:08X} rt={}x{} color_ptr=0x{:X} color_addr=0x{:08X} color={}x{} stride={} fmt=0x{:08X} type=0x{:08X} load_store_same_ptr={} load_store_same_addr={}",
+            reinterpret_cast<std::uintptr_t>(immediateContext),
+            flags,
+            rt_width,
+            rt_height,
+            reinterpret_cast<std::uintptr_t>(colorSurface),
+            color_address,
+            color_width,
+            color_height,
+            color_stride,
+            color_format,
+            color_type,
+            depth_same_pointer,
+            depth_same_address);
+        thor_trace_begin_scene_ex_surface("load_ds", loadDepthStencilSurface);
+        thor_trace_begin_scene_ex_surface("store_ds", storeDepthStencilSurface);
     }
 
     STUBBED("Using sceGxmBeginScene");
