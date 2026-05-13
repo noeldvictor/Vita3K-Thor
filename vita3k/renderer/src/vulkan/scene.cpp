@@ -1249,8 +1249,8 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     const bool renderer_debug_skip = renderer_debug_range_matches(renderer_debug.skip, context.frame_timestamp, context.scene_timestamp, debug_rt_width, debug_rt_height, hash_text_v, hash_text_f, debug_draw_index);
     const bool renderer_debug_stop_after = renderer_debug_stop_after_matches(renderer_debug.stop_after, context.frame_timestamp, context.scene_timestamp, debug_rt_width, debug_rt_height, hash_text_v, hash_text_f, debug_draw_index);
     const bool renderer_debug_dump = renderer_debug_range_matches(renderer_debug.dump, context.frame_timestamp, context.scene_timestamp, debug_rt_width, debug_rt_height, hash_text_v, hash_text_f, debug_draw_index);
-    if (renderer_debug_skip || renderer_debug_stop_after) {
-        const char *reason = renderer_debug_skip ? "skip" : "stop-after";
+    if (renderer_debug_skip || context.debug_scene_stop_after_active) {
+        const char *reason = renderer_debug_skip ? "skip" : "stopped-after";
         if (context.state.renderer_trace_gxm_state || renderer_debug.trace) {
             LOG_INFO("ThorRenderDebug {} frame={} scene={} rt={}x{} draw={} prim={} index_fmt={} count={} instances={} vhash={} fhash={}",
                 reason,
@@ -1489,6 +1489,20 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     }
 
     context.render_cmd.drawIndexed(count, instance_count, 0, 0, 0);
+
+    if (renderer_debug_stop_after) {
+        context.debug_scene_stop_after_active = true;
+        if (context.state.renderer_trace_gxm_state || renderer_debug.trace) {
+            LOG_INFO("ThorRenderDebug stop-after armed frame={} scene={} rt={}x{} draw={} vhash={} fhash={}",
+                context.frame_timestamp,
+                context.scene_timestamp,
+                debug_rt_width,
+                debug_rt_height,
+                debug_draw_index,
+                hash_text_v,
+                hash_text_f);
+        }
+    }
 
     context.vertex_uniform_storage_allocated = false;
     context.fragment_uniform_storage_allocated = false;

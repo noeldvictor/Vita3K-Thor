@@ -235,6 +235,7 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.current_color_base_image = framebuffer.base_image;
 
     context.debug_scene_draw_count = 0;
+    context.debug_scene_stop_after_active = false;
     if (state.renderer_trace_gxm_state) {
         const uint32_t color_addr = color_surface_fin ? color_surface_fin->data.address() : 0;
         const uint32_t color_format = color_surface_fin ? static_cast<uint32_t>(color_surface_fin->colorFormat) : 0;

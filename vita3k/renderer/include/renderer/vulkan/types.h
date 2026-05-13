@@ -309,6 +309,7 @@ struct VKContext : public renderer::Context {
     bool refresh_pipeline = false;
     bool is_first_scene_draw = false;
     uint32_t debug_scene_draw_count = 0;
+    bool debug_scene_stop_after_active = false;
     // command buffer used to record the current scene
     vk::CommandBuffer render_cmd{};
     // command buffer used for commands that need to be executed before render_cmd (mostly because they can't be done during a render pass)
