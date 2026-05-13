@@ -107,6 +107,14 @@ The Android-specific blocker was different: Vulkan screen-present shaders had to
 
 This screenshot is from a local legally owned test copy. No game content, firmware, license files, or commercial content is included in this repository.
 
+## Dead Or Alive Xtreme 3 Venus Loads On Thor
+
+![Dead or Alive Xtreme 3 Venus running on Vita3K-Thor on AYN Thor](docs/screenshots/doa-venus-thor-android-working-20260513_141340.png)
+
+Dead or Alive Xtreme 3 Venus (`PCSH00250`) now reaches gameplay rendering on AYN Thor from direct ZIP cartridge mode. The key emulator-side fix was normalizing `app0:.` archive paths so games that probe the cartridge root can find their own files. The Android build also carries the same SurfaceFlinger opaque-present fix used for UPPERS, so valid frames are not composited as black on Thor.
+
+Current follow-up: the game exposed a savedata dialog error (`0x80100C06`) after rendering was fixed. This fork now has stricter AppUtil savedata writes and slot search behavior so save directories, slot metadata, and nested save files behave more predictably on Android.
+
 ## Build Locally
 
 This fork is currently aimed at Android/AYN Thor APK experiments:
