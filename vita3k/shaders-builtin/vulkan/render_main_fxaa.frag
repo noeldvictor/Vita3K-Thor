@@ -6,7 +6,7 @@
 layout(location = 0) in vec2 uv_frag;
 layout(binding = 0) uniform sampler2D fb;
 
-layout(location = 0) out vec3 color_frag;
+layout(location = 0) out vec4 color_frag;
 
 layout ( push_constant ) uniform constants {
     vec2 inv_frame_size;
@@ -59,8 +59,8 @@ void main( void ) {
         float lumaB = dot(rgbB, luma);
 
         if((lumaB < lumaMin) || (lumaB > lumaMax)){
-                color_frag.xyz=rgbA;
+                color_frag=vec4(rgbA, 1.0);
         }else{
-                color_frag.xyz=rgbB;
+                color_frag=vec4(rgbB, 1.0);
         }
 }
