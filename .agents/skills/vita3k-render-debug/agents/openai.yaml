@@ -1,0 +1,6 @@
+interface:
+  display_name: "Vita3K Render Debug"
+  short_description: "Fast renderer bug isolation loop"
+  default_prompt: "Use $vita3k-render-debug to isolate and fix a Vita3K Thor rendering regression with burst screenshots, surface dumps, SQLite attempt checks, and Windows-first/Android-final verification."
+policy:
+  allow_implicit_invocation: true

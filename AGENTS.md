@@ -25,6 +25,8 @@ These notes are for work in Vita3K Thor Experiment, a personal Android-focused V
 
 - `reports/debug_knowledge.sqlite` is the canonical report and RAG store for emulator/game debugging. Markdown reports are legacy context or human exports only; do not create new durable Markdown reports by default.
 - Use the committed skill `.agents/skills/vita3k-debug-rag/SKILL.md` for emulator/game issue work. It encodes the expected SQLite-first, Windows-first, Android-final workflow.
+- Use the committed skill `.agents/skills/vita3k-render-debug/SKILL.md` for renderer corruption, flicker, black terrain, missing geometry, surface dumps, draw isolation, and Windows-first/Android-final graphics fixes.
+- Use the committed skill `.agents/skills/vita3k-input-automation/SKILL.md` for repeatable Windows and Thor button presses during repro setup.
 - Use `tools/debug_knowledge.py` before code edits on any recurring bug:
 
 ```powershell
@@ -38,7 +40,7 @@ python tools/debug_knowledge.py search "doa venus black terrain android 564cd0" 
 - Prefer updating an existing attempt fingerprint over adding a near-duplicate. If an old failed attempt becomes valid because new evidence changes the conditions, record a new attempt that `--supersedes` the old attempt and says exactly what changed.
 - Record observations, decisions, fixes, tests, regression risks, and commit hashes in SQLite. Keep raw screenshots, burst captures, logcat dumps, profile dumps, save experiments, and shader dumps under ignored `tmp/` unless explicitly promoted.
 - Local issue ROMs live under ignored `roms/issues/<TITLEID>/`; regression ROMs live under ignored `roms/regression/<TITLEID>/`. Use `tools/sync_issue_rom.ps1` to copy or pull games there as needed. Never commit `roms/`.
-- Current first active case is DOA Venus (`PCSH00250`) renderer corruption. Pause renderer chasing until the SQLite/debug harness is available and the case has a current observation in the DB.
+- Current first active case is DOA Venus (`PCSH00250`) renderer corruption. Use the SQLite attempt ledger and `vita3k-render-debug` workflow before every new renderer hypothesis so we do not repeat stale guesses.
 
 ## Input Automation
 
@@ -175,6 +177,7 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 
 ## Graphics Debugging And Profiling
 
+- For renderer bugs, invoke the repo skill `.agents/skills/vita3k-render-debug/SKILL.md` before patching. The expected loop is SQLite search, attempt check, burst capture, pause/stabilize when possible, live draw/surface isolation, Windows proof, Android/Thor proof, SQLite attempt entry, then commit/push.
 - Always confirm the foreground Android package before attributing a screenshot to Vita3K. `adb shell dumpsys window` should identify whether the visible issue belongs to `org.vita3k.emulator.debug`, Cocoon, RPCSX, or another frontend.
 - AYN Thor can report separate focus lines per display; Vita3K may be running on the second screen while the launcher remains focused on another display. Prefer the focus line and screenshot that include `org.vita3k.emulator.debug` before declaring a capture wrong.
 - The default fix loop for serious renderer/game failures is Windows first, Android second. First reproduce the game or scene on Windows with the same ZIP/cartridge path, save data, shader logs, and Vulkan trace controls; fix emulator-core, shader translator, CPU, module, or VFS issues there because rebuild/restart cycles are faster and Ghidra/static analysis is practical. Only after the Windows/core behavior is understood should Android/Thor-specific issues be chased, such as Adreno/Turnip behavior, SurfaceFlinger presentation, SurfaceView alpha/composition, Android input routing, and APK asset packaging.
