@@ -231,6 +231,8 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
             info.last_frame_rendered = context->frame_timestamp;
 
             if (vk_format == info.texture.format) {
+                info.multisample_mode = target ? target->multisample_mode : SCE_GXM_MULTISAMPLE_NONE;
+                info.downscale = color->downscale;
                 return { info.texture.view, &info.texture };
             } else {
                 // using both srgb/linear
@@ -245,6 +247,8 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
                     info.alternate_view = state.device.createImageView(view_info);
                 }
 
+                info.multisample_mode = target ? target->multisample_mode : SCE_GXM_MULTISAMPLE_NONE;
+                info.downscale = color->downscale;
                 return { info.alternate_view, &info.texture };
             }
         }
@@ -272,6 +276,8 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
     info_added.total_bytes = total_surface_size;
     info_added.format = base_format;
     info_added.tiling = tiling;
+    info_added.multisample_mode = target ? target->multisample_mode : SCE_GXM_MULTISAMPLE_NONE;
+    info_added.downscale = color->downscale;
     // only remember the swizzle here, it will be useful if we get to present or sample from this image with a different swizzle
     info_added.swizzle = color::translate_swizzle(color->colorFormat);
 
@@ -488,8 +494,16 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
 
     const vk::ImageView color_handle_view = reinterpret_cast<VKContext *>(state.context)->current_color_view;
     const bool is_same_image = (color_handle_view == info.texture.view) || (color_handle_view == info.alternate_view);
+    const bool force_copied_msaa_u2f_surface = state.is_adreno_turnip
+        && base_format == info.format
+        && info.format == SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10
+        && info.multisample_mode != SCE_GXM_MULTISAMPLE_NONE
+        && info.downscale;
 
-    if (state.features.use_texture_viewport && base_format == info.format) {
+    // Sampling the active color attachment as a normal texture is undefined feedback.
+    // Keep the older casted-copy safety path for same-image reads even when the
+    // viewport path could address the source directly.
+    if (state.features.use_texture_viewport && base_format == info.format && !is_same_image && !force_copied_msaa_u2f_surface) {
         // use a texture viewport
         *texture_viewport = {
             .ratio = {
@@ -536,7 +550,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         };
     }
 
-    if (is_same_image || (start_sourced_line != 0) || (start_x != 0) || (info.width != width) || (info.height != height) || (info.format != base_format)) {
+    if (force_copied_msaa_u2f_surface || is_same_image || (start_sourced_line != 0) || (start_x != 0) || (info.width != width) || (info.height != height) || (info.format != base_format)) {
         const uint64_t scene_timestamp = reinterpret_cast<VKContext *>(state.context)->scene_timestamp;
 
         std::vector<CastedTexture> &casted_vec = info.casted_textures;

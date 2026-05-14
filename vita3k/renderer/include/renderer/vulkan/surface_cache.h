@@ -84,6 +84,8 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
 
     SceGxmColorBaseFormat format;
     vk::ComponentMapping swizzle;
+    SceGxmMultisampleMode multisample_mode = SCE_GXM_MULTISAMPLE_NONE;
+    bool downscale = false;
 
     Ptr<void> data;
     std::vector<CastedTexture> casted_textures;
