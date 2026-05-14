@@ -108,13 +108,17 @@ The Android-specific blocker was different: Vulkan screen-present shaders had to
 
 This screenshot is from a local legally owned test copy. No game content, firmware, license files, or commercial content is included in this repository.
 
-## Dead Or Alive Xtreme 3 Venus Loads On Thor
+## Dead Or Alive Xtreme 3 Venus Runs On Thor
 
-![Dead or Alive Xtreme 3 Venus running on Vita3K-Thor on AYN Thor](docs/screenshots/doa-venus-thor-android-working-20260513_141340.png)
+![Dead or Alive Xtreme 3 Venus rendering correctly on Vita3K-Thor on AYN Thor](docs/screenshots/doa-venus-thor-render-fixed-20260514_120346.png)
 
-Dead or Alive Xtreme 3 Venus (`PCSH00250`) now reaches gameplay rendering on AYN Thor from direct ZIP cartridge mode. The key emulator-side fix was normalizing `app0:.` archive paths so games that probe the cartridge root can find their own files. The Android build also carries the same SurfaceFlinger opaque-present fix used for UPPERS, so valid frames are not composited as black on Thor.
+Dead or Alive Xtreme 3 Venus (`PCSH00250`) now reaches gameplay rendering on AYN Thor from direct ZIP cartridge mode. This screenshot was captured from the connected Thor after the renderer fix.
 
-Current follow-up: the game exposed a savedata dialog error (`0x80100C06`) after rendering was fixed. This fork now has stricter AppUtil savedata writes and slot search behavior so save directories, slot metadata, and nested save files behave more predictably on Android.
+ELI5 version of the render fix: the game was changing tiny chunks of Vita memory right before the GPU used them. One of those chunks crossed the edge of Vita3K's watched memory area, so the emulator sometimes refreshed only part of the data. The GPU then drew with one half new data and one half stale data, which showed up as black scenes, broken island/beach rendering, magenta terrain, or flickering title screens.
+
+The fix makes Vita3K notice and refresh the whole chunk, including the guarded edge of that memory area, before Vulkan renders the frame. In plain English: the emulator now hands the GPU the complete current drawing instructions instead of a half-old, half-new set.
+
+This was verified Windows-first, then on AYN Thor Android with an 80-frame screenshot burst and a 45-second screen recording of the DOA title loop. The same Android build also keeps the earlier direct ZIP cartridge fixes and the SurfaceFlinger opaque-present fix used for UPPERS.
 
 ## Build Locally
 
