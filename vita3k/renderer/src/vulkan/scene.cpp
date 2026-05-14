@@ -1010,7 +1010,7 @@ static void log_renderer_debug_draw_dump(VKContext &context, MemState &mem, SceG
         context.record.depth_stencil_surface.depth_data.address(),
         context.record.depth_stencil_surface.stencil_data.address());
 
-    LOG_INFO("ThorRenderDump state frame={} scene={} draw={} depth_func={}/{} depth_write={}/{} stencil_func={}/{} cull={} two_sided={} vp_flat={} vp_flip={},{},{},{} z_offset={} z_scale={} writing_mask={}",
+    LOG_INFO("ThorRenderDump state frame={} scene={} draw={} depth_func={}/{} depth_write={}/{} depth_bias={}/{} stencil_func={}/{} cull={} two_sided={} vp_flat={} vp_flip={},{},{},{} z_offset={} z_scale={} writing_mask={}",
         context.frame_timestamp,
         context.scene_timestamp,
         debug_draw_index,
@@ -1018,6 +1018,8 @@ static void log_renderer_debug_draw_dump(VKContext &context, MemState &mem, SceG
         static_cast<uint32_t>(context.record.back_depth_func),
         static_cast<uint32_t>(context.record.front_depth_write_mode),
         static_cast<uint32_t>(context.record.back_depth_write_mode),
+        context.record.depth_bias_unit,
+        context.record.depth_bias_slope,
         static_cast<uint32_t>(context.record.front_stencil_state_op.func),
         static_cast<uint32_t>(context.record.back_stencil_state_op.func),
         static_cast<uint32_t>(context.record.cull_mode),
@@ -1330,7 +1332,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
             else if (!debug_has_msaa && debug_has_downscale)
                 debug_frag_res_multiplier /= 2;
 
-            LOG_INFO("ThorRenderTrace draw frame={} scene={} draw={} prim={} index_fmt={} count={} instances={} pipeline={} framebuffer_fetch={} vhash={} fhash={} vtex={} ftex={} vbufs={} fbufs={} depth_func={}/{} depth_write={}/{} stencil_func={}/{} cull={} two_sided={} vp_flat={} z_offset={} z_scale={} writing_mask={} viewport={},{},{},{} scissor={},{},{},{} frag_res_multiplier={} color_downscale={}",
+            LOG_INFO("ThorRenderTrace draw frame={} scene={} draw={} prim={} index_fmt={} count={} instances={} pipeline={} framebuffer_fetch={} vhash={} fhash={} vtex={} ftex={} vbufs={} fbufs={} depth_func={}/{} depth_write={}/{} depth_bias={}/{} stencil_func={}/{} cull={} two_sided={} vp_flat={} z_offset={} z_scale={} writing_mask={} viewport={},{},{},{} scissor={},{},{},{} frag_res_multiplier={} color_downscale={}",
                 context.frame_timestamp,
                 context.scene_timestamp,
                 debug_draw_index,
@@ -1350,6 +1352,8 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
                 static_cast<uint32_t>(context.record.back_depth_func),
                 static_cast<uint32_t>(context.record.front_depth_write_mode),
                 static_cast<uint32_t>(context.record.back_depth_write_mode),
+                context.record.depth_bias_unit,
+                context.record.depth_bias_slope,
                 static_cast<uint32_t>(context.record.front_stencil_state_op.func),
                 static_cast<uint32_t>(context.record.back_stencil_state_op.func),
                 static_cast<uint32_t>(context.record.cull_mode),

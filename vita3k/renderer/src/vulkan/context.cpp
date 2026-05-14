@@ -27,6 +27,7 @@
 #include <util/log.h>
 #include <util/overloaded.h>
 
+#include <array>
 #include <cstdlib>
 #include <string>
 
@@ -60,6 +61,14 @@ static bool thor_debug_force_depth_clear(const SceGxmDepthStencilSurface *surfac
     return fmt::format("{:08X}", surface->depth_data.address()).rfind(prefix, 0) == 0;
 }
 
+static bool thor_debug_force_color_clear(const SceGxmColorSurface *surface) {
+    const std::string prefix = thor_debug_setting("VITA3K_RENDER_FORCE_COLOR_CLEAR_ADDR", "debug.vita3k.render_force_color_clear_addr");
+    if (prefix.empty() || surface == nullptr || surface->data.address() == 0)
+        return false;
+
+    return fmt::format("{:08X}", surface->data.address()).rfind(prefix, 0) == 0;
+}
+
 static float thor_debug_depth_clear_value(float default_value) {
     const std::string value_text = thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_CLEAR_VALUE", "debug.vita3k.render_force_depth_clear_value");
     if (value_text.empty())
@@ -71,6 +80,25 @@ static float thor_debug_depth_clear_value(float default_value) {
         return default_value;
 
     return value;
+}
+
+static vk::ClearColorValue thor_debug_color_clear_value() {
+    std::array<float, 4> values{ 0.0f, 0.0f, 0.0f, 0.0f };
+    const std::string value_text = thor_debug_setting("VITA3K_RENDER_FORCE_COLOR_CLEAR_VALUE", "debug.vita3k.render_force_color_clear_value");
+    if (value_text.empty())
+        return vk::ClearColorValue{ values };
+
+    const char *cursor = value_text.c_str();
+    for (float &component : values) {
+        char *end = nullptr;
+        const float parsed = std::strtof(cursor, &end);
+        if (end == cursor)
+            break;
+        component = parsed;
+        cursor = (*end == ',' || *end == ' ') ? end + 1 : end;
+    }
+
+    return vk::ClearColorValue{ values };
 }
 
 void VKContext::wait_thread_function(const MemState &mem) {
@@ -454,6 +482,20 @@ void VKContext::start_render_pass(bool create_descriptor_set) {
     };
     curr_renderpass_info.setClearValues(curr_clear_values);
     render_cmd.beginRenderPass(curr_renderpass_info, vk::SubpassContents::eInline);
+
+    if (thor_debug_force_color_clear(&record.color_surface)) {
+        vk::ClearAttachment clear_attachment{
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .colorAttachment = 0,
+            .clearValue = { .color = thor_debug_color_clear_value() }
+        };
+        vk::ClearRect clear_rect{
+            .rect = curr_renderpass_info.renderArea,
+            .baseArrayLayer = 0,
+            .layerCount = 1
+        };
+        render_cmd.clearAttachments(clear_attachment, clear_rect);
+    }
 
     // set the renderpass info ready in case we need to switch between classic and framebuffer fetch usage
     curr_renderpass_info.setClearValues(nullptr);

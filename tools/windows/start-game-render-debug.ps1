@@ -6,6 +6,10 @@ param(
     [string]$Skip = "",
     [string]$StopAfter = "",
     [string]$Dump = "",
+    [string]$DumpSurfaceAddr = "",
+    [string]$DumpSurfaceDir = "",
+    [int]$DumpSurfaceLimit = 24,
+    [int]$DumpSurfaceEvery = 1,
     [string]$ControlFile = "",
     [ValidateSet("Vulkan", "OpenGL")]
     [string]$BackendRenderer = "Vulkan",
@@ -121,6 +125,22 @@ if ($Dump) {
     Remove-Item Env:\VITA3K_RENDER_DUMP -ErrorAction SilentlyContinue
 }
 
+if ($DumpSurfaceAddr) {
+    if (-not $DumpSurfaceDir) {
+        $DumpSurfaceDir = Join-Path $debugRoot "surface-dumps"
+    }
+    New-Item -ItemType Directory -Force -Path $DumpSurfaceDir | Out-Null
+    $env:VITA3K_RENDER_DUMP_SURFACE_ADDR = $DumpSurfaceAddr
+    $env:VITA3K_RENDER_DUMP_SURFACE_DIR = $DumpSurfaceDir
+    $env:VITA3K_RENDER_DUMP_SURFACE_LIMIT = [string]$DumpSurfaceLimit
+    $env:VITA3K_RENDER_DUMP_SURFACE_EVERY = [string]([Math]::Max(1, $DumpSurfaceEvery))
+} else {
+    Remove-Item Env:\VITA3K_RENDER_DUMP_SURFACE_ADDR -ErrorAction SilentlyContinue
+    Remove-Item Env:\VITA3K_RENDER_DUMP_SURFACE_DIR -ErrorAction SilentlyContinue
+    Remove-Item Env:\VITA3K_RENDER_DUMP_SURFACE_LIMIT -ErrorAction SilentlyContinue
+    Remove-Item Env:\VITA3K_RENDER_DUMP_SURFACE_EVERY -ErrorAction SilentlyContinue
+}
+
 $argumentLine = "--config-location `"$LaunchConfigPath`" --cartridge --backend-renderer $BackendRenderer --log-level $LogLevel --thor-render-trace `"$GameZip`""
 
 Write-Host "Vita3K Windows render debug:"
@@ -137,6 +157,8 @@ Write-Host "  labels:     $(-not $NoLabels)"
 Write-Host "  skip:       $Skip"
 Write-Host "  stopAfter:  $StopAfter"
 Write-Host "  dump:       $Dump"
+Write-Host "  surface:    $DumpSurfaceAddr"
+Write-Host "  surfaceDir: $DumpSurfaceDir"
 
 if (-not $NoStart) {
     Start-Process -FilePath $ExePath -ArgumentList $argumentLine -WorkingDirectory (Split-Path $ExePath)

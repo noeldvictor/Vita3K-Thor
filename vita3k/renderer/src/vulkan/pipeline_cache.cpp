@@ -425,6 +425,13 @@ static bool thor_debug_hash_prefix_matches(const Sha256Hash &hash, const std::st
     return hash_text.rfind(prefix, 0) == 0;
 }
 
+static bool thor_debug_hash_prefix_or_all_matches(const Sha256Hash &hash, const std::string &value) {
+    if (value == "1" || value == "all" || value == "ALL")
+        return true;
+
+    return thor_debug_hash_prefix_matches(hash, value);
+}
+
 vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmProgram *program, const Sha256Hash &hash, bool is_vertex, bool maskupdate, MemState &mem, const shader::Hints &hints, bool is_srgb) {
     if (maskupdate)
         LOG_WARN_ONCE("Mask not implemented in the vulkan renderer!");
@@ -812,15 +819,20 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     const bool has_color_surface = static_cast<bool>(record.color_surface.data);
     const bool use_shader_interlock = has_color_surface && state.features.support_shader_interlock && gxm_fragment_shader->is_frag_color_used();
 
+    const std::string thor_disable_depth_bias_prefix = thor_debug_setting("VITA3K_RENDER_DISABLE_DEPTH_BIAS_FHASH", "debug.vita3k.render_disable_depth_bias_fhash");
+    const bool thor_disable_depth_bias = thor_debug_hash_prefix_matches(fragment_program.hash, thor_disable_depth_bias_prefix);
+    const std::string thor_force_cull_none_value = thor_debug_setting("VITA3K_RENDER_FORCE_CULL_NONE_FHASH", "debug.vita3k.render_force_cull_none_fhash");
+    const bool thor_force_cull_none = thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_force_cull_none_value);
+
     const vk::PipelineRasterizationStateCreateInfo rasterizer{
         // GXM clips primitives outside the depth range; enabling Vulkan depth clamp globally
         // can turn clipped scene geometry into large foreground slabs.
         .depthClampEnable = VK_FALSE,
         .polygonMode = translate_polygon_mode(record.front_polygon_mode),
-        .cullMode = translate_cull_mode(record.cull_mode),
+        .cullMode = thor_force_cull_none ? vk::CullModeFlagBits::eNone : translate_cull_mode(record.cull_mode),
         // front face is always counter clockwise
         .frontFace = vk::FrontFace::eCounterClockwise,
-        .depthBiasEnable = VK_TRUE,
+        .depthBiasEnable = thor_disable_depth_bias ? VK_FALSE : VK_TRUE,
         .lineWidth = 1.0f
     };
     const vk::PipelineMultisampleStateCreateInfo multisampling{
@@ -923,6 +935,12 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     }
     if (thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_LEQUAL_FHASH", "debug.vita3k.render_force_depth_lequal_fhash"))) {
         key ^= 0xD75CEB1DCE9F4C2BULL;
+    }
+    if (thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_DISABLE_DEPTH_BIAS_FHASH", "debug.vita3k.render_disable_depth_bias_fhash"))) {
+        key ^= 0xD1A5B1A5D15AB1E5ULL;
+    }
+    if (thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FORCE_CULL_NONE_FHASH", "debug.vita3k.render_force_cull_none_fhash"))) {
+        key ^= 0xC011F0CE113A11C5ULL;
     }
 
     // add the hash of the attribute and stream layout

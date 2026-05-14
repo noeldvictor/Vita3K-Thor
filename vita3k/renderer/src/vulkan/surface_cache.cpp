@@ -21,13 +21,31 @@
 #include <renderer/vulkan/gxm_to_vulkan.h>
 #include <renderer/vulkan/state.h>
 #include <renderer/vulkan/types.h>
+#include <stb_image_write.h>
+#include <util/float_to_half.h>
 #include <vkutil/vkutil.h>
 
 #include <vulkan/vulkan_format_traits.hpp>
 
+#include <fmt/format.h>
+
 #include <util/align.h>
+#include <util/fs.h>
 #include <util/log.h>
 #include <util/vector_utils.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 
 extern "C" {
 #include <libswscale/swscale.h>
@@ -58,6 +76,201 @@ static bool format_need_additional_memory(SceGxmColorBaseFormat format) {
 }
 
 namespace renderer::vulkan {
+
+struct SurfaceDumpDebugConfig {
+    bool enabled = false;
+    Address address = 0;
+    uint32_t limit = 24;
+    uint32_t every_scene = 1;
+    fs::path directory = fs_utils::utf8_to_path("tmp/vita3k-surface-dumps");
+};
+
+static bool surface_dump_debug_disabled(std::string_view value) {
+    return value.empty() || value == "0" || value == "false" || value == "False" || value == "FALSE" || value == "off" || value == "OFF" || value == "no" || value == "NO";
+}
+
+static std::string surface_dump_debug_setting(const char *env_name, const char *android_prop_name) {
+    const char *env_value = std::getenv(env_name);
+    if (env_value != nullptr && env_value[0] != '\0')
+        return env_value;
+
+#ifdef __ANDROID__
+    char prop_value[PROP_VALUE_MAX] = {};
+    if (__system_property_get(android_prop_name, prop_value) > 0)
+        return prop_value;
+#else
+    (void)android_prop_name;
+#endif
+
+    return {};
+}
+
+static bool parse_surface_dump_address(std::string_view text, Address &address) {
+    if (surface_dump_debug_disabled(text))
+        return false;
+
+    std::string value(text);
+    if (value.rfind("0x", 0) == 0 || value.rfind("0X", 0) == 0)
+        value.erase(0, 2);
+
+    char *end = nullptr;
+    const unsigned long parsed = std::strtoul(value.c_str(), &end, 16);
+    if (end == value.c_str() || (end != nullptr && *end != '\0'))
+        return false;
+
+    address = static_cast<Address>(parsed);
+    return true;
+}
+
+static uint32_t parse_surface_dump_u32(std::string_view text, uint32_t fallback) {
+    if (text.empty())
+        return fallback;
+
+    const std::string value(text);
+    char *end = nullptr;
+    const unsigned long parsed = std::strtoul(value.c_str(), &end, 10);
+    if (end == nullptr || *end != '\0')
+        return fallback;
+
+    return static_cast<uint32_t>(std::min<unsigned long>(parsed, std::numeric_limits<uint32_t>::max()));
+}
+
+static SurfaceDumpDebugConfig read_surface_dump_debug_config() {
+    SurfaceDumpDebugConfig cfg;
+    const std::string address_text = surface_dump_debug_setting("VITA3K_RENDER_DUMP_SURFACE_ADDR", "debug.vita3k.render_dump_surface_addr");
+    cfg.enabled = parse_surface_dump_address(address_text, cfg.address);
+    if (!cfg.enabled)
+        return cfg;
+
+    cfg.limit = std::max<uint32_t>(1, parse_surface_dump_u32(surface_dump_debug_setting("VITA3K_RENDER_DUMP_SURFACE_LIMIT", "debug.vita3k.render_dump_surface_limit"), cfg.limit));
+    cfg.every_scene = std::max<uint32_t>(1, parse_surface_dump_u32(surface_dump_debug_setting("VITA3K_RENDER_DUMP_SURFACE_EVERY", "debug.vita3k.render_dump_surface_every"), cfg.every_scene));
+
+    const std::string directory = surface_dump_debug_setting("VITA3K_RENDER_DUMP_SURFACE_DIR", "debug.vita3k.render_dump_surface_dir");
+    if (!directory.empty())
+        cfg.directory = fs_utils::utf8_to_path(directory);
+
+    LOG_INFO("ThorRenderSurfaceDump enabled addr=0x{:08X} limit={} every_scene={} dir={}",
+        cfg.address, cfg.limit, cfg.every_scene, cfg.directory);
+    return cfg;
+}
+
+static const SurfaceDumpDebugConfig &surface_dump_debug_config() {
+    static const SurfaceDumpDebugConfig cfg = read_surface_dump_debug_config();
+    return cfg;
+}
+
+static uint8_t surface_dump_float_to_u8(float value) {
+    if (!std::isfinite(value))
+        return 0;
+
+    value = std::clamp(value, 0.0f, 1.0f);
+    return static_cast<uint8_t>(std::lround(value * 255.0f));
+}
+
+static bool convert_debug_surface_to_rgba8(vk::Format format, const void *source, uint32_t width, uint32_t height, std::vector<uint8_t> &rgba) {
+    rgba.resize(static_cast<size_t>(width) * height * 4);
+
+    if (format == vk::Format::eR16G16B16A16Sfloat) {
+        const uint16_t *src = static_cast<const uint16_t *>(source);
+        for (size_t pixel = 0, out = 0; pixel < static_cast<size_t>(width) * height; ++pixel, out += 4) {
+            rgba[out + 0] = surface_dump_float_to_u8(util::decode_flt16<float>(src[pixel * 4 + 0]));
+            rgba[out + 1] = surface_dump_float_to_u8(util::decode_flt16<float>(src[pixel * 4 + 1]));
+            rgba[out + 2] = surface_dump_float_to_u8(util::decode_flt16<float>(src[pixel * 4 + 2]));
+            rgba[out + 3] = surface_dump_float_to_u8(util::decode_flt16<float>(src[pixel * 4 + 3]));
+        }
+        return true;
+    }
+
+    if (format == vk::Format::eR8G8B8A8Unorm || format == vk::Format::eR8G8B8A8Srgb) {
+        std::memcpy(rgba.data(), source, rgba.size());
+        return true;
+    }
+
+    if (format == vk::Format::eB8G8R8A8Unorm || format == vk::Format::eB8G8R8A8Srgb) {
+        const uint8_t *src = static_cast<const uint8_t *>(source);
+        for (size_t pixel = 0, out = 0; pixel < static_cast<size_t>(width) * height; ++pixel, out += 4) {
+            rgba[out + 0] = src[out + 2];
+            rgba[out + 1] = src[out + 1];
+            rgba[out + 2] = src[out + 0];
+            rgba[out + 3] = src[out + 3];
+        }
+        return true;
+    }
+
+    return false;
+}
+
+static void dump_debug_color_surface(VKState &state, const ColorSurfaceCacheInfo &info, Address surface_address, uint64_t scene_timestamp, std::string_view label) {
+    const SurfaceDumpDebugConfig &cfg = surface_dump_debug_config();
+    if (!cfg.enabled || cfg.address != surface_address)
+        return;
+
+    static uint32_t dumped_count = 0;
+    static uint64_t last_dumped_scene = std::numeric_limits<uint64_t>::max();
+    if (dumped_count >= cfg.limit || last_dumped_scene == scene_timestamp || (scene_timestamp % cfg.every_scene) != 0)
+        return;
+
+    const uint32_t bytes_per_pixel = vk::blockSize(info.texture.format) / vk::texelsPerBlock(info.texture.format);
+    if (bytes_per_pixel == 0) {
+        LOG_WARN("ThorRenderSurfaceDump skipped addr=0x{:08X} scene={} reason=zero-bpp format={}", surface_address, scene_timestamp, vk::to_string(info.texture.format));
+        return;
+    }
+
+    std::vector<uint8_t> rgba;
+    vkutil::Buffer temp_buffer(static_cast<size_t>(info.width) * info.height * bytes_per_pixel);
+    temp_buffer.init_buffer(vk::BufferUsageFlagBits::eTransferDst, vkutil::vma_mapped_alloc);
+
+    vk::CommandBuffer cmd_buffer = vkutil::create_single_time_command(state.device, state.general_command_pool);
+    vk::ImageMemoryBarrier copy_src_barrier{
+        .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+        .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+        .oldLayout = vk::ImageLayout::eGeneral,
+        .newLayout = vk::ImageLayout::eGeneral,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = info.texture.image,
+        .subresourceRange = vkutil::color_subresource_range
+    };
+    cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::PipelineStageFlagBits::eTransfer,
+        vk::DependencyFlags(), {}, {}, copy_src_barrier);
+
+    vk::BufferImageCopy image_copy{
+        .bufferOffset = 0,
+        .bufferRowLength = info.width,
+        .bufferImageHeight = info.height,
+        .imageSubresource = vkutil::color_subresource_layer,
+        .imageOffset = { 0, 0, 0 },
+        .imageExtent = { info.width, info.height, 1 }
+    };
+    cmd_buffer.copyImageToBuffer(info.texture.image, vk::ImageLayout::eGeneral, temp_buffer.buffer, image_copy);
+
+    vkutil::end_single_time_command(state.device, state.general_queue, state.general_command_pool, cmd_buffer);
+
+    if (!convert_debug_surface_to_rgba8(info.texture.format, temp_buffer.mapped_data, info.width, info.height, rgba)) {
+        LOG_WARN("ThorRenderSurfaceDump skipped addr=0x{:08X} scene={} reason=unsupported-format format={}", surface_address, scene_timestamp, vk::to_string(info.texture.format));
+        return;
+    }
+
+    boost::system::error_code ec;
+    fs::create_directories(cfg.directory, ec);
+    if (ec) {
+        LOG_WARN("ThorRenderSurfaceDump failed addr=0x{:08X} scene={} reason=create-dir path={} error={}", surface_address, scene_timestamp, cfg.directory, ec.message());
+        return;
+    }
+
+    const fs::path filename = cfg.directory / fmt::format("surface_{:08X}_scene_{:06}_{}_{}x{}.png",
+                                                   surface_address, scene_timestamp, label, info.width, info.height);
+    const int result = stbi_write_png(fs_utils::path_to_utf8(filename).c_str(), info.width, info.height, 4, rgba.data(), info.width * 4);
+    if (result != 1) {
+        LOG_WARN("ThorRenderSurfaceDump failed addr=0x{:08X} scene={} reason=write-png path={}", surface_address, scene_timestamp, filename);
+        return;
+    }
+
+    last_dumped_scene = scene_timestamp;
+    ++dumped_count;
+    LOG_INFO("ThorRenderSurfaceDump wrote addr=0x{:08X} scene={} count={}/{} path={}",
+        surface_address, scene_timestamp, dumped_count, cfg.limit, filename);
+}
 
 static void protect_surface(MemState &mem, ColorSurfaceCacheInfo &info) {
     const bool trap_reads = (info.tiling == SurfaceTiling::Linear
@@ -491,11 +704,11 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
 
     // We should be able to use this texture, so set it as mru
     color_surface_queue.set_as_mru(&info);
+    dump_debug_color_surface(state, info, ite->first, scene_timestamp, "sample-src");
 
     const vk::ImageView color_handle_view = reinterpret_cast<VKContext *>(state.context)->current_color_view;
     const bool is_same_image = (color_handle_view == info.texture.view) || (color_handle_view == info.alternate_view);
-    const bool force_copied_msaa_u2f_surface = state.is_adreno_turnip
-        && base_format == info.format
+    const bool force_copied_msaa_downscaled_u2f_surface = base_format == info.format
         && info.format == SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10
         && info.multisample_mode != SCE_GXM_MULTISAMPLE_NONE
         && info.downscale;
@@ -503,7 +716,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
     // Sampling the active color attachment as a normal texture is undefined feedback.
     // Keep the older casted-copy safety path for same-image reads even when the
     // viewport path could address the source directly.
-    if (state.features.use_texture_viewport && base_format == info.format && !is_same_image && !force_copied_msaa_u2f_surface) {
+    if (state.features.use_texture_viewport && base_format == info.format && !is_same_image && !force_copied_msaa_downscaled_u2f_surface) {
         // use a texture viewport
         *texture_viewport = {
             .ratio = {
@@ -550,7 +763,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         };
     }
 
-    if (force_copied_msaa_u2f_surface || is_same_image || (start_sourced_line != 0) || (start_x != 0) || (info.width != width) || (info.height != height) || (info.format != base_format)) {
+    if (force_copied_msaa_downscaled_u2f_surface || is_same_image || (start_sourced_line != 0) || (start_x != 0) || (info.width != width) || (info.height != height) || (info.format != base_format)) {
         const uint64_t scene_timestamp = reinterpret_cast<VKContext *>(state.context)->scene_timestamp;
 
         std::vector<CastedTexture> &casted_vec = info.casted_textures;
@@ -619,6 +832,19 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
 
         casted->scene_timestamp = scene_timestamp;
 
+        vk::ImageMemoryBarrier copy_src_barrier{
+            .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+            .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+            .oldLayout = vk::ImageLayout::eGeneral,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = info.texture.image,
+            .subresourceRange = vkutil::color_subresource_range
+        };
+        cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::PipelineStageFlagBits::eTransfer,
+            vk::DependencyFlags(), {}, {}, copy_src_barrier);
+
         if (bytes_per_pixel_requested == bytes_per_pixel_in_store) {
             vk::ImageCopy image_copy{
                 .srcSubresource = vkutil::color_subresource_layer,
@@ -668,7 +894,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                 .setImageExtent({ width, height, 1 });
             cmd_buffer.copyBufferToImage(casted->transition_buffer.buffer, casted->texture.image, vk::ImageLayout::eTransferDstOptimal, copy_image_buffer);
         }
-        casted->texture.transition_to(cmd_buffer, vkutil::ImageLayout::ColorAttachmentReadWrite);
+        casted->texture.transition_to(cmd_buffer, vkutil::ImageLayout::SampledImage);
 
         if (trace_surface_texture) {
             LOG_INFO("ThorRenderTrace surface texture hit scene={} mode=casted-copy tex_addr=0x{:08X} tex={}x{} surface_addr=0x{:08X} surface={}x{} crop={}x{}+{},{} requested_fmt=0x{:08X} surface_fmt=0x{:08X}",
