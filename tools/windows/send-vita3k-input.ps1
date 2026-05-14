@@ -172,8 +172,10 @@ function Focus-Vita3KWindow {
     } | Sort-Object StartTime -Descending | Select-Object -First 1
 
     if (-not $proc) {
+        # Avoid focusing browser tabs or repo pages whose title happens to
+        # contain "Vita3K"; the emulator runtime title starts with Vita3K v.
         $proc = Get-Process | Where-Object {
-            $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "*$WindowTitle*"
+            $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "$WindowTitle v*"
         } | Sort-Object StartTime -Descending | Select-Object -First 1
     }
 

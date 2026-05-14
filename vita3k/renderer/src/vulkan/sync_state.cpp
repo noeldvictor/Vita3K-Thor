@@ -24,6 +24,8 @@
 
 #include <util/log.h>
 
+#include <algorithm>
+
 namespace renderer::vulkan {
 
 void sync_clipping(VKContext &context) {
@@ -69,6 +71,18 @@ void sync_clipping(VKContext &context) {
         context.scissor.extent.height = std::max(context.scissor.extent.height - context.scissor.offset.y, 0U);
         context.scissor.offset.y = 0;
     }
+
+    const uint32_t framebuffer_width = context.render_target->width;
+    const uint32_t framebuffer_height = context.render_target->height;
+    const uint32_t scissor_x_clamped = static_cast<uint32_t>(context.scissor.offset.x);
+    const uint32_t scissor_y_clamped = static_cast<uint32_t>(context.scissor.offset.y);
+
+    context.scissor.extent.width = (scissor_x_clamped >= framebuffer_width)
+        ? 0
+        : std::min(context.scissor.extent.width, framebuffer_width - scissor_x_clamped);
+    context.scissor.extent.height = (scissor_y_clamped >= framebuffer_height)
+        ? 0
+        : std::min(context.scissor.extent.height, framebuffer_height - scissor_y_clamped);
 
     if (!context.is_recording)
         return;

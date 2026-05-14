@@ -712,7 +712,9 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
 
     const vk::ImageView color_handle_view = reinterpret_cast<VKContext *>(state.context)->current_color_view;
     const bool is_same_image = (color_handle_view == info.texture.view) || (color_handle_view == info.alternate_view);
-    const bool force_copied_msaa_downscaled_u2f_surface = base_format == info.format
+    const bool force_u2f_casted_copy = surface_debug_flag("VITA3K_RENDER_FORCE_U2F_CASTED_COPY", "debug.vita3k.render_force_u2f_casted_copy");
+    const bool force_copied_msaa_downscaled_u2f_surface = (state.is_adreno_turnip || force_u2f_casted_copy)
+        && base_format == info.format
         && info.format == SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10
         && info.multisample_mode != SCE_GXM_MULTISAMPLE_NONE
         && info.downscale

@@ -57,8 +57,10 @@ function Find-Vita3KWindow {
         return $process
     }
 
+    # Avoid false positives from browser tabs or repo pages whose title contains
+    # "Vita3K". The emulator's runtime window starts with the product name.
     return Get-Process | Where-Object {
-        $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "*$WindowTitle*"
+        $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "$WindowTitle v*"
     } | Sort-Object StartTime -Descending | Select-Object -First 1
 }
 
