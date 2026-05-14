@@ -1356,7 +1356,7 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
     }
 
     case MappingMethod::DoubleBuffer: {
-        vkutil::Buffer buffer(size + KiB(4));
+        vkutil::Buffer buffer(size + KiB(64));
         buffer.init_buffer(mapped_memory_flags, vkutil::vma_mapped_alloc);
 
         vk::BufferDeviceAddressInfoKHR address_info{
@@ -1585,12 +1585,13 @@ static bool vulkan_renderer_debug_flag(const char *env_name, const char *android
 }
 
 static uint64_t mapped_memory_sync_size(const VKState &state, const MappedMemory &mapped_memory) {
-    // DoubleBuffer mappings allocate a small guard region after the Vita memory
-    // range. Shaders can legally read into that padded GPU buffer when a uniform
-    // block straddles the emulated mapping boundary, so the CPU sync path must
-    // copy the same bytes instead of rejecting the access as unmapped.
+    // DoubleBuffer mappings allocate a guard region after the Vita memory range.
+    // Shaders can legally read into that padded GPU buffer when a uniform,
+    // index, or vertex buffer straddles the emulated mapping boundary, so the CPU
+    // sync path must copy the same bytes instead of rejecting the access as
+    // unmapped. DOA Venus gameplay can cross by more than one page.
     return static_cast<uint64_t>(mapped_memory.size)
-        + (state.mapping_method == MappingMethod::DoubleBuffer ? KiB(4) : 0);
+        + (state.mapping_method == MappingMethod::DoubleBuffer ? KiB(64) : 0);
 }
 
 TrappedBuffer *BufferTrapping::access_buffer(Address addr, uint32_t size, MemState &mem, bool always_trap, bool cover_everything) {
