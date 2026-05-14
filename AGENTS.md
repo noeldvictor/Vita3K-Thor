@@ -42,6 +42,19 @@ python tools/debug_knowledge.py search "doa venus black terrain android 564cd0" 
 - Local issue ROMs live under ignored `roms/issues/<TITLEID>/`; regression ROMs live under ignored `roms/regression/<TITLEID>/`. Use `tools/sync_issue_rom.ps1` to copy or pull games there as needed. Never commit `roms/`.
 - Current first active case is DOA Venus (`PCSH00250`) renderer corruption. Use the SQLite attempt ledger and `vita3k-render-debug` workflow before every new renderer hypothesis so we do not repeat stale guesses.
 
+## Experiment Discipline
+
+- Treat every renderer/core investigation as a named experiment, not a vibe check. Before changing code or live props, write down the current active case, exact hypothesis, subsystem, platform, expected visual/log change, baseline artifact, and rollback path.
+- Query the case first: `case show`, `attempt list --limit 20`, `search --recent-days 30`, and `attempt check`. If a similar attempt already failed, do not repeat it unless the new attempt explicitly changes one controlled variable and records why the old result no longer answers the question.
+- Use one variable per experiment. Do not combine a renderer code patch, a stale Android property, a shader cache change, a driver switch, and a new save/location in the same test. If multiple things changed, mark the attempt `inconclusive` or `contaminated` and do not use it as proof.
+- Clear and record debug props before every Android comparison. Capture `adb shell getprop | Select-String -Pattern 'debug.vita3k'` or the helper equivalent, clear irrelevant props, then name the remaining intentional props in the SQLite attempt body.
+- Prefer A/B/A checks when a live toggle exists: capture baseline A, enable the experimental toggle and capture B, then disable it and capture A again. If A does not return, the test found state contamination or timing dependence, not a clean fix.
+- Stop after two failed or inconclusive guesses in the same subsystem. The next step must be better instrumentation, draw/surface/texture dump evidence, Ghidra/API-call-site research, or a smaller repro. Do not try a third broad Vulkan state toggle just because it is easy.
+- Separate experiments from fixes. A diagnostic property, fhash skip, draw skip, forced depth mode, forced texture path, or shader hack is not a fix until it is converted into emulator-semantics code, verified against the original symptom, and regression-checked against at least one neighboring scene/game.
+- Keep a compact experiment ledger in SQLite, not memory. Each attempt result must say: what was changed, exact command/build/commit/APK installed, title ID, scene, driver/settings, shader hashes or surface/texture addresses, burst/log artifacts, and whether the hypothesis was falsified, supported, or still ambiguous.
+- When an experiment changes visible output but damages adjacent geometry, record it as "supports involvement, not a fix." The next hypothesis should explain both the improvement and the regression.
+- Before ending a debug turn, leave the workspace in a knowable state: record current debug props/env vars, whether the installed Thor APK matches the source tree, which local renderer patches are diagnostic only, and the next single hypothesis. Do not leave mystery toggles active for the next agent.
+
 ## Input Automation
 
 - Use committed input helpers instead of asking the user to repeatedly press obvious buttons during repro setup.
