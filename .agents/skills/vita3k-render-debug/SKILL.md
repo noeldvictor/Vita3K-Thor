@@ -107,6 +107,24 @@ Compare dumped surface PNGs with the window burst. If the surface dump is alread
 
 Use progressive `stop_after` to find the first visible bad family, then test whether `skip` of the same draw actually fixes the live frame. A `stop_after` transition alone does not prove a single draw is the root cause.
 
+## Shader And GXM Research RAG
+
+When a renderer bug points at shader translation or Vita GPU architecture, add a SQLite note before patching. Use public sources, local Vita3K source, and per-game artifacts; do not use leaked SDKs, proprietary compiler dumps, or commercial game binaries as committed evidence.
+
+Record three layers:
+
+- Architecture: SGX543MP4+ / Series5XT / USSE2, tile-based deferred rendering, PDS input fetch, USSE vertex/fragment execution, iterators, TAG/TF texture paths, PBE resolve/packing, and memory/cache implications.
+- Vita3K implementation: GXP parser, USSE translator, SPIR-V/GLSL generation, shader cache/hash naming, Vulkan vertex input state, render-pass/surface-cache behavior, and feature flags such as shader interlock or scaled/RGB vertex attributes.
+- Game evidence: title ID, vhash/fhash, suspicious draw ranges, texture/surface addresses, dumped GXP/SPIR-V/GLSL paths, burst screenshots, surface dumps, and whether the artifact exists before or after final composition.
+
+For suspected shader bugs, first dump and inspect the shader/draw pair:
+
+```powershell
+.\tools\windows\set-render-debug-control.ps1 -ControlFile <render-control.txt> -Dump "rt=960x544:draw=0-8" -TraceLimit 64
+```
+
+Then compare the shader program metadata against vertex stream data, texture state, uniform buffers, render target format, and feature flags. Do not assume every visual glitch is a bad shader translator; on a tile-based deferred GPU, wrong depth/load/store/resolve/packing can look like a shader failure.
+
 ## Patch Discipline
 
 - Prefer emulator-correct fixes over game-specific hacks.
