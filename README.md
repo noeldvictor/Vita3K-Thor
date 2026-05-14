@@ -110,15 +110,15 @@ This screenshot is from a local legally owned test copy. No game content, firmwa
 
 ## Dead Or Alive Xtreme 3 Venus Runs On Thor
 
-![Dead or Alive Xtreme 3 Venus rendering correctly on Vita3K-Thor on AYN Thor](docs/screenshots/doa-venus-thor-64k-guard-verified-20260514_122940.png)
+Dead or Alive Xtreme 3 Venus (`PCSH00250`) now reaches gameplay rendering on AYN Thor from direct ZIP cartridge mode. It is one of the main renderer canary games for this fork because it exposed several real emulator bugs after the title screen, not just one broken setting.
 
-Dead or Alive Xtreme 3 Venus (`PCSH00250`) now reaches gameplay rendering on AYN Thor from direct ZIP cartridge mode. This screenshot was captured from the connected Thor after the renderer fix.
+ELI5 version of the first custom fix: the game was changing chunks of Vita memory right before the GPU used them. Some chunks crossed the edge of Vita3K's watched memory area, so the emulator sometimes refreshed only part of the data. The GPU then drew with one half new data and one half stale data, which showed up as black scenes, broken island/beach rendering, magenta terrain, or flickering title screens.
 
-ELI5 version of the render fix: the game was changing chunks of Vita memory right before the GPU used them. Some chunks crossed the edge of Vita3K's watched memory area, so the emulator sometimes refreshed only part of the data. The GPU then drew with one half new data and one half stale data, which showed up as black scenes, broken island/beach rendering, magenta terrain, or flickering title screens.
+The fix was to give the Vulkan double-buffer path a larger guard area and make the sync check copy the whole boundary-crossing chunk before Vulkan renders the frame. In plain English: the emulator now hands the GPU the complete current drawing instructions instead of a half-old, half-new set.
 
-The first fix covered the title screen, but gameplay proved DOA could read farther past that edge than one small guard page. The final fix gives the Vulkan double-buffer path a larger guard area and makes the sync check copy that whole boundary-crossing chunk before Vulkan renders the frame. In plain English: the emulator now hands the GPU the complete current drawing instructions instead of a half-old, half-new set.
+ELI5 version of the second custom fix: later gameplay uses one pass to draw depth information, then another pass reads that depth like a texture. Vita3K was waiting for one kind of depth write, but Vulkan can also do those writes earlier in the pipeline. That meant the next pass could read the depth texture too soon, making room and environment surfaces go black or disappear.
 
-This was verified Windows-first from title into gameplay, then on AYN Thor Android with burst captures through the same post-title scenes. The same Android build also keeps the earlier direct ZIP cartridge fixes and the SurfaceFlinger opaque-present fix used for UPPERS.
+The fix was to include early depth writes in the render-pass dependency, so depth-as-texture passes wait for the data they actually need. This was verified Windows-first from title into deeper gameplay, then on AYN Thor Android with burst captures through the same post-title scenes. The same Android build also keeps the earlier direct ZIP cartridge fixes and the SurfaceFlinger opaque-present fix used for UPPERS.
 
 ## Build Locally
 
