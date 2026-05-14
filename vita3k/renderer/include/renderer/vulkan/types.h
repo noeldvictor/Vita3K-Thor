@@ -300,6 +300,7 @@ struct VKContext : public renderer::Context {
     vk::Framebuffer current_shader_interlock_framebuffer = nullptr;
     // we need the format or image for some cases
     vkutil::Image *current_color_base_image;
+    vkutil::Image *current_ds_base_image;
     vk::Format current_color_format;
     vk::ImageView current_color_view;
     vk::ImageView current_ds_view;

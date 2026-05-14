@@ -261,6 +261,7 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.current_framebuffer = framebuffer.standard;
     context.current_shader_interlock_framebuffer = framebuffer.shader_interlock;
     context.current_color_base_image = framebuffer.base_image;
+    context.current_ds_base_image = framebuffer.ds_base_image;
 
     context.debug_scene_draw_count = 0;
     context.debug_scene_stop_after_active = false;
