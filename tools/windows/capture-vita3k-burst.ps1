@@ -50,6 +50,13 @@ function Slug([string]$Value) {
 }
 
 function Find-Vita3KWindow {
+    $process = Get-Process Vita3K -ErrorAction SilentlyContinue | Where-Object {
+        $_.MainWindowHandle -ne 0
+    } | Sort-Object StartTime -Descending | Select-Object -First 1
+    if ($process) {
+        return $process
+    }
+
     return Get-Process | Where-Object {
         $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "*$WindowTitle*"
     } | Sort-Object StartTime -Descending | Select-Object -First 1

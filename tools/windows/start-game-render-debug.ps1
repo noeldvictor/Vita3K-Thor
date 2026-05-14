@@ -7,6 +7,8 @@ param(
     [string]$StopAfter = "",
     [string]$Dump = "",
     [string]$ControlFile = "",
+    [ValidateSet("Vulkan", "OpenGL")]
+    [string]$BackendRenderer = "Vulkan",
     [int]$TraceLimit = 256,
     [int]$LogLevel = 2,
     [switch]$NoLabels,
@@ -62,6 +64,11 @@ $LaunchConfigPath = $ConfigPath
 if ($LogLevel -ge 0) {
     $LaunchConfigPath = Join-Path $debugRoot "config_render_debug.yml"
     $configText = Get-Content -LiteralPath $ConfigPath -Raw
+    if ($configText -match '(?m)^backend-renderer:\s*\S+') {
+        $configText = $configText -replace '(?m)^backend-renderer:\s*\S+', "backend-renderer: $BackendRenderer"
+    } else {
+        $configText += "`nbackend-renderer: $BackendRenderer`n"
+    }
     if ($configText -match '(?m)^log-level:\s*\d+') {
         $configText = $configText -replace '(?m)^log-level:\s*\d+', "log-level: $LogLevel"
     } else {
@@ -114,7 +121,7 @@ if ($Dump) {
     Remove-Item Env:\VITA3K_RENDER_DUMP -ErrorAction SilentlyContinue
 }
 
-$argumentLine = "--config-location `"$LaunchConfigPath`" --cartridge --backend-renderer Vulkan --log-level $LogLevel --thor-render-trace `"$GameZip`""
+$argumentLine = "--config-location `"$LaunchConfigPath`" --cartridge --backend-renderer $BackendRenderer --log-level $LogLevel --thor-render-trace `"$GameZip`""
 
 Write-Host "Vita3K Windows render debug:"
 Write-Host "  exe:        $ExePath"
@@ -122,6 +129,7 @@ Write-Host "  title:      $TitleId"
 Write-Host "  case:       $CaseSlug"
 Write-Host "  config:     $LaunchConfigPath"
 Write-Host "  game:       $GameZip"
+Write-Host "  backend:    $BackendRenderer"
 Write-Host "  control:    $ControlFile"
 Write-Host "  traceLimit: $TraceLimit"
 Write-Host "  logLevel:   $LogLevel"

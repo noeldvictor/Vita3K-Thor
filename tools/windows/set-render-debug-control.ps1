@@ -22,7 +22,7 @@ if ($Action -and -not $ActionId) {
     $ActionId = Get-Date -Format "yyyyMMdd_HHmmss_ffff"
 }
 
-@(
+$controlLines = @(
     "# Edit while Vita3K is running; values update live."
     "trace=$([int](-not $NoTrace))"
     "trace_limit=$TraceLimit"
@@ -32,7 +32,21 @@ if ($Action -and -not $ActionId) {
     "dump=$Dump"
     "action=$Action"
     "action_id=$ActionId"
-) | Set-Content -LiteralPath $ControlFile -Encoding UTF8
+)
+
+$controlText = ($controlLines -join [Environment]::NewLine) + [Environment]::NewLine
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+for ($attempt = 1; $attempt -le 5; $attempt++) {
+    try {
+        [System.IO.File]::WriteAllText($ControlFile, $controlText, $utf8NoBom)
+        break
+    } catch {
+        if ($attempt -eq 5) {
+            throw
+        }
+        Start-Sleep -Milliseconds (50 * $attempt)
+    }
+}
 
 Write-Host "Updated renderer control:"
 Write-Host "  file:       $ControlFile"
