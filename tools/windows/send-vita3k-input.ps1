@@ -168,6 +168,8 @@ function Invoke-Click([string]$Token) {
     } elseif ($Token -match "^click:(?<x>-?\d+),(?<y>-?\d+)$") {
         $x = $rect.Left + [int]$Matches["x"]
         $y = $rect.Top + [int]$Matches["y"]
+    } elseif ($Token -match "^click[@:]") {
+        throw "Invalid click token '$Token'. Use click:x,y, click@x,y, or quote coordinate tokens in PowerShell."
     }
 
     if ($DryRun) {
@@ -182,12 +184,26 @@ function Invoke-Click([string]$Token) {
     [Vita3KInputWin32]::mouse_event($MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
 }
 
+function Normalize-Sequence([string[]]$Items) {
+    $normalized = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $Items.Count; $i++) {
+        $item = $Items[$i]
+        if ($item -match "^click[@:]-?\d+$" -and ($i + 1) -lt $Items.Count -and $Items[$i + 1] -match "^-?\d+$") {
+            $normalized.Add("$item,$($Items[$i + 1])")
+            $i++
+            continue
+        }
+        $normalized.Add($item)
+    }
+    return $normalized.ToArray()
+}
+
 Focus-Vita3KWindow
 
-foreach ($item in $Sequence) {
+foreach ($item in (Normalize-Sequence $Sequence)) {
     $token = $item
     $repeat = 1
-    if ($item -match "^(?<name>[^:]+):(?<value>\d+)$") {
+    if ($item -notmatch "^click[@:]" -and $item -match "^(?<name>[^:]+):(?<value>\d+)$") {
         $token = $Matches["name"]
         $value = [int]$Matches["value"]
         if ((Normalize-Token $token) -in @("wait", "sleep")) {

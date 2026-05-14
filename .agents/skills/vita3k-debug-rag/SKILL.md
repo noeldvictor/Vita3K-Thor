@@ -76,7 +76,7 @@ For Thor/Android checks:
 .\tools\android\capture-thor-burst.ps1 -Adb $adb -Serial c3ca0370 -Topic doa-venus-render-corruption -Count 10 -IntervalMs 350
 ```
 
-Use 8-12 frames for normal flicker checks, more for rare flicker. Store the raw PNGs under ignored `tmp/`, then record the burst directory and the few meaningful frame numbers in SQLite.
+Use 8-12 frames for normal flicker checks, and 60-120 frames when the issue appears only after a camera/menu rotation. After capture, run `python tools/analyze_screenshot_burst.py <burst-dir>` and use `flicker_summary.txt`, `flicker_metrics.csv`, and `flicker_contact_sheet.jpg` to find the largest transitions. Store the raw PNGs under ignored `tmp/`, then record the burst directory, analysis outputs, and the few meaningful frame numbers in SQLite.
 
 ## Windows Fast Loop
 
