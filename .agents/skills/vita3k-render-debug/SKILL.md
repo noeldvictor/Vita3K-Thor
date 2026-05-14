@@ -91,7 +91,11 @@ Use live filters before rebuilding:
 .\tools\windows\set-render-debug-control.ps1 -ControlFile <render-control.txt> -StopAfter "rt=960x544:draw=5" -TraceLimit 96
 .\tools\windows\set-render-debug-control.ps1 -ControlFile <render-control.txt> -Skip "rt=960x544:draw=5" -TraceLimit 96
 .\tools\windows\set-render-debug-control.ps1 -ControlFile <render-control.txt> -Dump "rt=960x544:draw=0-8" -TraceLimit 64
+.\tools\windows\set-render-debug-control.ps1 -ControlFile <render-control.txt> -Skip "sample=62FF8000:draw=1" -TraceLimit 96
+.\tools\windows\set-render-debug-control.ps1 -ControlFile <render-control.txt> -Dump "addr=62FF8000:draw=20-40" -TraceLimit 64
 ```
+
+Use `addr=` / `color_addr=` when isolating the producer render target being written. Use `sample=` / `tex=` when isolating consumer draws that read from a suspicious surface. This producer/consumer split is the UPPERS lesson: prove where the bad pixels first appear before changing renderer policy.
 
 If pausing changes or hides the bug, record that in SQLite and switch to burst-based evidence. Timing and presentation bugs can disappear on a still frame.
 
@@ -105,7 +109,7 @@ When final composition looks wrong, prove whether corruption is already inside a
 
 Compare dumped surface PNGs with the window burst. If the surface dump is already corrupted, focus on the producer pass, vertex/pipeline/depth state, render-pass dependency, texture upload, or guest data feeding that target. If the surface dump is clean but presentation is wrong, focus on sampling, final composition, cache visibility, swapchain, or platform presentation.
 
-Use progressive `stop_after` to find the first visible bad family, then test whether `skip` of the same draw actually fixes the live frame. A `stop_after` transition alone does not prove a single draw is the root cause.
+Use progressive `stop_after` to find the first visible bad family, then test whether `skip` of the same draw actually fixes the live frame. A `stop_after` transition alone does not prove a single draw is the root cause. If a sampled consumer skip does not remove the corruption, immediately compare the producer surface dump with a window burst before trying another presentation/cache change.
 
 ## Shader And GXM Research RAG
 

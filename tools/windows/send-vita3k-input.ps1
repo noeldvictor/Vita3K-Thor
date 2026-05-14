@@ -1,8 +1,10 @@
 param(
-    [Parameter(Mandatory = $true)]
     [string[]]$Sequence,
+    [string[]]$Button,
+    [int]$Repeat = 1,
     [string]$WindowTitle = "Vita3K",
     [int]$PressMs = 90,
+    [int]$HoldMs = 0,
     [int]$GapMs = 90,
     [int]$ClickYFromBottom = 125,
     [switch]$NoFocus,
@@ -10,6 +12,21 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not $Sequence -and $Button) {
+    $Sequence = @()
+    foreach ($name in $Button) {
+        $Sequence += "$name`:$Repeat"
+    }
+}
+
+if (-not $Sequence) {
+    throw "Provide -Sequence or -Button."
+}
+
+if ($HoldMs -gt 0) {
+    $PressMs = $HoldMs
+}
 
 if (-not ('Vita3KInputWin32' -as [type])) {
 Add-Type -TypeDefinition @"
@@ -23,8 +40,8 @@ public static class Vita3KInputWin32 {
     [DllImport("user32.dll")]
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
-    [DllImport("user32.dll")]
-    public static extern void keybd_event(byte bVk, byte bScan, int dwFlags, UIntPtr dwExtraInfo);
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern UInt32 SendInput(UInt32 nInputs, INPUT[] pInputs, Int32 cbSize);
 
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hWnd, out Vita3KInputRect lpRect);
@@ -34,6 +51,28 @@ public static class Vita3KInputWin32 {
 
     [DllImport("user32.dll")]
     public static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, UIntPtr dwExtraInfo);
+
+    public static UInt32 SendScan(UInt16 scan, bool extended, bool keyUp) {
+        const UInt32 INPUT_KEYBOARD = 1;
+        const UInt32 KEYEVENTF_EXTENDEDKEY = 0x0001;
+        const UInt32 KEYEVENTF_KEYUP = 0x0002;
+        const UInt32 KEYEVENTF_SCANCODE = 0x0008;
+
+        INPUT[] inputs = new INPUT[1];
+        inputs[0].type = INPUT_KEYBOARD;
+        inputs[0].U.ki.wVk = 0;
+        inputs[0].U.ki.wScan = scan;
+        inputs[0].U.ki.dwFlags = KEYEVENTF_SCANCODE;
+        if (extended) {
+            inputs[0].U.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+        }
+        if (keyUp) {
+            inputs[0].U.ki.dwFlags |= KEYEVENTF_KEYUP;
+        }
+        inputs[0].U.ki.time = 0;
+        inputs[0].U.ki.dwExtraInfo = IntPtr.Zero;
+        return SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
+    }
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -43,32 +82,73 @@ public struct Vita3KInputRect {
     public int Right;
     public int Bottom;
 }
+
+[StructLayout(LayoutKind.Sequential)]
+public struct INPUT {
+    public UInt32 type;
+    public InputUnion U;
+}
+
+[StructLayout(LayoutKind.Explicit)]
+public struct InputUnion {
+    [FieldOffset(0)]
+    public MOUSEINPUT mi;
+    [FieldOffset(0)]
+    public KEYBDINPUT ki;
+    [FieldOffset(0)]
+    public HARDWAREINPUT hi;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct MOUSEINPUT {
+    public Int32 dx;
+    public Int32 dy;
+    public UInt32 mouseData;
+    public UInt32 dwFlags;
+    public UInt32 time;
+    public IntPtr dwExtraInfo;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct KEYBDINPUT {
+    public UInt16 wVk;
+    public UInt16 wScan;
+    public UInt32 dwFlags;
+    public UInt32 time;
+    public IntPtr dwExtraInfo;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct HARDWAREINPUT {
+    public UInt32 uMsg;
+    public UInt16 wParamL;
+    public UInt16 wParamH;
+}
 "@
 }
 
-$KEYEVENTF_KEYUP = 0x0002
 $MOUSEEVENTF_LEFTDOWN = 0x0002
 $MOUSEEVENTF_LEFTUP = 0x0004
 $SW_RESTORE = 9
 $script:TargetWindow = [IntPtr]::Zero
 
 $KeyMap = @{
-    "cross" = 0x58; "x" = 0x58; "confirm" = 0x58
-    "circle" = 0x43; "o" = 0x43; "cancel" = 0x43
-    "square" = 0x5A; "triangle" = 0x56
-    "start" = 0x0D; "enter" = 0x0D
-    "select" = 0xA1; "rshift" = 0xA1
-    "ps" = 0x50; "home" = 0x50
-    "back" = 0x1B; "escape" = 0x1B; "esc" = 0x1B
-    "up" = 0x26; "dpad_up" = 0x26
-    "right" = 0x27; "dpad_right" = 0x27
-    "down" = 0x28; "dpad_down" = 0x28
-    "left" = 0x25; "dpad_left" = 0x25
-    "l1" = 0x51; "r1" = 0x45
-    "l2" = 0x55; "r2" = 0x4F
-    "l3" = 0x46; "r3" = 0x48
-    "left_up" = 0x57; "left_down" = 0x53; "left_left" = 0x41; "left_right" = 0x44
-    "right_up" = 0x49; "right_down" = 0x4B; "right_left" = 0x4A; "right_right" = 0x4C
+    "cross" = @{ Scan = 0x2D; Extended = $false }; "x" = @{ Scan = 0x2D; Extended = $false }; "confirm" = @{ Scan = 0x2D; Extended = $false }
+    "circle" = @{ Scan = 0x2E; Extended = $false }; "o" = @{ Scan = 0x2E; Extended = $false }; "cancel" = @{ Scan = 0x2E; Extended = $false }
+    "square" = @{ Scan = 0x2C; Extended = $false }; "triangle" = @{ Scan = 0x2F; Extended = $false }
+    "start" = @{ Scan = 0x1C; Extended = $false }; "enter" = @{ Scan = 0x1C; Extended = $false }
+    "select" = @{ Scan = 0x36; Extended = $false }; "rshift" = @{ Scan = 0x36; Extended = $false }
+    "ps" = @{ Scan = 0x19; Extended = $false }; "home" = @{ Scan = 0x19; Extended = $false }
+    "back" = @{ Scan = 0x01; Extended = $false }; "escape" = @{ Scan = 0x01; Extended = $false }; "esc" = @{ Scan = 0x01; Extended = $false }
+    "up" = @{ Scan = 0x48; Extended = $true }; "dpad_up" = @{ Scan = 0x48; Extended = $true }
+    "right" = @{ Scan = 0x4D; Extended = $true }; "dpad_right" = @{ Scan = 0x4D; Extended = $true }
+    "down" = @{ Scan = 0x50; Extended = $true }; "dpad_down" = @{ Scan = 0x50; Extended = $true }
+    "left" = @{ Scan = 0x4B; Extended = $true }; "dpad_left" = @{ Scan = 0x4B; Extended = $true }
+    "l1" = @{ Scan = 0x10; Extended = $false }; "r1" = @{ Scan = 0x12; Extended = $false }
+    "l2" = @{ Scan = 0x16; Extended = $false }; "r2" = @{ Scan = 0x18; Extended = $false }
+    "l3" = @{ Scan = 0x21; Extended = $false }; "r3" = @{ Scan = 0x23; Extended = $false }
+    "left_up" = @{ Scan = 0x11; Extended = $false }; "left_down" = @{ Scan = 0x1F; Extended = $false }; "left_left" = @{ Scan = 0x1E; Extended = $false }; "left_right" = @{ Scan = 0x20; Extended = $false }
+    "right_up" = @{ Scan = 0x17; Extended = $false }; "right_down" = @{ Scan = 0x25; Extended = $false }; "right_left" = @{ Scan = 0x24; Extended = $false }; "right_right" = @{ Scan = 0x26; Extended = $false }
 }
 
 $ChordAliases = @{
@@ -87,9 +167,15 @@ function Focus-Vita3KWindow {
         return
     }
 
-    $proc = Get-Process | Where-Object {
-        $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "*$WindowTitle*"
+    $proc = Get-Process Vita3K -ErrorAction SilentlyContinue | Where-Object {
+        $_.MainWindowHandle -ne 0
     } | Sort-Object StartTime -Descending | Select-Object -First 1
+
+    if (-not $proc) {
+        $proc = Get-Process | Where-Object {
+            $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "*$WindowTitle*"
+        } | Sort-Object StartTime -Descending | Select-Object -First 1
+    }
 
     if (-not $proc) {
         throw "No foreground-capable window found with title containing '$WindowTitle'."
@@ -98,7 +184,7 @@ function Focus-Vita3KWindow {
     [Vita3KInputWin32]::ShowWindow($proc.MainWindowHandle, $SW_RESTORE) | Out-Null
     [Vita3KInputWin32]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
     $script:TargetWindow = $proc.MainWindowHandle
-    Start-Sleep -Milliseconds 120
+    Start-Sleep -Milliseconds 180
 }
 
 function Resolve-Buttons([string]$Token) {
@@ -116,24 +202,30 @@ function Send-ButtonDown([string]$Button) {
     if (-not $KeyMap.ContainsKey($Button)) {
         throw "Unknown Windows Vita3K button '$Button'."
     }
-    $vk = [byte]$KeyMap[$Button]
+    $info = $KeyMap[$Button]
     if ($DryRun) {
-        Write-Host "down $Button vk=$vk"
+        Write-Host ("down {0} scan=0x{1:X2}" -f $Button, $info.Scan)
         return
     }
-    [Vita3KInputWin32]::keybd_event($vk, 0, 0, [UIntPtr]::Zero)
+    $sent = [Vita3KInputWin32]::SendScan([UInt16]$info.Scan, [bool]$info.Extended, $false)
+    if ($sent -ne 1) {
+        throw ("SendInput key-down failed for {0} scan=0x{1:X2}" -f $Button, $info.Scan)
+    }
 }
 
 function Send-ButtonUp([string]$Button) {
     if (-not $KeyMap.ContainsKey($Button)) {
         throw "Unknown Windows Vita3K button '$Button'."
     }
-    $vk = [byte]$KeyMap[$Button]
+    $info = $KeyMap[$Button]
     if ($DryRun) {
-        Write-Host "up   $Button vk=$vk"
+        Write-Host ("up   {0} scan=0x{1:X2}" -f $Button, $info.Scan)
         return
     }
-    [Vita3KInputWin32]::keybd_event($vk, 0, $KEYEVENTF_KEYUP, [UIntPtr]::Zero)
+    $sent = [Vita3KInputWin32]::SendScan([UInt16]$info.Scan, [bool]$info.Extended, $true)
+    if ($sent -ne 1) {
+        throw ("SendInput key-up failed for {0} scan=0x{1:X2}" -f $Button, $info.Scan)
+    }
 }
 
 function Invoke-Press([string]$Token, [int]$Repeat) {
@@ -202,7 +294,7 @@ Focus-Vita3KWindow
 
 foreach ($item in (Normalize-Sequence $Sequence)) {
     $token = $item
-    $repeat = 1
+    $repeatCount = 1
     if ($item -notmatch "^click[@:]" -and $item -match "^(?<name>[^:]+):(?<value>\d+)$") {
         $token = $Matches["name"]
         $value = [int]$Matches["value"]
@@ -211,16 +303,19 @@ foreach ($item in (Normalize-Sequence $Sequence)) {
             Start-Sleep -Milliseconds $value
             continue
         }
-        $repeat = [Math]::Max($value, 1)
+        $repeatCount = [Math]::Max($value, 1)
     }
 
-    for ($i = 0; $i -lt $repeat; $i++) {
-        Write-Host "press $token"
-        if ((Normalize-Token $token) -eq "click" -or $token -match "^click[@:]") {
+    Write-Host "press $token x$repeatCount"
+    if ((Normalize-Token $token) -eq "click" -or $token -match "^click[@:]") {
+        for ($i = 0; $i -lt $repeatCount; $i++) {
             Invoke-Click $token
-        } else {
-            Invoke-Press $token $repeat
+            Start-Sleep -Milliseconds $GapMs
         }
-        Start-Sleep -Milliseconds $GapMs
+    } else {
+        for ($i = 0; $i -lt $repeatCount; $i++) {
+            Invoke-Press $token 1
+            Start-Sleep -Milliseconds $GapMs
+        }
     }
 }

@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -47,6 +48,8 @@ struct RendererDebugRange {
     bool has_frame = false;
     bool has_scene = false;
     bool has_rt = false;
+    bool has_color_addr = false;
+    bool has_texture_addr = false;
     bool has_vhash = false;
     bool has_fhash = false;
     uint64_t frame = 0;
@@ -57,6 +60,8 @@ struct RendererDebugRange {
     uint32_t last_draw = 0;
     std::string vhash_prefix;
     std::string fhash_prefix;
+    std::string color_addr_prefix;
+    std::string texture_addr_prefix;
     std::string spec;
 };
 
@@ -115,6 +120,22 @@ static std::string parse_text_key(const std::string &spec, const char *key) {
     return spec.substr(value_begin, value_end - value_begin);
 }
 
+static std::string normalize_renderer_debug_hex_prefix(std::string text) {
+    if (text.size() >= 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+        text.erase(0, 2);
+
+    text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char ch) {
+        return ch == '_' || ch == ' ';
+    }),
+        text.end());
+
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::toupper(ch));
+    });
+
+    return text;
+}
+
 static uint32_t clamp_draw_index(uint64_t value) {
     return static_cast<uint32_t>(std::min<uint64_t>(value, std::numeric_limits<uint32_t>::max()));
 }
@@ -153,6 +174,20 @@ static RendererDebugRange parse_renderer_debug_range_spec(const std::string &spe
     range.has_vhash = !range.vhash_prefix.empty();
     range.fhash_prefix = parse_text_key(spec, "fhash=");
     range.has_fhash = !range.fhash_prefix.empty();
+    range.color_addr_prefix = normalize_renderer_debug_hex_prefix(parse_text_key(spec, "addr="));
+    if (range.color_addr_prefix.empty())
+        range.color_addr_prefix = normalize_renderer_debug_hex_prefix(parse_text_key(spec, "color="));
+    if (range.color_addr_prefix.empty())
+        range.color_addr_prefix = normalize_renderer_debug_hex_prefix(parse_text_key(spec, "color_addr="));
+    range.has_color_addr = !range.color_addr_prefix.empty();
+    range.texture_addr_prefix = normalize_renderer_debug_hex_prefix(parse_text_key(spec, "tex="));
+    if (range.texture_addr_prefix.empty())
+        range.texture_addr_prefix = normalize_renderer_debug_hex_prefix(parse_text_key(spec, "texture="));
+    if (range.texture_addr_prefix.empty())
+        range.texture_addr_prefix = normalize_renderer_debug_hex_prefix(parse_text_key(spec, "sample="));
+    if (range.texture_addr_prefix.empty())
+        range.texture_addr_prefix = normalize_renderer_debug_hex_prefix(parse_text_key(spec, "sample_addr="));
+    range.has_texture_addr = !range.texture_addr_prefix.empty();
 
     const size_t draw_pos = spec.find("draw=");
     const char *draw_begin = draw_pos == std::string::npos ? spec.c_str() : spec.c_str() + draw_pos + 5;
@@ -353,7 +388,49 @@ static bool renderer_debug_hash_prefix_matches(const std::string &hash, const st
     return hash.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), hash.begin());
 }
 
-static bool renderer_debug_range_matches(const RendererDebugRange &range, uint64_t frame, uint64_t scene, uint32_t rt_width, uint32_t rt_height, const std::string &vhash, const std::string &fhash, uint32_t draw) {
+static bool renderer_debug_color_addr_prefix_matches(uint32_t color_addr, const std::string &prefix) {
+    const std::string color_addr_text = fmt::format("{:08X}", color_addr);
+    return color_addr_text.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), color_addr_text.begin());
+}
+
+static bool renderer_debug_texture_addr_prefix_matches(const SceGxmTexture *textures, const bool *valid, uint16_t texture_count, const std::string &prefix) {
+    for (uint16_t texture_index = 0; texture_index < texture_count && texture_index < SCE_GXM_MAX_TEXTURE_UNITS; texture_index++) {
+        if (!valid[texture_index])
+            continue;
+        if (renderer_debug_color_addr_prefix_matches(static_cast<uint32_t>(textures[texture_index].data_addr << 2), prefix))
+            return true;
+    }
+    return false;
+}
+
+static bool renderer_debug_texture_addr_prefix_matches(const RendererDebugRange &range,
+    const SceGxmTexture *vertex_textures, const bool *vertex_valid, uint16_t vertex_texture_count,
+    const SceGxmTexture *fragment_textures, const bool *fragment_valid, uint16_t fragment_texture_count) {
+    if (!range.has_texture_addr)
+        return true;
+
+    return renderer_debug_texture_addr_prefix_matches(vertex_textures, vertex_valid, vertex_texture_count, range.texture_addr_prefix)
+        || renderer_debug_texture_addr_prefix_matches(fragment_textures, fragment_valid, fragment_texture_count, range.texture_addr_prefix);
+}
+
+static std::string renderer_debug_texture_addr_summary(const SceGxmTexture *textures, const bool *valid, uint16_t texture_count) {
+    std::string summary;
+    for (uint16_t texture_index = 0; texture_index < texture_count && texture_index < SCE_GXM_MAX_TEXTURE_UNITS; texture_index++) {
+        if (!summary.empty())
+            summary += ",";
+        if (!valid[texture_index]) {
+            summary += "invalid";
+            continue;
+        }
+        summary += fmt::format("0x{:08X}", static_cast<uint32_t>(textures[texture_index].data_addr << 2));
+    }
+    return summary.empty() ? "-" : summary;
+}
+
+static bool renderer_debug_range_matches(const RendererDebugRange &range, uint64_t frame, uint64_t scene, uint32_t rt_width, uint32_t rt_height, uint32_t color_addr,
+    const SceGxmTexture *vertex_textures, const bool *vertex_valid, uint16_t vertex_texture_count,
+    const SceGxmTexture *fragment_textures, const bool *fragment_valid, uint16_t fragment_texture_count,
+    const std::string &vhash, const std::string &fhash, uint32_t draw) {
     if (!range.enabled)
         return false;
     if (range.has_frame && range.frame != frame)
@@ -361,6 +438,10 @@ static bool renderer_debug_range_matches(const RendererDebugRange &range, uint64
     if (range.has_scene && range.scene != scene)
         return false;
     if (range.has_rt && (range.rt_width != rt_width || range.rt_height != rt_height))
+        return false;
+    if (range.has_color_addr && !renderer_debug_color_addr_prefix_matches(color_addr, range.color_addr_prefix))
+        return false;
+    if (!renderer_debug_texture_addr_prefix_matches(range, vertex_textures, vertex_valid, vertex_texture_count, fragment_textures, fragment_valid, fragment_texture_count))
         return false;
     if (range.has_vhash && !renderer_debug_hash_prefix_matches(vhash, range.vhash_prefix))
         return false;
@@ -369,7 +450,10 @@ static bool renderer_debug_range_matches(const RendererDebugRange &range, uint64
     return draw >= range.first_draw && draw <= range.last_draw;
 }
 
-static bool renderer_debug_stop_after_matches(const RendererDebugRange &range, uint64_t frame, uint64_t scene, uint32_t rt_width, uint32_t rt_height, const std::string &vhash, const std::string &fhash, uint32_t draw) {
+static bool renderer_debug_stop_after_matches(const RendererDebugRange &range, uint64_t frame, uint64_t scene, uint32_t rt_width, uint32_t rt_height, uint32_t color_addr,
+    const SceGxmTexture *vertex_textures, const bool *vertex_valid, uint16_t vertex_texture_count,
+    const SceGxmTexture *fragment_textures, const bool *fragment_valid, uint16_t fragment_texture_count,
+    const std::string &vhash, const std::string &fhash, uint32_t draw) {
     if (!range.enabled)
         return false;
     if (range.has_frame && range.frame != frame)
@@ -377,6 +461,10 @@ static bool renderer_debug_stop_after_matches(const RendererDebugRange &range, u
     if (range.has_scene && range.scene != scene)
         return false;
     if (range.has_rt && (range.rt_width != rt_width || range.rt_height != rt_height))
+        return false;
+    if (range.has_color_addr && !renderer_debug_color_addr_prefix_matches(color_addr, range.color_addr_prefix))
+        return false;
+    if (!renderer_debug_texture_addr_prefix_matches(range, vertex_textures, vertex_valid, vertex_texture_count, fragment_textures, fragment_valid, fragment_texture_count))
         return false;
     if (range.has_vhash && !renderer_debug_hash_prefix_matches(vhash, range.vhash_prefix))
         return false;
@@ -1248,18 +1336,29 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     const std::string hash_text_f = hex_string(fragment_data->hash);
     const uint32_t debug_rt_width = context.render_target != nullptr ? context.render_target->width : 0;
     const uint32_t debug_rt_height = context.render_target != nullptr ? context.render_target->height : 0;
-    const bool renderer_debug_skip = renderer_debug_range_matches(renderer_debug.skip, context.frame_timestamp, context.scene_timestamp, debug_rt_width, debug_rt_height, hash_text_v, hash_text_f, debug_draw_index);
-    const bool renderer_debug_stop_after = renderer_debug_stop_after_matches(renderer_debug.stop_after, context.frame_timestamp, context.scene_timestamp, debug_rt_width, debug_rt_height, hash_text_v, hash_text_f, debug_draw_index);
-    const bool renderer_debug_dump = renderer_debug_range_matches(renderer_debug.dump, context.frame_timestamp, context.scene_timestamp, debug_rt_width, debug_rt_height, hash_text_v, hash_text_f, debug_draw_index);
+    const uint32_t debug_color_addr = context.record.color_surface.data.address();
+    const bool renderer_debug_skip = renderer_debug_range_matches(renderer_debug.skip, context.frame_timestamp, context.scene_timestamp, debug_rt_width, debug_rt_height, debug_color_addr,
+        context.vertex_gxm_textures, context.vertex_gxm_texture_valid, vertex_data->texture_count,
+        context.fragment_gxm_textures, context.fragment_gxm_texture_valid, fragment_data->texture_count,
+        hash_text_v, hash_text_f, debug_draw_index);
+    const bool renderer_debug_stop_after = renderer_debug_stop_after_matches(renderer_debug.stop_after, context.frame_timestamp, context.scene_timestamp, debug_rt_width, debug_rt_height, debug_color_addr,
+        context.vertex_gxm_textures, context.vertex_gxm_texture_valid, vertex_data->texture_count,
+        context.fragment_gxm_textures, context.fragment_gxm_texture_valid, fragment_data->texture_count,
+        hash_text_v, hash_text_f, debug_draw_index);
+    const bool renderer_debug_dump = renderer_debug_range_matches(renderer_debug.dump, context.frame_timestamp, context.scene_timestamp, debug_rt_width, debug_rt_height, debug_color_addr,
+        context.vertex_gxm_textures, context.vertex_gxm_texture_valid, vertex_data->texture_count,
+        context.fragment_gxm_textures, context.fragment_gxm_texture_valid, fragment_data->texture_count,
+        hash_text_v, hash_text_f, debug_draw_index);
     if (renderer_debug_skip || context.debug_scene_stop_after_active) {
         const char *reason = renderer_debug_skip ? "skip" : "stopped-after";
         if (context.state.renderer_trace_gxm_state || renderer_debug.trace) {
-            LOG_INFO("ThorRenderDebug {} frame={} scene={} rt={}x{} draw={} prim={} index_fmt={} count={} instances={} vhash={} fhash={}",
+            LOG_INFO("ThorRenderDebug {} frame={} scene={} rt={}x{} color_addr=0x{:08X} draw={} prim={} index_fmt={} count={} instances={} vhash={} fhash={}",
                 reason,
                 context.frame_timestamp,
                 context.scene_timestamp,
                 debug_rt_width,
                 debug_rt_height,
+                debug_color_addr,
                 debug_draw_index,
                 static_cast<uint32_t>(type),
                 static_cast<uint32_t>(format),
@@ -1332,9 +1431,13 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
             else if (!debug_has_msaa && debug_has_downscale)
                 debug_frag_res_multiplier /= 2;
 
-            LOG_INFO("ThorRenderTrace draw frame={} scene={} draw={} prim={} index_fmt={} count={} instances={} pipeline={} framebuffer_fetch={} vhash={} fhash={} vtex={} ftex={} vbufs={} fbufs={} depth_func={}/{} depth_write={}/{} depth_bias={}/{} stencil_func={}/{} cull={} two_sided={} vp_flat={} z_offset={} z_scale={} writing_mask={} viewport={},{},{},{} scissor={},{},{},{} frag_res_multiplier={} color_downscale={}",
+            const std::string vertex_texture_addrs = renderer_debug_texture_addr_summary(context.vertex_gxm_textures, context.vertex_gxm_texture_valid, vertex_data->texture_count);
+            const std::string fragment_texture_addrs = renderer_debug_texture_addr_summary(context.fragment_gxm_textures, context.fragment_gxm_texture_valid, fragment_data->texture_count);
+
+            LOG_INFO("ThorRenderTrace draw frame={} scene={} color_addr=0x{:08X} draw={} prim={} index_fmt={} count={} instances={} pipeline={} framebuffer_fetch={} vhash={} fhash={} vtex={} ftex={} vtex_addrs={} ftex_addrs={} vbufs={} fbufs={} depth_func={}/{} depth_write={}/{} depth_bias={}/{} stencil_func={}/{} cull={} two_sided={} vp_flat={} z_offset={} z_scale={} writing_mask={} viewport={},{},{},{} scissor={},{},{},{} frag_res_multiplier={} color_downscale={}",
                 context.frame_timestamp,
                 context.scene_timestamp,
+                debug_color_addr,
                 debug_draw_index,
                 static_cast<uint32_t>(type),
                 static_cast<uint32_t>(format),
@@ -1346,6 +1449,8 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
                 hash_text_f,
                 vertex_data->texture_count,
                 fragment_data->texture_count,
+                vertex_texture_addrs,
+                fragment_texture_addrs,
                 vertex_data->buffer_count,
                 fragment_data->buffer_count,
                 static_cast<uint32_t>(context.record.front_depth_func),
@@ -1497,11 +1602,12 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     if (renderer_debug_stop_after) {
         context.debug_scene_stop_after_active = true;
         if (context.state.renderer_trace_gxm_state || renderer_debug.trace) {
-            LOG_INFO("ThorRenderDebug stop-after armed frame={} scene={} rt={}x{} draw={} vhash={} fhash={}",
+            LOG_INFO("ThorRenderDebug stop-after armed frame={} scene={} rt={}x{} color_addr=0x{:08X} draw={} vhash={} fhash={}",
                 context.frame_timestamp,
                 context.scene_timestamp,
                 debug_rt_width,
                 debug_rt_height,
+                debug_color_addr,
                 debug_draw_index,
                 hash_text_v,
                 hash_text_f);

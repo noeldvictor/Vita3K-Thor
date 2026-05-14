@@ -105,6 +105,10 @@ static std::string surface_dump_debug_setting(const char *env_name, const char *
     return {};
 }
 
+static bool surface_debug_flag(const char *env_name, const char *android_prop_name) {
+    return !surface_dump_debug_disabled(surface_dump_debug_setting(env_name, android_prop_name));
+}
+
 static bool parse_surface_dump_address(std::string_view text, Address &address) {
     if (surface_dump_debug_disabled(text))
         return false;
@@ -711,7 +715,8 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
     const bool force_copied_msaa_downscaled_u2f_surface = base_format == info.format
         && info.format == SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10
         && info.multisample_mode != SCE_GXM_MULTISAMPLE_NONE
-        && info.downscale;
+        && info.downscale
+        && !surface_debug_flag("VITA3K_RENDER_DISABLE_U2F_CASTED_COPY", "debug.vita3k.render_disable_u2f_casted_copy");
 
     // Sampling the active color attachment as a normal texture is undefined feedback.
     // Keep the older casted-copy safety path for same-image reads even when the
@@ -765,6 +770,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
 
     if (force_copied_msaa_downscaled_u2f_surface || is_same_image || (start_sourced_line != 0) || (start_x != 0) || (info.width != width) || (info.height != height) || (info.format != base_format)) {
         const uint64_t scene_timestamp = reinterpret_cast<VKContext *>(state.context)->scene_timestamp;
+        const uint32_t frame_idx = state.current_frame_idx;
 
         std::vector<CastedTexture> &casted_vec = info.casted_textures;
 
@@ -778,8 +784,8 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                 if (casted->scene_timestamp == scene_timestamp) {
                     // already copied for this scene, don't do it again
                     if (trace_surface_texture) {
-                        LOG_INFO("ThorRenderTrace surface texture hit scene={} mode=casted-reuse tex_addr=0x{:08X} tex={}x{} surface_addr=0x{:08X} crop={}x{}+{},{}",
-                            scene_timestamp, address, original_width, original_height, ite->first, width, height, start_x, start_sourced_line);
+                        LOG_INFO("ThorRenderTrace surface texture hit scene={} mode=casted-reuse frame_slot={} tex_addr=0x{:08X} tex={}x{} surface_addr=0x{:08X} crop={}x{}+{},{}",
+                            scene_timestamp, frame_idx, address, original_width, original_height, ite->first, width, height, start_x, start_sourced_line);
                     }
                     return TextureLookupResult{
                         casted->texture.view,
@@ -897,8 +903,8 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         casted->texture.transition_to(cmd_buffer, vkutil::ImageLayout::SampledImage);
 
         if (trace_surface_texture) {
-            LOG_INFO("ThorRenderTrace surface texture hit scene={} mode=casted-copy tex_addr=0x{:08X} tex={}x{} surface_addr=0x{:08X} surface={}x{} crop={}x{}+{},{} requested_fmt=0x{:08X} surface_fmt=0x{:08X}",
-                scene_timestamp, address, original_width, original_height, ite->first, info.original_width, info.original_height, width, height, start_x, start_sourced_line,
+            LOG_INFO("ThorRenderTrace surface texture hit scene={} mode=casted-copy frame_slot={} tex_addr=0x{:08X} tex={}x{} surface_addr=0x{:08X} surface={}x{} crop={}x{}+{},{} requested_fmt=0x{:08X} surface_fmt=0x{:08X}",
+                scene_timestamp, frame_idx, address, original_width, original_height, ite->first, info.original_width, info.original_height, width, height, start_x, start_sourced_line,
                 static_cast<uint32_t>(base_format), static_cast<uint32_t>(info.format));
         }
         return TextureLookupResult{
