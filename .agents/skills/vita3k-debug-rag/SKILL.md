@@ -31,6 +31,12 @@ If the issue is architectural or recurring, also run:
 python tools/debug_knowledge.py search "<symptom title id shader hash platform>" --long-term
 ```
 
+Before repeating a renderer/core experiment, also check the attempt ledger:
+
+```powershell
+python tools/debug_knowledge.py attempt check --case <case-slug> --platform windows --subsystem surface-cache --hypothesis "<specific thing you are about to try>"
+```
+
 Prefer recent entries for immediate bug work. Use long-term matches to avoid repeating old failed experiments and to preserve architectural lessons.
 
 ## Local ROM Layout
@@ -44,13 +50,15 @@ Prefer recent entries for immediate bug work. Use long-term matches to avoid rep
 
 1. Create or update a case in SQLite.
 2. Record the current symptom as an observation with platform, title ID, screenshot/log paths, shader hashes, and draw filters when available.
-3. Classify the bug before patching: emulator core, shader translator, renderer state, VFS/cartridge, platform driver/presentation, input/OSD, timing/audio, or unknown.
-4. For serious emulator/render bugs, reproduce on Windows first unless the evidence already proves Android-only behavior.
-5. Patch the smallest plausible emulator subsystem.
-6. Verify Windows proof first.
-7. Verify Android/Thor proof second for Android-affecting changes.
-8. Record tests, regression risk, final fix, and commit hash in SQLite.
-9. Commit and push small checkpoints.
+3. Run `attempt check` for the next planned hypothesis/change before editing.
+4. Classify the bug before patching: emulator core, shader translator, renderer state, VFS/cartridge, platform driver/presentation, input/OSD, timing/audio, or unknown.
+5. For serious emulator/render bugs, reproduce on Windows first unless the evidence already proves Android-only behavior.
+6. Patch the smallest plausible emulator subsystem.
+7. Verify Windows proof first.
+8. Verify Android/Thor proof second for Android-affecting changes.
+9. Record the attempt as `succeeded`, `failed`, `inconclusive`, or `superseded`, including artifacts and commands.
+10. Record tests, regression risk, final fix, and commit hash in SQLite.
+11. Commit and push small checkpoints.
 
 ## Burst Screenshot Rule
 
@@ -126,6 +134,24 @@ Add an observation:
 
 ```powershell
 python tools/debug_knowledge.py entry add --case doa-venus-render-corruption --type observation --platform android --summary "Thor burst shows black terrain masks" --shader-hash 564cd0 --shader-hash 1c4c944 --artifact tmp/thor-burst/example/ --body "Describe exact scene, driver, build commit, which burst frames matter, and what changed."
+```
+
+Check whether the next experiment was already tried:
+
+```powershell
+python tools/debug_knowledge.py attempt check --case doa-venus-render-corruption --platform windows --subsystem surface-cache --hypothesis "Force copied sampling for MSAA downscaled U2F color surfaces" --shader-hash 1c4c944
+```
+
+Record an experiment result:
+
+```powershell
+python tools/debug_knowledge.py attempt add --case doa-venus-render-corruption --status failed --platform windows --subsystem surface-cache --hypothesis "Force copied sampling for MSAA downscaled U2F color surfaces" --change "Removed the Adreno-only gate so Windows also avoids direct sampling" --test-command ".\tools\windows\capture-vita3k-burst.ps1 -Topic doa-venus-render-corruption -Count 10 -IntervalMs 250" --result "Burst still alternated clean and corrupted title frames." --artifact tmp/vita3k-win-debug/example-burst/ --shader-hash 1c4c944
+```
+
+List the recent attempt history for a case:
+
+```powershell
+python tools/debug_knowledge.py attempt list --case doa-venus-render-corruption --limit 10
 ```
 
 Show the current case:

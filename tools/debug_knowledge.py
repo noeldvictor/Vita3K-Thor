@@ -22,7 +22,7 @@ from typing import Any
 
 
 DEFAULT_DB = Path("reports/debug_knowledge.sqlite")
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 EMBED_DIM = 256
 TOKEN_RE = re.compile(r"[a-z0-9_]{2,}", re.IGNORECASE)
 
@@ -125,6 +125,30 @@ def init_db(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+            fingerprint TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN (
+                'planned', 'running', 'succeeded', 'failed',
+                'inconclusive', 'superseded'
+            )),
+            platform TEXT NOT NULL DEFAULT 'unknown',
+            subsystem TEXT NOT NULL DEFAULT '',
+            hypothesis TEXT NOT NULL,
+            change_summary TEXT NOT NULL DEFAULT '',
+            test_command TEXT NOT NULL DEFAULT '',
+            expected_signal TEXT NOT NULL DEFAULT '',
+            result_summary TEXT NOT NULL DEFAULT '',
+            artifact_refs_json TEXT NOT NULL DEFAULT '[]',
+            shader_hashes_json TEXT NOT NULL DEFAULT '[]',
+            commit_hash TEXT NOT NULL DEFAULT '',
+            supersedes_attempt_id INTEGER REFERENCES attempts(id),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(case_id, fingerprint)
+        );
+
         CREATE TABLE IF NOT EXISTS chunks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
@@ -141,6 +165,9 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status);
         CREATE INDEX IF NOT EXISTS idx_cases_title ON cases(title_id);
         CREATE INDEX IF NOT EXISTS idx_entries_case ON entries(case_id);
+        CREATE INDEX IF NOT EXISTS idx_attempts_case ON attempts(case_id);
+        CREATE INDEX IF NOT EXISTS idx_attempts_status ON attempts(status);
+        CREATE INDEX IF NOT EXISTS idx_attempts_fingerprint ON attempts(fingerprint);
         CREATE INDEX IF NOT EXISTS idx_chunks_case ON chunks(case_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_title ON chunks(title_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_created ON chunks(created_at);
@@ -210,6 +237,58 @@ def insert_chunk(
         )
     except sqlite3.Error:
         pass
+
+
+def delete_chunks_by_source_prefix(conn: sqlite3.Connection, source_prefix: str) -> None:
+    rows = conn.execute("SELECT id FROM chunks WHERE source_ref LIKE ?", (f"{source_prefix}%",)).fetchall()
+    for row in rows:
+        try:
+            conn.execute("DELETE FROM chunks_fts WHERE rowid = ?", (row["id"],))
+        except sqlite3.Error:
+            pass
+    conn.execute("DELETE FROM chunks WHERE source_ref LIKE ?", (f"{source_prefix}%",))
+
+
+def normalize_fingerprint_part(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().lower())
+
+
+def make_attempt_fingerprint(case_slug: str, args: argparse.Namespace, shader_hashes: list[str]) -> str:
+    if args.fingerprint:
+        return slugify(args.fingerprint)
+
+    parts = [
+        case_slug,
+        args.platform,
+        args.subsystem,
+        args.hypothesis,
+        ",".join(sorted(shader_hashes)),
+    ]
+    normalized = "||".join(normalize_fingerprint_part(part) for part in parts)
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+    prefix = slugify(args.subsystem or args.platform or "attempt")[:32]
+    return f"{prefix}-{digest}"
+
+
+def attempt_text(case_slug: str, attempt: dict[str, Any]) -> str:
+    shader_hashes = attempt.get("shader_hashes", [])
+    artifacts = attempt.get("artifacts", [])
+    parts = [
+        f"Attempt {attempt['fingerprint']} for {case_slug}",
+        f"Status: {attempt['status']}",
+        f"Platform: {attempt['platform']}",
+        f"Subsystem: {attempt['subsystem']}" if attempt.get("subsystem") else "",
+        f"Hypothesis: {attempt['hypothesis']}",
+        f"Change: {attempt['change_summary']}" if attempt.get("change_summary") else "",
+        f"Test command: {attempt['test_command']}" if attempt.get("test_command") else "",
+        f"Expected signal: {attempt['expected_signal']}" if attempt.get("expected_signal") else "",
+        f"Result: {attempt['result_summary']}" if attempt.get("result_summary") else "",
+        f"Shader hashes: {', '.join(shader_hashes)}" if shader_hashes else "",
+        f"Artifacts: {', '.join(artifacts)}" if artifacts else "",
+        f"Commit: {attempt['commit_hash']}" if attempt.get("commit_hash") else "",
+        f"Supersedes attempt: {attempt['supersedes_attempt_id']}" if attempt.get("supersedes_attempt_id") else "",
+    ]
+    return "\n".join(part for part in parts if part)
 
 
 def resolve_case(conn: sqlite3.Connection, case_ref: str) -> sqlite3.Row:
@@ -361,6 +440,253 @@ def add_entry(args: argparse.Namespace) -> None:
     print(f"added {args.type} entry {entry_id} to case {case['id']}: {case['slug']}")
 
 
+def add_attempt(args: argparse.Namespace) -> None:
+    conn = connect(args.db)
+    init_db(conn)
+    case = resolve_case(conn, args.case)
+    now = utc_now()
+    artifacts = [item for item in args.artifact if item]
+    shader_hashes = [item.lower() for item in args.shader_hash if item]
+    fingerprint = make_attempt_fingerprint(case["slug"], args, shader_hashes)
+    supersedes_attempt_id = args.supersedes if args.supersedes else None
+
+    existing = conn.execute(
+        "SELECT * FROM attempts WHERE case_id = ? AND fingerprint = ?",
+        (case["id"], fingerprint),
+    ).fetchone()
+
+    if existing:
+        conn.execute(
+            """
+            UPDATE attempts
+            SET status = ?, platform = ?, subsystem = ?, hypothesis = ?,
+                change_summary = ?, test_command = ?, expected_signal = ?,
+                result_summary = ?, artifact_refs_json = ?,
+                shader_hashes_json = ?, commit_hash = ?,
+                supersedes_attempt_id = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                args.status,
+                args.platform,
+                args.subsystem or "",
+                args.hypothesis,
+                args.change or "",
+                args.test_command or "",
+                args.expected or "",
+                args.result or "",
+                json.dumps(artifacts),
+                json.dumps(shader_hashes),
+                args.commit or "",
+                supersedes_attempt_id,
+                now,
+                existing["id"],
+            ),
+        )
+        attempt_id = existing["id"]
+        action = "updated"
+        delete_chunks_by_source_prefix(conn, f"attempt:{attempt_id}:")
+    else:
+        cur = conn.execute(
+            """
+            INSERT INTO attempts(case_id, fingerprint, status, platform, subsystem,
+                                 hypothesis, change_summary, test_command,
+                                 expected_signal, result_summary, artifact_refs_json,
+                                 shader_hashes_json, commit_hash, supersedes_attempt_id,
+                                 created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                case["id"],
+                fingerprint,
+                args.status,
+                args.platform,
+                args.subsystem or "",
+                args.hypothesis,
+                args.change or "",
+                args.test_command or "",
+                args.expected or "",
+                args.result or "",
+                json.dumps(artifacts),
+                json.dumps(shader_hashes),
+                args.commit or "",
+                supersedes_attempt_id,
+                now,
+                now,
+            ),
+        )
+        attempt_id = cur.lastrowid
+        action = "added"
+
+    conn.execute("UPDATE cases SET updated_at = ? WHERE id = ?", (now, case["id"]))
+    text = attempt_text(
+        case["slug"],
+        {
+            "fingerprint": fingerprint,
+            "status": args.status,
+            "platform": args.platform,
+            "subsystem": args.subsystem or "",
+            "hypothesis": args.hypothesis,
+            "change_summary": args.change or "",
+            "test_command": args.test_command or "",
+            "expected_signal": args.expected or "",
+            "result_summary": args.result or "",
+            "artifacts": artifacts,
+            "shader_hashes": shader_hashes,
+            "commit_hash": args.commit or "",
+            "supersedes_attempt_id": supersedes_attempt_id,
+        },
+    )
+    for index, chunk in enumerate(split_chunks(text) or [text]):
+        insert_chunk(
+            conn,
+            case_id=case["id"],
+            entry_id=None,
+            domain=case["domain"],
+            title_id=case["title_id"] or "",
+            chunk_type="attempt",
+            source_ref=f"attempt:{attempt_id}:{index}",
+            text=chunk,
+            created_at=now,
+        )
+    conn.commit()
+    print(f"{action} attempt {attempt_id} for case {case['id']}: {case['slug']}")
+    print(f"fingerprint: {fingerprint}")
+
+
+def list_attempts(args: argparse.Namespace) -> None:
+    conn = connect(args.db)
+    init_db(conn)
+    where = []
+    params: list[Any] = []
+    if args.case:
+        case = resolve_case(conn, args.case)
+        where.append("case_id = ?")
+        params.append(case["id"])
+    if args.status:
+        where.append("status = ?")
+        params.append(args.status)
+    if args.platform:
+        where.append("platform = ?")
+        params.append(args.platform)
+    if args.subsystem:
+        where.append("subsystem = ?")
+        params.append(args.subsystem)
+
+    sql = "SELECT * FROM attempts"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY updated_at DESC LIMIT ?"
+    params.append(args.limit)
+
+    for row in conn.execute(sql, params).fetchall():
+        case = conn.execute("SELECT * FROM cases WHERE id = ?", (row["case_id"],)).fetchone()
+        print(
+            f"{row['id']:>3} {row['updated_at']} {row['status']:<12} {row['platform']:<8} "
+            f"{row['subsystem'] or '-':<18} {row['fingerprint']} case={case['slug']}"
+        )
+        print(f"    hypothesis: {row['hypothesis'][:180]}{'...' if len(row['hypothesis']) > 180 else ''}")
+        if row["result_summary"]:
+            print(f"    result: {row['result_summary'][:180]}{'...' if len(row['result_summary']) > 180 else ''}")
+
+
+def check_attempt(args: argparse.Namespace) -> None:
+    conn = connect(args.db)
+    init_db(conn)
+    case = resolve_case(conn, args.case)
+    shader_hashes = [item.lower() for item in args.shader_hash if item]
+    fingerprint = make_attempt_fingerprint(case["slug"], args, shader_hashes)
+
+    exact = conn.execute(
+        "SELECT * FROM attempts WHERE case_id = ? AND fingerprint = ?",
+        (case["id"], fingerprint),
+    ).fetchone()
+    if exact:
+        print(
+            f"EXACT attempt exists: id={exact['id']} status={exact['status']} "
+            f"updated={exact['updated_at']} fingerprint={exact['fingerprint']}"
+        )
+        print(f"  hypothesis: {exact['hypothesis']}")
+        if exact["change_summary"]:
+            print(f"  change: {exact['change_summary']}")
+        if exact["result_summary"]:
+            print(f"  result: {exact['result_summary']}")
+        if exact["artifact_refs_json"] != "[]":
+            print(f"  artifacts: {', '.join(json.loads(exact['artifact_refs_json']))}")
+        print("")
+    else:
+        print(f"No exact attempt fingerprint yet: {fingerprint}")
+        print("")
+
+    query_text = attempt_text(
+        case["slug"],
+        {
+            "fingerprint": fingerprint,
+            "status": "planned",
+            "platform": args.platform,
+            "subsystem": args.subsystem or "",
+            "hypothesis": args.hypothesis,
+            "change_summary": args.change or "",
+            "test_command": args.test_command or "",
+            "expected_signal": args.expected or "",
+            "result_summary": "",
+            "artifacts": [],
+            "shader_hashes": shader_hashes,
+            "commit_hash": "",
+            "supersedes_attempt_id": None,
+        },
+    )
+    query_embedding = embed_text(query_text)
+    query_tokens = set(tokenize(query_text))
+    rows = conn.execute("SELECT * FROM attempts WHERE case_id = ? ORDER BY updated_at DESC LIMIT 500", (case["id"],)).fetchall()
+
+    scored = []
+    for row in rows:
+        row_text = attempt_text(
+            case["slug"],
+            {
+                "fingerprint": row["fingerprint"],
+                "status": row["status"],
+                "platform": row["platform"],
+                "subsystem": row["subsystem"],
+                "hypothesis": row["hypothesis"],
+                "change_summary": row["change_summary"],
+                "test_command": row["test_command"],
+                "expected_signal": row["expected_signal"],
+                "result_summary": row["result_summary"],
+                "artifacts": json.loads(row["artifact_refs_json"] or "[]"),
+                "shader_hashes": json.loads(row["shader_hashes_json"] or "[]"),
+                "commit_hash": row["commit_hash"],
+                "supersedes_attempt_id": row["supersedes_attempt_id"],
+            },
+        )
+        vector = cosine_sparse(query_embedding, embed_text(row_text))
+        keyword = keyword_score(query_tokens, row_text)
+        status_penalty = 0.08 if row["status"] in {"failed", "inconclusive", "superseded"} else 0.0
+        score = (0.66 * vector) + (0.34 * keyword) + status_penalty
+        if score > 0:
+            scored.append((score, vector, keyword, row))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    top = scored[: args.limit]
+    if not top:
+        print("No similar attempts in this case.")
+        return
+
+    print("Similar attempts:")
+    for score, vector, keyword, row in top:
+        print(
+            f"[{score:.3f}] id={row['id']} status={row['status']} platform={row['platform']} "
+            f"subsystem={row['subsystem'] or '-'} updated={row['updated_at']} fingerprint={row['fingerprint']} "
+            f"vector={vector:.3f} keyword={keyword:.3f}"
+        )
+        print(f"  hypothesis: {row['hypothesis'][: args.preview]}{'...' if len(row['hypothesis']) > args.preview else ''}")
+        if row["change_summary"]:
+            print(f"  change: {row['change_summary'][: args.preview]}{'...' if len(row['change_summary']) > args.preview else ''}")
+        if row["result_summary"]:
+            print(f"  result: {row['result_summary'][: args.preview]}{'...' if len(row['result_summary']) > args.preview else ''}")
+
+
 def list_cases(args: argparse.Namespace) -> None:
     conn = connect(args.db)
     init_db(conn)
@@ -398,6 +724,21 @@ def show_case(args: argparse.Namespace) -> None:
     if case["current_hypothesis"]:
         print(f"Hypothesis: {case['current_hypothesis']}")
     print("")
+    attempts = conn.execute(
+        "SELECT * FROM attempts WHERE case_id = ? ORDER BY updated_at DESC LIMIT ?",
+        (case["id"], min(args.limit, 10)),
+    ).fetchall()
+    if attempts:
+        print("Recent attempts:")
+        for row in attempts:
+            print(
+                f"[{row['updated_at']}] attempt {row['id']} {row['status']} "
+                f"{row['platform']} {row['subsystem'] or '-'}: {row['fingerprint']}"
+            )
+            print(f"  hypothesis: {row['hypothesis'][:220]}{'...' if len(row['hypothesis']) > 220 else ''}")
+            if row["result_summary"]:
+                print(f"  result: {row['result_summary'][:220]}{'...' if len(row['result_summary']) > 220 else ''}")
+        print("")
     rows = conn.execute(
         "SELECT * FROM entries WHERE case_id = ? ORDER BY created_at DESC LIMIT ?",
         (case["id"], args.limit),
@@ -531,6 +872,49 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--source", default="codex")
     add.add_argument("--pin", action="store_true")
     add.set_defaults(func=add_entry)
+
+    attempt = sub.add_parser("attempt", help="Track debug hypotheses/tests so failed loops are not repeated")
+    attempt_sub = attempt.add_subparsers(dest="attempt_command", required=True)
+
+    attempt_statuses = ["planned", "running", "succeeded", "failed", "inconclusive", "superseded"]
+    attempt_add = attempt_sub.add_parser("add", help="Add or update a debug attempt by stable fingerprint")
+    attempt_add.add_argument("--case", required=True)
+    attempt_add.add_argument("--status", choices=attempt_statuses, required=True)
+    attempt_add.add_argument("--platform", default="unknown")
+    attempt_add.add_argument("--subsystem", default="")
+    attempt_add.add_argument("--hypothesis", required=True)
+    attempt_add.add_argument("--change", default="")
+    attempt_add.add_argument("--test-command", default="")
+    attempt_add.add_argument("--expected", default="")
+    attempt_add.add_argument("--result", default="")
+    attempt_add.add_argument("--artifact", action="append", default=[])
+    attempt_add.add_argument("--shader-hash", action="append", default=[])
+    attempt_add.add_argument("--commit", default="")
+    attempt_add.add_argument("--fingerprint", default="", help="Optional manual fingerprint; otherwise derived from case/platform/subsystem/hypothesis/shader hashes")
+    attempt_add.add_argument("--supersedes", type=int, default=0)
+    attempt_add.set_defaults(func=add_attempt)
+
+    attempt_check = attempt_sub.add_parser("check", help="Check whether a similar or exact attempt was already tried")
+    attempt_check.add_argument("--case", required=True)
+    attempt_check.add_argument("--platform", default="unknown")
+    attempt_check.add_argument("--subsystem", default="")
+    attempt_check.add_argument("--hypothesis", required=True)
+    attempt_check.add_argument("--change", default="")
+    attempt_check.add_argument("--test-command", default="")
+    attempt_check.add_argument("--expected", default="")
+    attempt_check.add_argument("--shader-hash", action="append", default=[])
+    attempt_check.add_argument("--fingerprint", default="")
+    attempt_check.add_argument("--limit", type=int, default=6)
+    attempt_check.add_argument("--preview", type=int, default=220)
+    attempt_check.set_defaults(func=check_attempt)
+
+    attempt_list = attempt_sub.add_parser("list", help="List recent attempts")
+    attempt_list.add_argument("--case", default="")
+    attempt_list.add_argument("--status", choices=attempt_statuses, default="")
+    attempt_list.add_argument("--platform", default="")
+    attempt_list.add_argument("--subsystem", default="")
+    attempt_list.add_argument("--limit", type=int, default=20)
+    attempt_list.set_defaults(func=list_attempts)
 
     search_cmd = sub.add_parser("search", help="Search by recency, text, and local hashed embeddings")
     search_cmd.add_argument("query")

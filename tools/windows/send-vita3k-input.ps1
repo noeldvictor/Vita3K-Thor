@@ -11,6 +11,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if (-not ('Vita3KInputWin32' -as [type])) {
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -26,7 +27,7 @@ public static class Vita3KInputWin32 {
     public static extern void keybd_event(byte bVk, byte bScan, int dwFlags, UIntPtr dwExtraInfo);
 
     [DllImport("user32.dll")]
-    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+    public static extern bool GetWindowRect(IntPtr hWnd, out Vita3KInputRect lpRect);
 
     [DllImport("user32.dll")]
     public static extern bool SetCursorPos(int X, int Y);
@@ -36,13 +37,14 @@ public static class Vita3KInputWin32 {
 }
 
 [StructLayout(LayoutKind.Sequential)]
-public struct RECT {
+public struct Vita3KInputRect {
     public int Left;
     public int Top;
     public int Right;
     public int Bottom;
 }
 "@
+}
 
 $KEYEVENTF_KEYUP = 0x0002
 $MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -155,7 +157,7 @@ function Invoke-Click([string]$Token) {
         Focus-Vita3KWindow
     }
 
-    $rect = New-Object RECT
+    $rect = New-Object Vita3KInputRect
     [Vita3KInputWin32]::GetWindowRect($script:TargetWindow, [ref]$rect) | Out-Null
     $x = [int](($rect.Left + $rect.Right) / 2)
     $y = [int]($rect.Bottom - $ClickYFromBottom)

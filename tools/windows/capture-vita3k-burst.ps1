@@ -13,6 +13,7 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 
+if (-not ('Vita3KCaptureWin32' -as [type])) {
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -25,17 +26,18 @@ public static class Vita3KCaptureWin32 {
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     [DllImport("user32.dll")]
-    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+    public static extern bool GetWindowRect(IntPtr hWnd, out Vita3KCaptureRect lpRect);
 }
 
 [StructLayout(LayoutKind.Sequential)]
-public struct RECT {
+public struct Vita3KCaptureRect {
     public int Left;
     public int Top;
     public int Right;
     public int Bottom;
 }
 "@
+}
 
 $SW_RESTORE = 9
 
@@ -82,7 +84,7 @@ function Get-CaptureBounds {
         Start-Sleep -Milliseconds 120
     }
 
-    $rect = New-Object RECT
+    $rect = New-Object Vita3KCaptureRect
     $ok = [Vita3KCaptureWin32]::GetWindowRect($proc.MainWindowHandle, [ref]$rect)
     if (-not $ok -or $rect.Right -le $rect.Left -or $rect.Bottom -le $rect.Top) {
         Write-Warning "Could not read Vita3K window bounds; capturing the virtual desktop instead."
