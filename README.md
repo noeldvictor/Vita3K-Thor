@@ -110,15 +110,15 @@ This screenshot is from a local legally owned test copy. No game content, firmwa
 
 ## Dead Or Alive Xtreme 3 Venus Runs On Thor
 
-![Dead or Alive Xtreme 3 Venus rendering correctly on Vita3K-Thor on AYN Thor](docs/screenshots/doa-venus-thor-render-fixed-20260514_120346.png)
+![Dead or Alive Xtreme 3 Venus rendering correctly on Vita3K-Thor on AYN Thor](docs/screenshots/doa-venus-thor-64k-guard-verified-20260514_122940.png)
 
 Dead or Alive Xtreme 3 Venus (`PCSH00250`) now reaches gameplay rendering on AYN Thor from direct ZIP cartridge mode. This screenshot was captured from the connected Thor after the renderer fix.
 
-ELI5 version of the render fix: the game was changing tiny chunks of Vita memory right before the GPU used them. One of those chunks crossed the edge of Vita3K's watched memory area, so the emulator sometimes refreshed only part of the data. The GPU then drew with one half new data and one half stale data, which showed up as black scenes, broken island/beach rendering, magenta terrain, or flickering title screens.
+ELI5 version of the render fix: the game was changing chunks of Vita memory right before the GPU used them. Some chunks crossed the edge of Vita3K's watched memory area, so the emulator sometimes refreshed only part of the data. The GPU then drew with one half new data and one half stale data, which showed up as black scenes, broken island/beach rendering, magenta terrain, or flickering title screens.
 
-The fix makes Vita3K notice and refresh the whole chunk, including the guarded edge of that memory area, before Vulkan renders the frame. In plain English: the emulator now hands the GPU the complete current drawing instructions instead of a half-old, half-new set.
+The first fix covered the title screen, but gameplay proved DOA could read farther past that edge than one small guard page. The final fix gives the Vulkan double-buffer path a larger guard area and makes the sync check copy that whole boundary-crossing chunk before Vulkan renders the frame. In plain English: the emulator now hands the GPU the complete current drawing instructions instead of a half-old, half-new set.
 
-This was verified Windows-first, then on AYN Thor Android with an 80-frame screenshot burst and a 45-second screen recording of the DOA title loop. The same Android build also keeps the earlier direct ZIP cartridge fixes and the SurfaceFlinger opaque-present fix used for UPPERS.
+This was verified Windows-first from title into gameplay, then on AYN Thor Android with burst captures through the same post-title scenes. The same Android build also keeps the earlier direct ZIP cartridge fixes and the SurfaceFlinger opaque-present fix used for UPPERS.
 
 ## Build Locally
 
