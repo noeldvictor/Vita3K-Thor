@@ -48,6 +48,33 @@ namespace renderer::vulkan {
 // Size of the record containing what is needed for the pipeline construction (what is after is dynamic state)
 constexpr size_t record_pipeline_len = offsetof(GxmRecordState, vertex_streams);
 
+static bool visible_fragment_program_disabled(const GxmRecordState &record) {
+    switch (record.cull_mode) {
+    case SCE_GXM_CULL_CW:
+        return record.front_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED;
+    case SCE_GXM_CULL_CCW:
+        return record.back_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED;
+    case SCE_GXM_CULL_NONE:
+    default:
+        return record.front_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED
+            && record.back_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED;
+    }
+}
+
+static bool prefer_back_depth_compare_for_culled_discard_pass(const GxmRecordState &record, const SceGxmProgram &fragment_shader, const VKFragmentProgram &fragment_program) {
+    // DOA Venus uses culled blended/discard character passes with front depth writes
+    // disabled, back depth writes enabled, and opposing front/back compare funcs. The
+    // historical Vulkan front-only compare lets background depth reject character
+    // pixels, making room frames draw over the character. Limit the back compare to
+    // that alpha/discard shape so opaque scenery keeps the older front-depth path.
+    return record.cull_mode == SCE_GXM_CULL_CCW
+        && fragment_shader.is_discard_used()
+        && static_cast<bool>(fragment_program.blending.blendEnable)
+        && record.front_depth_func != record.back_depth_func
+        && record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_DISABLED
+        && record.back_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED;
+}
+
 // structure containing everything needed to compile a pipeline
 struct CompileRequest {
     // iterator to the pipeline location
@@ -808,7 +835,7 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     const vk::PipelineShaderStageCreateInfo fragment_shader = retrieve_shader(gxm_fragment_shader, fragment_program.hash, false, fragment_program_gxm.is_maskupdate, mem, hints, record.is_gamma_corrected);
     const vk::PipelineShaderStageCreateInfo shader_stages[] = { vertex_shader, fragment_shader };
     // disable the fragment shader if gxm asks us to
-    const bool is_fragment_disabled = record.front_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED || gxm_fragment_shader->has_no_effect();
+    const bool is_fragment_disabled = visible_fragment_program_disabled(record) || gxm_fragment_shader->has_no_effect();
     const uint32_t shader_stage_count = is_fragment_disabled ? 1U : 2U;
 
     const vk::PipelineInputAssemblyStateCreateInfo input_assembly{
@@ -845,10 +872,12 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     const std::string thor_depth_lequal_prefix = thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_LEQUAL_FHASH", "debug.vita3k.render_force_depth_lequal_fhash");
     const bool thor_force_depth_always = thor_debug_hash_prefix_matches(fragment_program.hash, thor_depth_always_prefix);
     const bool thor_force_depth_lequal = thor_debug_hash_prefix_matches(fragment_program.hash, thor_depth_lequal_prefix);
+    const bool thor_prefer_back_depth_compare = prefer_back_depth_compare_for_culled_discard_pass(record, *gxm_fragment_shader, fragment_program);
+    const SceGxmDepthFunc depth_func = thor_prefer_back_depth_compare ? record.back_depth_func : record.front_depth_func;
     const vk::PipelineDepthStencilStateCreateInfo ds_info{
         .depthTestEnable = VK_TRUE,
         .depthWriteEnable = (record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED),
-        .depthCompareOp = thor_force_depth_always ? vk::CompareOp::eAlways : (thor_force_depth_lequal ? vk::CompareOp::eLessOrEqual : translate_depth_func(record.front_depth_func)),
+        .depthCompareOp = thor_force_depth_always ? vk::CompareOp::eAlways : (thor_force_depth_lequal ? vk::CompareOp::eLessOrEqual : translate_depth_func(depth_func)),
         .depthBoundsTestEnable = VK_FALSE,
         .stencilTestEnable = VK_TRUE,
         .front = convert_op_state(record.front_stencil_state_op),
