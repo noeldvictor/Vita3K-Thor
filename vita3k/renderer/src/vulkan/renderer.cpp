@@ -37,6 +37,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 
 #ifdef __APPLE__
 #include <MoltenVK/mvk_vulkan.h>
@@ -50,6 +51,7 @@
 #include <dlfcn.h>
 #include <jni.h>
 #include <sys/mman.h>
+#include <sys/system_properties.h>
 #include <util/float_to_half.h>
 
 #include <android/hardware_buffer.h>
@@ -1552,8 +1554,51 @@ void VKState::set_turbo_mode(bool set) {
 BufferTrapping::BufferTrapping(VKState &state)
     : state(state) {}
 
+static bool vulkan_renderer_debug_flag(const char *env_name, const char *android_prop_name) {
+    const char *env_value = std::getenv(env_name);
+    if (env_value != nullptr && env_value[0] != '\0')
+        return std::strcmp(env_value, "0") != 0
+            && std::strcmp(env_value, "false") != 0
+            && std::strcmp(env_value, "False") != 0
+            && std::strcmp(env_value, "FALSE") != 0
+            && std::strcmp(env_value, "off") != 0
+            && std::strcmp(env_value, "OFF") != 0
+            && std::strcmp(env_value, "no") != 0
+            && std::strcmp(env_value, "NO") != 0;
+
+#ifdef __ANDROID__
+    char prop_value[PROP_VALUE_MAX] = {};
+    if (__system_property_get(android_prop_name, prop_value) > 0)
+        return std::strcmp(prop_value, "0") != 0
+            && std::strcmp(prop_value, "false") != 0
+            && std::strcmp(prop_value, "False") != 0
+            && std::strcmp(prop_value, "FALSE") != 0
+            && std::strcmp(prop_value, "off") != 0
+            && std::strcmp(prop_value, "OFF") != 0
+            && std::strcmp(prop_value, "no") != 0
+            && std::strcmp(prop_value, "NO") != 0;
+#else
+    (void)android_prop_name;
+#endif
+
+    return false;
+}
+
+static uint64_t mapped_memory_sync_size(const VKState &state, const MappedMemory &mapped_memory) {
+    // DoubleBuffer mappings allocate a small guard region after the Vita memory
+    // range. Shaders can legally read into that padded GPU buffer when a uniform
+    // block straddles the emulated mapping boundary, so the CPU sync path must
+    // copy the same bytes instead of rejecting the access as unmapped.
+    return static_cast<uint64_t>(mapped_memory.size)
+        + (state.mapping_method == MappingMethod::DoubleBuffer ? KiB(4) : 0);
+}
+
 TrappedBuffer *BufferTrapping::access_buffer(Address addr, uint32_t size, MemState &mem, bool always_trap, bool cover_everything) {
     const bool is_buffer_small = (size < 3 * KiB(4));
+    const bool force_copy = vulkan_renderer_debug_flag("VITA3K_RENDER_DOUBLE_BUFFER_ALWAYS_COPY", "debug.vita3k.render_double_buffer_always_copy");
+    if (force_copy) {
+        LOG_INFO_ONCE("ThorRenderDebug forcing double-buffer mapped CPU buffer refresh on every access");
+    }
 
     if (is_buffer_small && always_trap) {
         // overwise we may end up with trapping nothing
@@ -1561,8 +1606,9 @@ TrappedBuffer *BufferTrapping::access_buffer(Address addr, uint32_t size, MemSta
     } else if (is_buffer_small) {
         // not big enough to apply buffer trapping
         auto mem_it = state.mapped_memories.lower_bound(addr);
-        if (mem_it == state.mapped_memories.end() || mem_it->first + mem_it->second.size < addr + size) {
+        if (mem_it == state.mapped_memories.end() || mem_it->first + mapped_memory_sync_size(state, mem_it->second) < static_cast<uint64_t>(addr) + size) {
             LOG_ERROR("Buffer at address {} is not completely mapped", log_hex(addr));
+            temp_buffer = {};
             return &temp_buffer;
         }
 
@@ -1580,9 +1626,18 @@ TrappedBuffer *BufferTrapping::access_buffer(Address addr, uint32_t size, MemSta
     if (it != trapped_buffers.end()) {
         // must check if everything match
         TrappedBuffer &buffer = it->second;
-        if (!buffer.dirty && buffer.size >= size)
+        if (!buffer.dirty && buffer.size >= size) {
+            if (force_copy) {
+                if (buffer.mapped_location != nullptr) {
+                    memcpy(buffer.mapped_location, Ptr<void>(addr).get(mem), size);
+                } else {
+                    LOG_WARN("ThorRenderDebug skipped forced mapped-buffer refresh for {} because mapped_location is null", log_hex(addr));
+                }
+                buffer.extra = ~0;
+            }
             // nothing to change
             return &it->second;
+        }
     } else {
         it = trapped_buffers.emplace(std::piecewise_construct, std::forward_as_tuple(addr), std::forward_as_tuple()).first;
         is_new = true;
@@ -1606,13 +1661,18 @@ TrappedBuffer *BufferTrapping::access_buffer(Address addr, uint32_t size, MemSta
     if (is_new) {
         // we must find the matching mapped buffer
         auto mem_it = state.mapped_memories.lower_bound(addr);
-        if (mem_it == state.mapped_memories.end() || mem_it->first + mem_it->second.size < addr + size) {
+        if (mem_it == state.mapped_memories.end() || mem_it->first + mapped_memory_sync_size(state, mem_it->second) < static_cast<uint64_t>(addr) + size) {
             LOG_ERROR("Buffer at address {} is not completely mapped", log_hex(addr));
-            return &it->second;
+            trapped_buffers.erase(it);
+            temp_buffer = {};
+            return &temp_buffer;
         }
 
         it->second.mapped_location = reinterpret_cast<uint8_t *>(std::get<vkutil::Buffer>(mem_it->second.buffer_impl).mapped_data);
         it->second.mapped_location += addr - mem_it->first;
+        if (static_cast<uint64_t>(addr) + size > mem_it->first + mem_it->second.size) {
+            LOG_INFO_ONCE("ThorRenderDebug syncing double-buffer mapped data through the guard page for boundary-crossing shader reads");
+        }
     }
 
     Address aligned_addr;
