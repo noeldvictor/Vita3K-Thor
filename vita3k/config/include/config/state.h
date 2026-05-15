@@ -89,7 +89,7 @@ struct Config {
         bool fullscreen_hd_res_pixel_perfect = false;
         bool show_touchpad_cursor = true;
         int file_loading_delay = 0;
-        bool psn_signed_in = false;
+        bool psn_signed_in = true;
     };
 
     /**

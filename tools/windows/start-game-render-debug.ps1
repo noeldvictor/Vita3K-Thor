@@ -15,6 +15,7 @@ param(
     [string]$BackendRenderer = "Vulkan",
     [int]$TraceLimit = 256,
     [int]$LogLevel = 2,
+    [bool]$PsnSignedIn = $true,
     [switch]$NoLabels,
     [switch]$NoStart
 )
@@ -56,6 +57,7 @@ if (-not $GameZip) {
 if (-not $GameZip -or -not (Test-Path -LiteralPath $GameZip)) {
     throw "Game ZIP not found. Put the issue ROM under roms\issues\$TitleId\ or pass -GameZip."
 }
+$GameZip = (Resolve-Path -LiteralPath $GameZip).Path
 
 $debugRoot = Join-Path $RepoRoot "tmp\vita3k-win-debug\$CaseSlug"
 New-Item -ItemType Directory -Force -Path $debugRoot | Out-Null
@@ -77,6 +79,12 @@ if ($LogLevel -ge 0) {
         $configText = $configText -replace '(?m)^log-level:\s*\d+', "log-level: $LogLevel"
     } else {
         $configText += "`nlog-level: $LogLevel`n"
+    }
+    $psnSignedInValue = if ($PsnSignedIn) { "1" } else { "0" }
+    if ($configText -match '(?m)^psn-signed-in:\s*\d+') {
+        $configText = $configText -replace '(?m)^psn-signed-in:\s*\d+', "psn-signed-in: $psnSignedInValue"
+    } else {
+        $configText += "`npsn-signed-in: $psnSignedInValue`n"
     }
     Set-Content -LiteralPath $LaunchConfigPath -Value $configText -Encoding UTF8
 }
@@ -153,6 +161,7 @@ Write-Host "  backend:    $BackendRenderer"
 Write-Host "  control:    $ControlFile"
 Write-Host "  traceLimit: $TraceLimit"
 Write-Host "  logLevel:   $LogLevel"
+Write-Host "  psnLocal:   $PsnSignedIn"
 Write-Host "  labels:     $(-not $NoLabels)"
 Write-Host "  skip:       $Skip"
 Write-Host "  stopAfter:  $StopAfter"

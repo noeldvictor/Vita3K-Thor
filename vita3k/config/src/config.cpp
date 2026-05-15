@@ -103,6 +103,9 @@ static void merge(Config &self, const Config &rhs) {
     if (get(rhs) == get(Config{})) {
         init = true;
     }
+    if (!rhs.config_path.empty() && rhs.config_path != self.config_path) {
+        init = true;
+    }
 
     // if (log_imports != rhs.log_imports && (init || rhs.log_imports != false))
 #define COMBINE_INDIVIDUAL(option_type, option_name, option_default, member_name)           \

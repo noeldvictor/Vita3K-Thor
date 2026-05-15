@@ -836,7 +836,7 @@ static bool get_custom_config(EmuEnvState &emuenv, const std::string &app_path) 
             // Load Network Config
             if (!config_child.child("network").empty()) {
                 const auto network_child = config_child.child("network");
-                config.psn_signed_in = network_child.attribute("psn-signed-in").as_bool();
+                config.psn_signed_in = network_child.attribute("psn-signed-in").as_bool(emuenv.cfg.psn_signed_in);
             }
 
             return true;
