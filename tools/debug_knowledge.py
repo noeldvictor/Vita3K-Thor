@@ -22,7 +22,7 @@ from typing import Any
 
 
 DEFAULT_DB = Path("reports/debug_knowledge.sqlite")
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 EMBED_DIM = 256
 TOKEN_RE = re.compile(r"[a-z0-9_]{2,}", re.IGNORECASE)
 
@@ -149,6 +149,28 @@ def init_db(conn: sqlite3.Connection) -> None:
             UNIQUE(case_id, fingerprint)
         );
 
+        CREATE TABLE IF NOT EXISTS compat_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER REFERENCES cases(id) ON DELETE SET NULL,
+            domain TEXT NOT NULL DEFAULT 'game' CHECK (domain IN ('emulator', 'game')),
+            title_id TEXT NOT NULL DEFAULT '',
+            title_name TEXT NOT NULL DEFAULT '',
+            platform TEXT NOT NULL DEFAULT 'unknown',
+            commit_hash TEXT NOT NULL,
+            commit_label TEXT NOT NULL DEFAULT '',
+            build_type TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL CHECK (status IN (
+                'works', 'broken', 'regressed', 'partial',
+                'blocked', 'unknown'
+            )),
+            scene TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL,
+            body TEXT NOT NULL DEFAULT '',
+            artifact_refs_json TEXT NOT NULL DEFAULT '[]',
+            tested_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS chunks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
@@ -168,6 +190,10 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_attempts_case ON attempts(case_id);
         CREATE INDEX IF NOT EXISTS idx_attempts_status ON attempts(status);
         CREATE INDEX IF NOT EXISTS idx_attempts_fingerprint ON attempts(fingerprint);
+        CREATE INDEX IF NOT EXISTS idx_compat_title ON compat_checks(title_id);
+        CREATE INDEX IF NOT EXISTS idx_compat_commit ON compat_checks(commit_hash);
+        CREATE INDEX IF NOT EXISTS idx_compat_platform ON compat_checks(platform);
+        CREATE INDEX IF NOT EXISTS idx_compat_status ON compat_checks(status);
         CREATE INDEX IF NOT EXISTS idx_chunks_case ON chunks(case_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_title ON chunks(title_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_created ON chunks(created_at);
@@ -287,6 +313,28 @@ def attempt_text(case_slug: str, attempt: dict[str, Any]) -> str:
         f"Artifacts: {', '.join(artifacts)}" if artifacts else "",
         f"Commit: {attempt['commit_hash']}" if attempt.get("commit_hash") else "",
         f"Supersedes attempt: {attempt['supersedes_attempt_id']}" if attempt.get("supersedes_attempt_id") else "",
+    ]
+    return "\n".join(part for part in parts if part)
+
+
+def compat_text(row: dict[str, Any], case_slug: str = "") -> str:
+    artifacts = row.get("artifacts", [])
+    parts = [
+        "Compatibility checkpoint",
+        f"Case: {case_slug}" if case_slug else "",
+        f"Domain: {row.get('domain', 'game')}",
+        f"Title ID: {row.get('title_id', '') or '-'}",
+        f"Title name: {row.get('title_name', '')}" if row.get("title_name") else "",
+        f"Platform: {row['platform']}",
+        f"Commit: {row['commit_hash']}",
+        f"Commit label: {row.get('commit_label', '')}" if row.get("commit_label") else "",
+        f"Build type: {row.get('build_type', '')}" if row.get("build_type") else "",
+        f"Status: {row['status']}",
+        f"Scene: {row.get('scene', '')}" if row.get("scene") else "",
+        f"Summary: {row['summary']}",
+        f"Artifacts: {', '.join(artifacts)}" if artifacts else "",
+        f"Tested at: {row['tested_at']}",
+        row.get("body", ""),
     ]
     return "\n".join(part for part in parts if part)
 
@@ -552,6 +600,149 @@ def add_attempt(args: argparse.Namespace) -> None:
     conn.commit()
     print(f"{action} attempt {attempt_id} for case {case['id']}: {case['slug']}")
     print(f"fingerprint: {fingerprint}")
+
+
+def add_compat(args: argparse.Namespace) -> None:
+    conn = connect(args.db)
+    init_db(conn)
+    now = utc_now()
+    title_id = args.title_id.upper() if args.title_id else ""
+    artifacts = [item for item in args.artifact if item]
+    case = resolve_case(conn, args.case) if args.case else None
+    tested_at = args.tested_at or now
+
+    cur = conn.execute(
+        """
+        INSERT INTO compat_checks(case_id, domain, title_id, title_name, platform,
+                                  commit_hash, commit_label, build_type, status,
+                                  scene, summary, body, artifact_refs_json,
+                                  tested_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            case["id"] if case else None,
+            args.domain,
+            title_id,
+            args.title_name or "",
+            args.platform,
+            args.commit,
+            args.commit_label or "",
+            args.build_type or "",
+            args.status,
+            args.scene or "",
+            args.summary,
+            args.body or "",
+            json.dumps(artifacts),
+            tested_at,
+            now,
+        ),
+    )
+    compat_id = cur.lastrowid
+
+    if case:
+        conn.execute("UPDATE cases SET updated_at = ? WHERE id = ?", (now, case["id"]))
+        chunk_case = case
+    else:
+        slug = slugify(f"compatibility {title_id or args.title_name or args.platform}")
+        existing = conn.execute(
+            "SELECT * FROM cases WHERE domain = ? AND title_id = ? AND slug = ?",
+            (args.domain, title_id, slug),
+        ).fetchone()
+        if existing:
+            chunk_case = existing
+            conn.execute("UPDATE cases SET updated_at = ? WHERE id = ?", (now, existing["id"]))
+        else:
+            summary = f"Compatibility checkpoints for {title_id or args.title_name or args.platform}"
+            new_case = conn.execute(
+                """
+                INSERT INTO cases(domain, title_id, slug, status, severity, platform_scope,
+                                  summary, current_hypothesis, created_at, updated_at)
+                VALUES (?, ?, ?, 'active', 'normal', ?, ?, '', ?, ?)
+                """,
+                (args.domain, title_id, slug, args.platform, summary, now, now),
+            )
+            chunk_case = conn.execute("SELECT * FROM cases WHERE id = ?", (new_case.lastrowid,)).fetchone()
+            conn.execute("UPDATE compat_checks SET case_id = ? WHERE id = ?", (chunk_case["id"], compat_id))
+
+    text = compat_text(
+        {
+            "domain": args.domain,
+            "title_id": title_id,
+            "title_name": args.title_name or "",
+            "platform": args.platform,
+            "commit_hash": args.commit,
+            "commit_label": args.commit_label or "",
+            "build_type": args.build_type or "",
+            "status": args.status,
+            "scene": args.scene or "",
+            "summary": args.summary,
+            "body": args.body or "",
+            "artifacts": artifacts,
+            "tested_at": tested_at,
+        },
+        chunk_case["slug"] if chunk_case else "",
+    )
+    for index, chunk in enumerate(split_chunks(text) or [text]):
+        insert_chunk(
+            conn,
+            case_id=chunk_case["id"],
+            entry_id=None,
+            domain=args.domain,
+            title_id=title_id,
+            chunk_type="compat",
+            source_ref=f"compat:{compat_id}:{index}",
+            text=chunk,
+            created_at=now,
+        )
+    conn.commit()
+    print(f"added compatibility checkpoint {compat_id}: {title_id or args.title_name or '-'} {args.platform} {args.status} at {args.commit}")
+
+
+def list_compat(args: argparse.Namespace) -> None:
+    conn = connect(args.db)
+    init_db(conn)
+    where = []
+    params: list[Any] = []
+    if args.title_id:
+        where.append("title_id = ?")
+        params.append(args.title_id.upper())
+    if args.platform:
+        where.append("platform = ?")
+        params.append(args.platform)
+    if args.status:
+        where.append("status = ?")
+        params.append(args.status)
+    if args.commit:
+        where.append("commit_hash LIKE ?")
+        params.append(f"{args.commit}%")
+    if args.case:
+        case = resolve_case(conn, args.case)
+        where.append("case_id = ?")
+        params.append(case["id"])
+
+    sql = "SELECT * FROM compat_checks"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY tested_at DESC, created_at DESC LIMIT ?"
+    params.append(args.limit)
+
+    rows = conn.execute(sql, params).fetchall()
+    for row in rows:
+        case_slug = "-"
+        if row["case_id"]:
+            case = conn.execute("SELECT slug FROM cases WHERE id = ?", (row["case_id"],)).fetchone()
+            if case:
+                case_slug = case["slug"]
+        artifacts = json.loads(row["artifact_refs_json"] or "[]")
+        print(
+            f"{row['id']:>3} {row['tested_at']} {row['status']:<9} {row['platform']:<12} "
+            f"{row['title_id'] or '-':<10} {row['commit_hash'][:12]:<12} case={case_slug}"
+        )
+        print(f"    {row['summary'][:180]}{'...' if len(row['summary']) > 180 else ''}")
+        if row["scene"]:
+            print(f"    scene: {row['scene'][:180]}{'...' if len(row['scene']) > 180 else ''}")
+        if artifacts:
+            print(f"    artifacts: {', '.join(artifacts)}")
 
 
 def list_attempts(args: argparse.Namespace) -> None:
@@ -915,6 +1106,36 @@ def build_parser() -> argparse.ArgumentParser:
     attempt_list.add_argument("--subsystem", default="")
     attempt_list.add_argument("--limit", type=int, default=20)
     attempt_list.set_defaults(func=list_attempts)
+
+    compat = sub.add_parser("compat", help="Track game/platform compatibility checkpoints by commit")
+    compat_sub = compat.add_subparsers(dest="compat_command", required=True)
+    compat_statuses = ["works", "broken", "regressed", "partial", "blocked", "unknown"]
+
+    compat_add = compat_sub.add_parser("add", help="Add a compatibility checkpoint")
+    compat_add.add_argument("--case", default="", help="Optional linked case slug/id")
+    compat_add.add_argument("--domain", choices=["emulator", "game"], default="game")
+    compat_add.add_argument("--title-id", default="")
+    compat_add.add_argument("--title-name", default="")
+    compat_add.add_argument("--platform", required=True)
+    compat_add.add_argument("--commit", required=True)
+    compat_add.add_argument("--commit-label", default="")
+    compat_add.add_argument("--build-type", default="")
+    compat_add.add_argument("--status", choices=compat_statuses, required=True)
+    compat_add.add_argument("--scene", default="")
+    compat_add.add_argument("--summary", required=True)
+    compat_add.add_argument("--body", default="")
+    compat_add.add_argument("--artifact", action="append", default=[])
+    compat_add.add_argument("--tested-at", default="")
+    compat_add.set_defaults(func=add_compat)
+
+    compat_list = compat_sub.add_parser("list", help="List compatibility checkpoints")
+    compat_list.add_argument("--case", default="")
+    compat_list.add_argument("--title-id", default="")
+    compat_list.add_argument("--platform", default="")
+    compat_list.add_argument("--status", choices=compat_statuses, default="")
+    compat_list.add_argument("--commit", default="")
+    compat_list.add_argument("--limit", type=int, default=30)
+    compat_list.set_defaults(func=list_compat)
 
     search_cmd = sub.add_parser("search", help="Search by recency, text, and local hashed embeddings")
     search_cmd.add_argument("query")

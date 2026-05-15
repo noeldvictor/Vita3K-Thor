@@ -60,6 +60,17 @@ Prefer recent entries for immediate bug work. Use long-term matches to avoid rep
 10. Record tests, regression risk, final fix, and commit hash in SQLite.
 11. Commit and push small checkpoints.
 
+## Compatibility Ledger
+
+When a game is known-good, newly broken, partially fixed, or blocked at a specific commit, record a compatibility checkpoint. This prevents future agents from treating "it used to work" as memory instead of evidence:
+
+```powershell
+python tools/debug_knowledge.py compat add --case uppers-render-regression --title-id PCSG00633 --title-name UPPERS --platform android-thor --commit <hash> --status works --scene "exact scene" --summary "what worked" --artifact <burst-or-proof>
+python tools/debug_knowledge.py compat list --title-id PCSG00633 --platform android-thor
+```
+
+Use `status=works`, `broken`, `regressed`, `partial`, `blocked`, or `unknown`. Include the exact scene and proof artifact. For renderer regressions, add one checkpoint for the last known-good commit and one for the current broken commit before bisecting.
+
 ## Burst Screenshot Rule
 
 Emulator/render screenshots default to burst capture. Single screenshots are only for static UI proof after a burst exists, or when the user explicitly asks for one image.
