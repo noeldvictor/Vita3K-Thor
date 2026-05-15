@@ -22,6 +22,7 @@
 #include <util/log.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
@@ -71,7 +72,7 @@ static bool debug_value_enabled(const char *value) {
         || std::strcmp(value, "YES") == 0;
 }
 
-static bool mem_protect_trace_enabled() {
+static bool read_mem_protect_trace_enabled() {
     if (debug_value_enabled(std::getenv("VITA3K_MEM_PROTECT_TRACE")))
         return true;
 
@@ -82,6 +83,18 @@ static bool mem_protect_trace_enabled() {
 #endif
 
     return false;
+}
+
+static bool mem_protect_trace_enabled() {
+    static std::atomic<uint32_t> query_counter{ 0 };
+    static std::atomic<bool> cached_enabled{ false };
+
+    const uint32_t query = query_counter.fetch_add(1, std::memory_order_relaxed);
+    if (query == 0 || (query % 64) == 0) {
+        cached_enabled.store(read_mem_protect_trace_enabled(), std::memory_order_relaxed);
+    }
+
+    return cached_enabled.load(std::memory_order_relaxed);
 }
 
 static bool should_log_protect_fault(const uint64_t fault_count) {
