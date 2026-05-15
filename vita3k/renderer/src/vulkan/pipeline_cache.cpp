@@ -444,8 +444,12 @@ static std::string thor_debug_setting(const char *env_name, const char *android_
     return {};
 }
 
+static bool thor_debug_setting_disabled(std::string_view value) {
+    return value.empty() || value == "0" || value == "false" || value == "FALSE" || value == "off" || value == "OFF";
+}
+
 static bool thor_debug_hash_prefix_matches(const Sha256Hash &hash, const std::string &prefix) {
-    if (prefix.empty())
+    if (thor_debug_setting_disabled(prefix))
         return false;
 
     const std::string hash_text = hex_string(hash);
@@ -453,10 +457,34 @@ static bool thor_debug_hash_prefix_matches(const Sha256Hash &hash, const std::st
 }
 
 static bool thor_debug_hash_prefix_or_all_matches(const Sha256Hash &hash, const std::string &value) {
+    if (thor_debug_setting_disabled(value))
+        return false;
+
     if (value == "1" || value == "all" || value == "ALL")
         return true;
 
     return thor_debug_hash_prefix_matches(hash, value);
+}
+
+static vk::CullModeFlags thor_gl_style_cull_mode(SceGxmCullMode cull_mode) {
+    switch (cull_mode) {
+    case SCE_GXM_CULL_NONE:
+        return vk::CullModeFlagBits::eNone;
+    case SCE_GXM_CULL_CW:
+        return vk::CullModeFlagBits::eFront;
+    case SCE_GXM_CULL_CCW:
+        return vk::CullModeFlagBits::eBack;
+    default:
+        return vk::CullModeFlagBits::eNone;
+    }
+}
+
+static vk::CullModeFlags thor_flipped_cull_mode(vk::CullModeFlags cull_mode) {
+    if (cull_mode == vk::CullModeFlagBits::eFront)
+        return vk::CullModeFlagBits::eBack;
+    if (cull_mode == vk::CullModeFlagBits::eBack)
+        return vk::CullModeFlagBits::eFront;
+    return cull_mode;
 }
 
 vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmProgram *program, const Sha256Hash &hash, bool is_vertex, bool maskupdate, MemState &mem, const shader::Hints &hints, bool is_srgb) {
@@ -768,11 +796,12 @@ vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(con
         const SceGxmVertexStream &stream = vertex_program.streams[stream_index];
 
         const bool is_instanced = gxm::is_stream_instancing(static_cast<SceGxmIndexSource>(stream.indexSource));
+        const bool thor_align_stride4 = thor_debug_hash_prefix_or_all_matches(vkvert->hash, thor_debug_setting("VITA3K_RENDER_ALIGN_VERTEX_STRIDE4_VHASH", "debug.vita3k.render_align_vertex_stride4_vhash"));
 
 #ifdef __APPLE__
         const uint32_t stride = align(stream.stride, 4);
 #else
-        const uint32_t stride = stream.stride;
+        const uint32_t stride = thor_align_stride4 ? align(stream.stride, 4) : stream.stride;
 #endif
         binding_descr.push_back(vk::VertexInputBindingDescription{
             .binding = stream_index,
@@ -851,15 +880,30 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     const bool thor_disable_depth_bias = thor_debug_hash_prefix_matches(fragment_program.hash, thor_disable_depth_bias_prefix);
     const std::string thor_force_cull_none_value = thor_debug_setting("VITA3K_RENDER_FORCE_CULL_NONE_FHASH", "debug.vita3k.render_force_cull_none_fhash");
     const bool thor_force_cull_none = thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_force_cull_none_value);
+    const bool thor_use_gl_cull = thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_USE_GL_CULL_FHASH", "debug.vita3k.render_use_gl_cull_fhash"));
+    const bool thor_flip_cull = thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FLIP_CULL_FHASH", "debug.vita3k.render_flip_cull_fhash"));
+    const bool thor_force_cull_front = thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FORCE_CULL_FRONT_FHASH", "debug.vita3k.render_force_cull_front_fhash"));
+    const bool thor_force_cull_back = thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FORCE_CULL_BACK_FHASH", "debug.vita3k.render_force_cull_back_fhash"));
+    const bool thor_front_face_cw = thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FRONT_FACE_CW_FHASH", "debug.vita3k.render_front_face_cw_fhash"));
+
+    vk::CullModeFlags cull_mode = thor_use_gl_cull ? thor_gl_style_cull_mode(record.cull_mode) : translate_cull_mode(record.cull_mode);
+    if (thor_flip_cull)
+        cull_mode = thor_flipped_cull_mode(cull_mode);
+    if (thor_force_cull_front)
+        cull_mode = vk::CullModeFlagBits::eFront;
+    if (thor_force_cull_back)
+        cull_mode = vk::CullModeFlagBits::eBack;
+    if (thor_force_cull_none)
+        cull_mode = vk::CullModeFlagBits::eNone;
 
     const vk::PipelineRasterizationStateCreateInfo rasterizer{
         // GXM clips primitives outside the depth range; enabling Vulkan depth clamp globally
         // can turn clipped scene geometry into large foreground slabs.
         .depthClampEnable = VK_FALSE,
         .polygonMode = translate_polygon_mode(record.front_polygon_mode),
-        .cullMode = thor_force_cull_none ? vk::CullModeFlagBits::eNone : translate_cull_mode(record.cull_mode),
+        .cullMode = cull_mode,
         // front face is always counter clockwise
-        .frontFace = vk::FrontFace::eCounterClockwise,
+        .frontFace = thor_front_face_cw ? vk::FrontFace::eClockwise : vk::FrontFace::eCounterClockwise,
         .depthBiasEnable = thor_disable_depth_bias ? VK_FALSE : VK_TRUE,
         .lineWidth = 1.0f
     };
@@ -872,11 +916,14 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     const std::string thor_depth_lequal_prefix = thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_LEQUAL_FHASH", "debug.vita3k.render_force_depth_lequal_fhash");
     const bool thor_force_depth_always = thor_debug_hash_prefix_matches(fragment_program.hash, thor_depth_always_prefix);
     const bool thor_force_depth_lequal = thor_debug_hash_prefix_matches(fragment_program.hash, thor_depth_lequal_prefix);
-    const bool thor_prefer_back_depth_compare = prefer_back_depth_compare_for_culled_discard_pass(record, *gxm_fragment_shader, fragment_program);
+    const bool thor_use_back_depth_write = thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_USE_BACK_DEPTH_WRITE_FHASH", "debug.vita3k.render_use_back_depth_write_fhash"));
+    const bool thor_disable_culled_discard_back_depth = thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_DISABLE_CULLED_DISCARD_BACK_DEPTH_FHASH", "debug.vita3k.render_disable_culled_discard_back_depth_fhash"));
+    const bool thor_prefer_back_depth_compare = !thor_disable_culled_discard_back_depth && prefer_back_depth_compare_for_culled_discard_pass(record, *gxm_fragment_shader, fragment_program);
     const SceGxmDepthFunc depth_func = thor_prefer_back_depth_compare ? record.back_depth_func : record.front_depth_func;
+    const SceGxmDepthWriteMode depth_write_mode = thor_use_back_depth_write ? record.back_depth_write_mode : record.front_depth_write_mode;
     const vk::PipelineDepthStencilStateCreateInfo ds_info{
         .depthTestEnable = VK_TRUE,
-        .depthWriteEnable = (record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED),
+        .depthWriteEnable = (depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED),
         .depthCompareOp = thor_force_depth_always ? vk::CompareOp::eAlways : (thor_force_depth_lequal ? vk::CompareOp::eLessOrEqual : translate_depth_func(depth_func)),
         .depthBoundsTestEnable = VK_FALSE,
         .stencilTestEnable = VK_TRUE,
@@ -966,16 +1013,40 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     if (thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_LEQUAL_FHASH", "debug.vita3k.render_force_depth_lequal_fhash"))) {
         key ^= 0xD75CEB1DCE9F4C2BULL;
     }
+    if (thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_USE_BACK_DEPTH_WRITE_FHASH", "debug.vita3k.render_use_back_depth_write_fhash"))) {
+        key ^= 0xBACCDEF1D7E12345ULL;
+    }
+    if (thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_DISABLE_CULLED_DISCARD_BACK_DEPTH_FHASH", "debug.vita3k.render_disable_culled_discard_back_depth_fhash"))) {
+        key ^= 0xD15AB1EDBACCD311ULL;
+    }
     if (thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_DISABLE_DEPTH_BIAS_FHASH", "debug.vita3k.render_disable_depth_bias_fhash"))) {
         key ^= 0xD1A5B1A5D15AB1E5ULL;
     }
     if (thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FORCE_CULL_NONE_FHASH", "debug.vita3k.render_force_cull_none_fhash"))) {
         key ^= 0xC011F0CE113A11C5ULL;
     }
+    if (thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_USE_GL_CULL_FHASH", "debug.vita3k.render_use_gl_cull_fhash"))) {
+        key ^= 0x61CC0115A11E0713ULL;
+    }
+    if (thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FLIP_CULL_FHASH", "debug.vita3k.render_flip_cull_fhash"))) {
+        key ^= 0xF11FC011D1A6500DULL;
+    }
+    if (thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FORCE_CULL_FRONT_FHASH", "debug.vita3k.render_force_cull_front_fhash"))) {
+        key ^= 0xF20A17FACE51D3A1ULL;
+    }
+    if (thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FORCE_CULL_BACK_FHASH", "debug.vita3k.render_force_cull_back_fhash"))) {
+        key ^= 0xBACCFACE51D3A11CULL;
+    }
+    if (thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FRONT_FACE_CW_FHASH", "debug.vita3k.render_front_face_cw_fhash"))) {
+        key ^= 0xF20F1FACEC10C5E1ULL;
+    }
 
     // add the hash of the attribute and stream layout
     SceGxmVertexProgram &vertex_program_gxm = *record.vertex_program.get(mem);
     key ^= vertex_program_gxm.key_hash;
+    if (thor_debug_hash_prefix_or_all_matches(vertex_program_gxm.renderer_data->hash, thor_debug_setting("VITA3K_RENDER_ALIGN_VERTEX_STRIDE4_VHASH", "debug.vita3k.render_align_vertex_stride4_vhash"))) {
+        key ^= 0xA116ED5721DE0004ULL;
+    }
 
     if (!record.color_surface.data) {
         key ^= 0x9E3779B97F4A7C15ULL;

@@ -36,6 +36,7 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #ifdef __ANDROID__
 #include <sys/system_properties.h>
@@ -356,6 +357,23 @@ static void poll_renderer_debug_android_properties(RendererDebugConfig &cfg) {
 }
 #endif
 
+static std::string renderer_debug_setting(const char *env_name, const char *android_prop_name) {
+    const char *env_value = std::getenv(env_name);
+    if (env_value != nullptr && env_value[0] != '\0')
+        return env_value;
+
+#ifdef __ANDROID__
+    return android_debug_property(android_prop_name);
+#else
+    (void)android_prop_name;
+    return {};
+#endif
+}
+
+static bool renderer_debug_setting_disabled(std::string_view value) {
+    return value.empty() || value == "0" || value == "false" || value == "FALSE" || value == "off" || value == "OFF";
+}
+
 static RendererDebugConfig &renderer_debug_config() {
     static RendererDebugConfig config = [] {
         RendererDebugConfig cfg;
@@ -385,7 +403,20 @@ static RendererDebugConfig &renderer_debug_config() {
 }
 
 static bool renderer_debug_hash_prefix_matches(const std::string &hash, const std::string &prefix) {
+    if (renderer_debug_setting_disabled(prefix))
+        return false;
+
     return hash.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), hash.begin());
+}
+
+static bool renderer_debug_hash_prefix_or_all_matches(const Sha256Hash &hash, const std::string &value) {
+    if (renderer_debug_setting_disabled(value))
+        return false;
+
+    if (value == "1" || value == "all" || value == "ALL")
+        return true;
+
+    return renderer_debug_hash_prefix_matches(hex_string(hash), value);
 }
 
 static bool renderer_debug_color_addr_prefix_matches(uint32_t color_addr, const std::string &prefix) {
@@ -579,22 +610,22 @@ void mid_scene_flush(VKContext &context, const SceGxmNotification notification) 
     }
 }
 
-#ifdef __APPLE__
 // restride vertex attribute binding strides to multiple of 4
-// needed for metal because it only allows multiples of 4.
-void restride_stream(const uint8_t *&stream, uint32_t &size, uint32_t stride) {
+// needed for Metal because it only allows multiples of 4; also useful as an
+// Android debug path for odd Vita vertex strides.
+static void restride_stream(const uint8_t *stream, uint32_t size, uint32_t stride, std::vector<uint8_t> &out) {
     const uint32_t new_stride = align(stride, 4);
     const uint32_t nb_vertex_input = ((size + stride - 1) / stride);
 
-    uint8_t *new_data = new uint8_t[nb_vertex_input * new_stride];
+    out.assign(nb_vertex_input * new_stride, 0);
     for (uint32_t i = 0; i < nb_vertex_input; i++) {
-        memcpy(new_data + new_stride * i, stream + stride * i, stride);
+        const uint32_t src_offset = stride * i;
+        if (src_offset >= size)
+            break;
+        const uint32_t copy_size = std::min<uint32_t>(stride, size - src_offset);
+        memcpy(out.data() + new_stride * i, stream + src_offset, copy_size);
     }
-
-    stream = new_data;
-    size = nb_vertex_input * new_stride;
 }
-#endif
 
 // when needed, how many descriptor of the given size we allocate for each frame at once
 static constexpr uint32_t DESCRIPTOR_PACK_SIZE = 64;
@@ -1218,6 +1249,8 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
     GxmRecordState &state = context.record;
     const SceGxmVertexProgram &vertex_program = *state.vertex_program.get(mem);
     VertexProgram *vkvert = vertex_program.renderer_data.get();
+    const bool force_stream_copy = renderer_debug_hash_prefix_or_all_matches(vkvert->hash, renderer_debug_setting("VITA3K_RENDER_FORCE_VERTEX_STREAM_COPY_VHASH", "debug.vita3k.render_force_vertex_stream_copy_vhash"));
+    const bool align_stride4 = renderer_debug_hash_prefix_or_all_matches(vkvert->hash, renderer_debug_setting("VITA3K_RENDER_ALIGN_VERTEX_STRIDE4_VHASH", "debug.vita3k.render_align_vertex_stride4_vhash"));
 
     int max_stream_idx = get_used_vertex_stream_count(vertex_program, *vkvert);
 
@@ -1245,7 +1278,7 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
 
     for (int i = 0; i < max_stream_idx; i++) {
         if (state.vertex_streams[i].data) {
-            if (context.state.features.enable_memory_mapping) {
+            if (context.state.features.enable_memory_mapping && !force_stream_copy && !align_stride4) {
                 auto [buffer, offset] = context.state.get_matching_mapping(state.vertex_streams[i].data.cast<void>());
 
                 context.vertex_stream_offsets[i] = offset;
@@ -1253,21 +1286,21 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
             } else {
                 const uint8_t *stream = state.vertex_streams[i].data.get(mem);
                 uint32_t stream_size = state.vertex_streams[i].size;
+                std::vector<uint8_t> restrided_stream;
 #ifdef __APPLE__
                 // Vulkan allows any stride, but Metal only allows multiples of 4.
                 const bool restride = vertex_program.streams[i].stride % 4 != 0;
-                if (restride) {
-                    restride_stream(stream, stream_size, vertex_program.streams[i].stride);
-                }
+#else
+                const bool restride = align_stride4 && vertex_program.streams[i].stride % 4 != 0;
 #endif
+                if (restride) {
+                    restride_stream(stream, stream_size, vertex_program.streams[i].stride, restrided_stream);
+                    stream = restrided_stream.data();
+                    stream_size = static_cast<uint32_t>(restrided_stream.size());
+                }
                 context.vertex_stream_ring_buffer.allocate(context.prerender_cmd, stream_size, stream);
                 context.vertex_stream_offsets[i] = context.vertex_stream_ring_buffer.data_offset;
-
-#ifdef __APPLE__
-                if (restride) {
-                    delete[] stream;
-                }
-#endif
+                context.vertex_stream_buffers[i] = context.vertex_stream_ring_buffer.handle();
             }
 
             state.vertex_streams[i].data = nullptr;

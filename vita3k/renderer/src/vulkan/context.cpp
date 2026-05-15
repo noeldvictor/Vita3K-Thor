@@ -53,9 +53,13 @@ static std::string thor_debug_setting(const char *env_name, const char *android_
     return {};
 }
 
+static bool thor_debug_setting_disabled(std::string_view value) {
+    return value.empty() || value == "0" || value == "false" || value == "FALSE" || value == "off" || value == "OFF";
+}
+
 static bool thor_debug_force_depth_clear(const SceGxmDepthStencilSurface *surface) {
     const std::string prefix = thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_CLEAR_DS", "debug.vita3k.render_force_depth_clear_ds");
-    if (prefix.empty() || surface == nullptr)
+    if (thor_debug_setting_disabled(prefix) || surface == nullptr)
         return false;
 
     return fmt::format("{:08X}", surface->depth_data.address()).rfind(prefix, 0) == 0;
@@ -63,7 +67,7 @@ static bool thor_debug_force_depth_clear(const SceGxmDepthStencilSurface *surfac
 
 static bool thor_debug_force_color_clear(const SceGxmColorSurface *surface) {
     const std::string prefix = thor_debug_setting("VITA3K_RENDER_FORCE_COLOR_CLEAR_ADDR", "debug.vita3k.render_force_color_clear_addr");
-    if (prefix.empty() || surface == nullptr || surface->data.address() == 0)
+    if (thor_debug_setting_disabled(prefix) || surface == nullptr || surface->data.address() == 0)
         return false;
 
     return fmt::format("{:08X}", surface->data.address()).rfind(prefix, 0) == 0;

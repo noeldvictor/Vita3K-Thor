@@ -53,6 +53,11 @@ VKContext::VKContext(VKState &state, MemState &mem)
     vertex_info_uniform_buffer.alignment = uniform_alignment;
     fragment_info_uniform_buffer.alignment = uniform_alignment;
 
+    // Keep the vertex ring buffer available even with memory mapping so targeted
+    // debug/fallback paths can stage odd vertex streams without rebuilding the
+    // renderer context.
+    vertex_stream_ring_buffer.create();
+
     if (state.features.enable_memory_mapping) {
         // use the default buffer
         std::fill_n(vertex_stream_buffers, SCE_GXM_MAX_VERTEX_STREAMS, state.default_buffer.buffer);
@@ -61,7 +66,6 @@ VKContext::VKContext(VKState &state, MemState &mem)
         gpu_request_wait_thread = std::thread(&VKContext::wait_thread_function, this, std::ref(mem));
     } else {
         // these are not needed when using memory mapping
-        vertex_stream_ring_buffer.create();
         index_stream_ring_buffer.create();
         vertex_uniform_stream_ring_buffer.create();
         fragment_uniform_stream_ring_buffer.create();
