@@ -48,6 +48,8 @@ namespace renderer::vulkan {
 // Size of the record containing what is needed for the pipeline construction (what is after is dynamic state)
 constexpr size_t record_pipeline_len = offsetof(GxmRecordState, vertex_streams);
 
+static bool thor_debug_hash_prefix_matches(const Sha256Hash &hash, const std::string &prefix);
+
 static bool visible_fragment_program_disabled(const GxmRecordState &record) {
     switch (record.cull_mode) {
     case SCE_GXM_CULL_CW:
@@ -73,6 +75,14 @@ static bool prefer_back_depth_compare_for_culled_discard_pass(const GxmRecordSta
         && record.front_depth_func != record.back_depth_func
         && record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_DISABLED
         && record.back_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED;
+}
+
+static bool keep_front_depth_compare_for_alpha_self_occlusion(const VKFragmentProgram &fragment_program) {
+    // DOA Venus hair shader: the broader back-depth compare compatibility path makes
+    // thin alpha hair cards win over the face/body at some angles. Keep this shader
+    // on Vita3K's older front-depth path until Vulkan can emulate per-face depth
+    // state without a single compare op compromise.
+    return thor_debug_hash_prefix_matches(fragment_program.hash, "1c4c944");
 }
 
 // structure containing everything needed to compile a pipeline
@@ -918,7 +928,9 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     const bool thor_force_depth_lequal = thor_debug_hash_prefix_matches(fragment_program.hash, thor_depth_lequal_prefix);
     const bool thor_use_back_depth_write = thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_USE_BACK_DEPTH_WRITE_FHASH", "debug.vita3k.render_use_back_depth_write_fhash"));
     const bool thor_disable_culled_discard_back_depth = thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_DISABLE_CULLED_DISCARD_BACK_DEPTH_FHASH", "debug.vita3k.render_disable_culled_discard_back_depth_fhash"));
-    const bool thor_prefer_back_depth_compare = !thor_disable_culled_discard_back_depth && prefer_back_depth_compare_for_culled_discard_pass(record, *gxm_fragment_shader, fragment_program);
+    const bool thor_prefer_back_depth_compare = !thor_disable_culled_discard_back_depth
+        && !keep_front_depth_compare_for_alpha_self_occlusion(fragment_program)
+        && prefer_back_depth_compare_for_culled_discard_pass(record, *gxm_fragment_shader, fragment_program);
     const SceGxmDepthFunc depth_func = thor_prefer_back_depth_compare ? record.back_depth_func : record.front_depth_func;
     const SceGxmDepthWriteMode depth_write_mode = thor_use_back_depth_write ? record.back_depth_write_mode : record.front_depth_write_mode;
     const vk::PipelineDepthStencilStateCreateInfo ds_info{
