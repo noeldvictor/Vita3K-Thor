@@ -236,6 +236,7 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths)
     } else {
         serialize_config(command_line, check_path(root_paths.get_config_path()));
     }
+    cfg.config_path = root_paths.get_config_path();
 
     // Declare all options
     CLI::App app{ "Vita3K Command Line Interface" }; // "--help,-h" is automatically generated
