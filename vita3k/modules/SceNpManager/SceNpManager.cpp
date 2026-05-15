@@ -70,7 +70,7 @@ EXPORT(int, sceNpCheckCallback) {
     TRACY_FUNC(sceNpCheckCallback);
 
     const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
-    const SceNpServiceState state = emuenv.cfg.current_config.psn_signed_in ? SCE_NP_SERVICE_STATE_SIGNED_IN : SCE_NP_SERVICE_STATE_SIGNED_OUT;
+    const SceNpServiceState state = SCE_NP_SERVICE_STATE_SIGNED_IN;
     for (auto &[_, np_callback] : emuenv.np.cbs) {
         thread->run_callback(np_callback.pc, { static_cast<uint32_t>(state), 0, np_callback.data });
     }
@@ -80,7 +80,7 @@ EXPORT(int, sceNpCheckCallback) {
 
 EXPORT(int, sceNpGetServiceState, SceNpServiceState *state) {
     TRACY_FUNC(sceNpGetServiceState, state);
-    *state = emuenv.cfg.current_config.psn_signed_in ? SCE_NP_SERVICE_STATE_SIGNED_IN : SCE_NP_SERVICE_STATE_SIGNED_OUT;
+    *state = SCE_NP_SERVICE_STATE_SIGNED_IN;
 
     return STUBBED("Stub");
 }

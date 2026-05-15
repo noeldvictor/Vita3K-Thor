@@ -500,12 +500,10 @@ EXPORT(int, sceNetCheckDialogGetResult, SceNetCheckDialogResult *result) {
         return RET_ERROR(SCE_COMMON_DIALOG_ERROR_NULL);
 
     std::memset(result, 0, sizeof(SceNetCheckDialogResult));
-    const bool psn_mode = emuenv.common_dialog.netcheck.mode == SCE_NETCHECK_DIALOG_MODE_PSN
-        || emuenv.common_dialog.netcheck.mode == SCE_NETCHECK_DIALOG_MODE_PSN_ONLINE;
-    result->result = (psn_mode && !emuenv.cfg.current_config.psn_signed_in) ? SCE_NETCHECK_DIALOG_ERROR_SIGN_OUT : emuenv.common_dialog.result;
+    result->result = emuenv.common_dialog.result;
     result->psnModeSucceeded = (emuenv.common_dialog.netcheck.mode == SCE_NETCHECK_DIALOG_MODE_PSN
                                    || emuenv.common_dialog.netcheck.mode == SCE_NETCHECK_DIALOG_MODE_PSN_ONLINE)
-        ? (emuenv.cfg.current_config.psn_signed_in ? SCE_TRUE : SCE_FALSE)
+        ? SCE_TRUE
         : SCE_FALSE;
 
     if (emuenv.common_dialog.netcheck.mode != SCE_NETCHECK_DIALOG_MODE_ADHOC_CONN)
