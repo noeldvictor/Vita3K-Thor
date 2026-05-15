@@ -24,6 +24,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <atomic>
 
 struct AllocMemPage {
     uint32_t allocated : 4;
@@ -41,6 +42,7 @@ typedef std::map<int, std::string> PageNameMap;
 struct ProtectBlockInfo {
     uint32_t size = 0;
     ProtectCallback callback;
+    const char *debug_name = "unknown";
 };
 
 struct ProtectSegmentInfo {
@@ -71,6 +73,7 @@ struct MemState {
     AllocPageTable alloc_table;
     BitmapAllocator allocator;
     ProtectSegmentTrees protect_tree;
+    std::atomic<uint64_t> protect_fault_count{ 0 };
 
     PageNameMap page_name_map;
 

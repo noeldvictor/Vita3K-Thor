@@ -95,7 +95,8 @@ EXPORT(int, kuKernelMemProtect, Ptr<void> addr, SceSize len, uint32_t prot) {
         const Address va = addr.address();
         add_protect(emuenv.mem, va, len, perm, [va, len](Address fault_addr, bool write) {
             return abort_aware_fault_callback(fault_addr, write, va, len);
-        });
+        },
+            "kubridge-mem-protect");
     } else {
         // ReadWrite or more permissive — just unprotect
         unprotect_inner(emuenv.mem, addr.address(), len);
@@ -170,7 +171,8 @@ EXPORT(int, kuKernelMemCommit, Ptr<void> addr, SceSize len, uint32_t prot, Ptr<K
     if (perm == MemPerm::None || perm == MemPerm::ReadOnly) {
         add_protect(emuenv.mem, va, len, perm, [va, len](Address fault_addr, bool write) {
             return abort_aware_fault_callback(fault_addr, write, va, len);
-        });
+        },
+            "kubridge-mem-commit");
     } else {
         unprotect_inner(emuenv.mem, va, len);
     }
@@ -191,7 +193,8 @@ EXPORT(int, kuKernelMemDecommit, Ptr<void> addr, SceSize len) {
     const Address va = addr.address();
     add_protect(emuenv.mem, va, len, MemPerm::None, [va, len](Address fault_addr, bool write) {
         return abort_aware_fault_callback(fault_addr, write, va, len);
-    });
+    },
+        "kubridge-mem-decommit");
 
     LOG_DEBUG("kuKernelMemDecommit: addr={} len={}", log_hex(va), len);
     return 0;

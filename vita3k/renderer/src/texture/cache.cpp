@@ -796,7 +796,7 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
                 }
 
                 return true;
-            });
+            }, "texture-cache");
         }
 
         upload_done();

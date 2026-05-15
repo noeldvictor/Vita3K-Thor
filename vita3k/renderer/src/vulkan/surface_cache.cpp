@@ -303,7 +303,8 @@ static void protect_surface(MemState &mem, ColorSurfaceCacheInfo &info) {
             if (need_sync)
                 *need_sync = true;
             return true;
-        });
+        },
+        "vulkan-surface-cache");
 }
 
 ColorSurfaceCacheInfo::~ColorSurfaceCacheInfo() {
