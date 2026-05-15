@@ -78,6 +78,10 @@
 #include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_video.h>
 
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
+
 #include <fmt/chrono.h>
 #include <stb_image_write.h>
 
@@ -984,6 +988,15 @@ struct RuntimeControlFileState {
 
 static RuntimeControlFileState runtime_control_file_state;
 
+#ifdef __ANDROID__
+struct RuntimeControlAndroidState {
+    uint64_t poll_counter = 0;
+    std::string last_action_id;
+};
+
+static RuntimeControlAndroidState runtime_control_android_state;
+#endif
+
 struct QuickStateDiskHeader {
     uint32_t version = 0;
     std::string title_id;
@@ -1872,7 +1885,41 @@ static void apply_runtime_control_action(EmuEnvState &emuenv, const std::string 
     }
 }
 
+#ifdef __ANDROID__
+static std::string android_runtime_control_property(const char *name) {
+    char value[PROP_VALUE_MAX] = {};
+    if (__system_property_get(name, value) <= 0)
+        return {};
+    return value;
+}
+
+static void runtime_poll_control_android_properties(EmuEnvState &emuenv) {
+    RuntimeControlAndroidState &state = runtime_control_android_state;
+    if ((state.poll_counter++ % 16) != 0)
+        return;
+
+    const std::string raw_action = android_runtime_control_property("debug.vita3k.runtime_action");
+    std::string action = runtime_control_lower(runtime_control_trim(raw_action));
+    if (action.empty() || action == "0" || action == "none" || action == "clear")
+        return;
+
+    std::string action_id = runtime_control_trim(android_runtime_control_property("debug.vita3k.runtime_action_id"));
+    if (action_id.empty())
+        action_id = action;
+    if (action_id == state.last_action_id)
+        return;
+
+    state.last_action_id = action_id;
+    LOG_INFO("Runtime control android-prop action={} action_id={}", raw_action, action_id);
+    apply_runtime_control_action(emuenv, raw_action);
+}
+#endif
+
 void runtime_poll_control_file(EmuEnvState &emuenv) {
+#ifdef __ANDROID__
+    runtime_poll_control_android_properties(emuenv);
+#endif
+
     const fs::path path = runtime_control_file_path();
     if (path.empty())
         return;
