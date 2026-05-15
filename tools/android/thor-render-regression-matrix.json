@@ -1,0 +1,67 @@
+{
+  "name": "AYN Thor renderer regression smoke",
+  "package": "org.vita3k.emulator.debug",
+  "activity": "org.vita3k.emulator.Emulator",
+  "logLevel": 0,
+  "games": [
+    {
+      "name": "DOA Venus bedroom hair/depth",
+      "slug": "doa-venus",
+      "case": "doa-venus-render-corruption",
+      "titleId": "PCSH00250",
+      "path": "/storage/2664-21DE/Roms/psvita/Dead or Alive Xtreme 3 - Venus (Asia)(v1.15)(En,Zh,Ko)[vita3k].zip",
+      "expected": "Reach bedroom/tutorial scene; no hair planes over face/dialog, no furniture over character, no magenta or black scene regression.",
+      "steps": [
+        { "type": "wait", "seconds": 8, "name": "initial launch wait" },
+        {
+          "type": "input",
+          "name": "advance title/autosave prompts",
+          "mode": "Sendevent",
+          "sequence": [ "circle", "wait:1500", "circle", "wait:1500", "circle", "wait:1500", "start", "wait:1500", "circle" ]
+        },
+        { "type": "wait", "seconds": 5, "name": "scene settle" },
+        { "type": "burst", "name": "bedroom static burst", "topic": "doa-venus-regression-bedroom", "count": 30, "intervalMs": 250 },
+        {
+          "type": "rotation",
+          "name": "bedroom right-stick rotation",
+          "topic": "doa-venus-regression-rotation",
+          "durationSec": 20,
+          "frameFps": 2,
+          "axis": "ABS_Z",
+          "axisValue": 32767
+        }
+      ]
+    },
+    {
+      "name": "UPPERS title/load smoke",
+      "slug": "uppers",
+      "case": "uppers-render-regression",
+      "titleId": "UPPERS",
+      "path": "/storage/2664-21DE/Roms/psvita/Uppers (English v0.97)[vita3k].zip",
+      "expected": "Reach title/load UI cleanly. Gameplay proof requires a working save-modal automation path or a known gameplay save.",
+      "knownBlocker": "The Android save-load confirmation modal may stop accepting touch/controller input; classify as blocked, not passed, if InputDispatcher reports not responsive or the modal remains.",
+      "steps": [
+        { "type": "wait", "seconds": 10, "name": "initial launch wait" },
+        { "type": "burst", "name": "logo/autosave launch burst", "topic": "uppers-regression-launch", "count": 12, "intervalMs": 350 },
+        {
+          "type": "input",
+          "name": "advance to title/load",
+          "mode": "Sendevent",
+          "sequence": [ "circle", "wait:1500", "circle", "wait:1500", "start", "wait:1500", "circle", "wait:1500", "circle" ]
+        },
+        { "type": "wait", "seconds": 5, "name": "title settle" },
+        { "type": "burst", "name": "title/load UI burst", "topic": "uppers-regression-title-load", "count": 20, "intervalMs": 350 },
+        {
+          "type": "tapLandscape",
+          "name": "try load-save confirmation Yes with mapped taps",
+          "x": 1320,
+          "y": 890,
+          "strategies": [ "normalized", "portrait_cw", "portrait_ccw", "normalized_swapped" ],
+          "waitMs": 700
+        },
+        { "type": "wait", "seconds": 8, "name": "post-modal wait" },
+        { "type": "burst", "name": "post-modal state burst", "topic": "uppers-regression-post-modal", "count": 16, "intervalMs": 350 }
+      ]
+    }
+  ]
+}
