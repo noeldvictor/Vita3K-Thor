@@ -1895,8 +1895,7 @@ static std::string android_runtime_control_property(const char *name) {
 
 static void runtime_poll_control_android_properties(EmuEnvState &emuenv) {
     RuntimeControlAndroidState &state = runtime_control_android_state;
-    if ((state.poll_counter++ % 16) != 0)
-        return;
+    ++state.poll_counter;
 
     const std::string raw_action = android_runtime_control_property("debug.vita3k.runtime_action");
     std::string action = runtime_control_lower(runtime_control_trim(raw_action));
