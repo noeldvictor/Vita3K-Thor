@@ -120,12 +120,16 @@ ELI5 version of the second custom fix: later gameplay uses one pass to draw dept
 
 The fix was to include early depth writes in the render-pass dependency, so depth-as-texture passes wait for the data they actually need. This was verified Windows-first from title into deeper gameplay, then on AYN Thor Android with burst captures through the same post-title scenes. The same Android build also keeps the earlier direct ZIP cartridge fixes and the SurfaceFlinger opaque-present fix used for UPPERS.
 
+ELI5 version of the third custom fix: some Vita games store beach, terrain, and background textures in compressed BCn/DXT blocks. Modern GPUs can read those blocks directly, but Vita3K's native Vulkan upload path could turn those textures into giant magenta/black blocks in DOA's title loop. This fork now uses Vita3K's CPU texture decompression path by default for Vulkan BCn/DXT textures, which trades a little startup/upload cost for correct images. Native BCn can still be enabled for controlled debugging with `VITA3K_ALLOW_NATIVE_BCN=1` on Windows or `debug.vita3k.allow_native_bcn=1` on Android.
+
 ## Build Locally
 
 This fork is currently aimed at Android/AYN Thor APK experiments:
 
 ```powershell
 git submodule update --init --recursive
+$env:ANDROID_NDK_HOME = Join-Path $env:LOCALAPPDATA 'Android\Sdk\ndk\27.3.13750724'
+$env:VCPKG_ROOT = 'C:\Users\leanerdesigner\Documents\SteamPortableTools\toolchains\vcpkg'
 Copy-Item -Recurse -Force data android/assets
 Copy-Item -Recurse -Force lang android/assets
 Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets

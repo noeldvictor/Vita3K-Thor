@@ -305,16 +305,23 @@ bool VKTextureCache::init(const bool hashless_texture_cache, const fs::path &tex
     support_dxt |= static_cast<bool>(dxt_support.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage);
 
     const bool force_bcn_decompress = vulkan_texture_debug_flag("VITA3K_FORCE_BCN_DECOMPRESS", "debug.vita3k.force_bcn_decompress");
+    const bool allow_native_bcn = vulkan_texture_debug_flag("VITA3K_ALLOW_NATIVE_BCN", "debug.vita3k.allow_native_bcn");
 #ifdef __ANDROID__
     const bool turnip_bcn_decompress = state.is_adreno_turnip
-        && !vulkan_texture_debug_flag("VITA3K_ALLOW_NATIVE_BCN", "debug.vita3k.allow_native_bcn");
+        && !allow_native_bcn;
 #else
     constexpr bool turnip_bcn_decompress = false;
 #endif
-    if (force_bcn_decompress || turnip_bcn_decompress) {
+    // Native Vulkan BCn sampling is opt-in for now. Several GXM block-swizzled
+    // textures render correctly through the existing CPU path but corrupt when
+    // uploaded as native compressed images on Windows and Adreno/Turnip.
+    const bool default_bcn_decompress = !allow_native_bcn;
+    if (force_bcn_decompress || turnip_bcn_decompress || default_bcn_decompress) {
+        const char *reason = force_bcn_decompress ? "by debug override"
+            : (turnip_bcn_decompress ? "for Adreno/Turnip" : "by default");
         support_dxt = false;
         LOG_INFO("BCn/DXT native texture sampling disabled {}; BCn textures will be CPU-decompressed",
-            turnip_bcn_decompress ? "for Adreno/Turnip" : "by debug override");
+            reason);
     }
 
     // check for astc support
