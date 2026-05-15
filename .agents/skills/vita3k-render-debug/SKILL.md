@@ -15,16 +15,42 @@ Pair it with `.agents/skills/vita3k-debug-rag/SKILL.md` for SQLite search/write 
 
 1. Query `reports/debug_knowledge.sqlite` before touching renderer code.
 2. Check the attempt ledger for the exact hypothesis.
-3. Capture a screenshot burst, not a single lucky frame.
-4. Stabilize the scene with pause/runtime control when possible.
-5. Isolate the frame with live renderer controls before rebuilding.
-6. Add instrumentation if evidence is still ambiguous.
-7. Patch the smallest emulator subsystem that explains the evidence.
-8. Verify on Windows first unless the bug is proven Android-only.
-9. Verify on AYN Thor before calling an Android-affecting fix done.
-10. Record the result in SQLite, then commit and push useful checkpoints.
+3. Create a renderer experiment packet with `tools/renderer_experiment.py start`.
+4. Capture a screenshot burst, not a single lucky frame.
+5. Stabilize the scene with pause/runtime control when possible.
+6. Isolate the frame with live renderer controls before rebuilding.
+7. Add instrumentation if evidence is still ambiguous.
+8. Patch the smallest emulator subsystem that explains the evidence.
+9. Verify on Windows first unless the bug is proven Android-only.
+10. Verify on AYN Thor before calling an Android-affecting fix done.
+11. Close the experiment packet with `tools/renderer_experiment.py finish`, record the result in SQLite, then commit and push useful checkpoints.
 
 Do not keep replaying long intros manually. Once the user reaches a bad scene, prefer pause, quickstate/save data, burst capture, surface dumps, draw filters, and input automation.
+
+## Experiment Packet Gate
+
+Before a renderer code edit, global Vulkan state change, Android debug property, shader/texture workaround, or config change that could affect another game, create a packet:
+
+```powershell
+python tools\renderer_experiment.py start --case doa-venus-render-corruption --title-id PCSH00250 --platform windows --subsystem surface-cache --hypothesis "specific one-variable hypothesis" --expected "what should visibly/logically change" --scene "exact scene and camera/menu state" --baseline-artifact <burst-dir> --regression-target "UPPERS glitch scene" --regression-target "DOA title loop"
+```
+
+The packet under `tmp/renderer-experiments/` snapshots git status, selected configs, active Vita3K window state, attempt-check output, and writes `outcome.md` plus `commands.ps1`. Treat this packet as the unit of work. If the packet says the tree was dirty, debug props were stale, or no baseline exists, resolve that before patching unless the dirty state is the experiment.
+
+Close the same packet after verification:
+
+```powershell
+python tools\renderer_experiment.py finish --manifest tmp\renderer-experiments\<packet>\manifest.json --status failed --result "unchanged: burst still shows magenta title blocks; no shader hash changed" --artifact <burst-dir>
+```
+
+Outcome labels:
+
+- `fixed`: original symptom gone, no visible neighboring regression, stale toggles cleared, proof exists on every affected platform.
+- `improved`: symptom reduced but still present.
+- `unchanged`: no meaningful visual/log change.
+- `worse`: original or neighboring scene deteriorated.
+- `mixed-supports-involvement`: one thing improved while another broke; useful evidence, not a fix.
+- `contaminated-inconclusive`: more than one variable changed, A/B/A did not return to baseline, scene state changed, or debug props/configs were stale.
 
 ## SQLite Gate
 
