@@ -109,6 +109,10 @@ static bool surface_debug_flag(const char *env_name, const char *android_prop_na
     return !surface_dump_debug_disabled(surface_dump_debug_setting(env_name, android_prop_name));
 }
 
+static bool depth_copy_trace_enabled() {
+    return surface_debug_flag("VITA3K_RENDER_DEPTH_COPY_TRACE", "debug.vita3k.render_depth_copy_trace");
+}
+
 static bool parse_surface_dump_address(std::string_view text, Address &address) {
     if (surface_dump_debug_disabled(text))
         return false;
@@ -1182,6 +1186,25 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
         && memory_height == cached_info.memory_height
         && delta_col_samples == 0
         && delta_row_samples == 0;
+    const uint64_t scene_timestamp = context->scene_timestamp;
+    const bool depth_copy_trace = depth_copy_trace_enabled();
+    if (depth_copy_trace) {
+        LOG_INFO("ThorDepthCopyTrace lookup scene={} tex_addr=0x{:08X} source_addr=0x{:08X} aspect={} memory={}x{} surface={}x{} stride={} delta={},{} same_dim={} reading_attachment={} source_layout={} direct=false",
+            scene_timestamp,
+            address,
+            surface_address,
+            is_stencil ? "stencil" : "depth",
+            memory_width,
+            memory_height,
+            cached_info.memory_width,
+            cached_info.memory_height,
+            stride_samples,
+            delta_col_samples,
+            delta_row_samples,
+            same_dimension,
+            reading_ds_attachment,
+            vk::to_string(vkutil::get_underlying_layout(cached_info.texture.layout)));
+    }
 
     // Direct depth/stencil sampling can bind an image that a later command
     // buffer still treats as a framebuffer attachment. Keep the safer copy
@@ -1225,8 +1248,6 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
         };
     }
 
-    const uint64_t scene_timestamp = context->scene_timestamp;
-
     int read_surface_idx = -1;
     for (int i = 0; i < cached_info.read_surfaces.size(); i++) {
         auto &read_surface = cached_info.read_surfaces[i];
@@ -1256,6 +1277,16 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
 
         read_surface_idx = cached_info.read_surfaces.size();
         cached_info.read_surfaces.emplace_back(std::move(read_only));
+        if (depth_copy_trace) {
+            LOG_INFO("ThorDepthCopyTrace create-read-surface scene={} idx={} aspect={} read_dims={}x{} delta={},{}",
+                scene_timestamp,
+                read_surface_idx,
+                is_stencil ? "stencil" : "depth",
+                width,
+                height,
+                delta_col_samples,
+                delta_row_samples);
+        }
     }
 
     DepthSurfaceView &read_only = cached_info.read_surfaces[read_surface_idx];
@@ -1273,15 +1304,33 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
         };
         img_view.view = state.device.createImageView(view_info);
         img_view.layout = vkutil::ImageLayout::SampledImage;
+        if (depth_copy_trace) {
+            LOG_INFO("ThorDepthCopyTrace create-view scene={} idx={} aspect={} read_image_layout={} return_layout={}",
+                scene_timestamp,
+                read_surface_idx,
+                is_stencil ? "stencil" : "depth",
+                vk::to_string(vkutil::get_underlying_layout(read_only.depth_view.layout)),
+                vk::to_string(vkutil::get_underlying_layout(img_view.layout)));
+        }
     }
 
     // copy the depth stencil only once per scene
-    if (read_only.scene_timestamp == scene_timestamp)
+    if (read_only.scene_timestamp == scene_timestamp) {
+        if (depth_copy_trace) {
+            LOG_INFO("ThorDepthCopyTrace reuse scene={} idx={} aspect={} source_layout={} read_image_layout={} return_layout={}",
+                scene_timestamp,
+                read_surface_idx,
+                is_stencil ? "stencil" : "depth",
+                vk::to_string(vkutil::get_underlying_layout(cached_info.texture.layout)),
+                vk::to_string(vkutil::get_underlying_layout(read_only.depth_view.layout)),
+                vk::to_string(vkutil::get_underlying_layout(img_view.layout)));
+        }
         return TextureLookupResult{
             img_view.view,
             img_view.layout,
             img_view.format
         };
+    }
 
     read_only.scene_timestamp = scene_timestamp;
 
@@ -1303,11 +1352,32 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
         .dstOffset = { 0, 0, 0 },
         .extent = { std::min(width, cached_info.texture.width - delta_col_samples), std::min(height, cached_info.texture.height - delta_row_samples), 1U }
     };
+    if (depth_copy_trace) {
+        LOG_INFO("ThorDepthCopyTrace copy scene={} idx={} aspect={} source_layout_before={} read_layout_before={} extent={}x{} delta={},{}",
+            scene_timestamp,
+            read_surface_idx,
+            is_stencil ? "stencil" : "depth",
+            vk::to_string(vkutil::get_underlying_layout(cached_info.texture.layout)),
+            vk::to_string(vkutil::get_underlying_layout(read_only.depth_view.layout)),
+            image_copy.extent.width,
+            image_copy.extent.height,
+            delta_col_samples,
+            delta_row_samples);
+    }
     cmd_buffer.copyImage(cached_info.texture.image, vk::ImageLayout::eTransferSrcOptimal, read_only.depth_view.image, vk::ImageLayout::eTransferDstOptimal, image_copy);
 
     // transition back
     cached_info.texture.transition_to(cmd_buffer, vkutil::ImageLayout::DepthStencilReadOnly, vkutil::ds_subresource_range);
     read_only.depth_view.transition_to(cmd_buffer, vkutil::ImageLayout::SampledImage, vkutil::ds_subresource_range);
+    if (depth_copy_trace) {
+        LOG_INFO("ThorDepthCopyTrace copied scene={} idx={} aspect={} source_layout_after={} read_layout_after={} return_layout={}",
+            scene_timestamp,
+            read_surface_idx,
+            is_stencil ? "stencil" : "depth",
+            vk::to_string(vkutil::get_underlying_layout(cached_info.texture.layout)),
+            vk::to_string(vkutil::get_underlying_layout(read_only.depth_view.layout)),
+            vk::to_string(vkutil::get_underlying_layout(img_view.layout)));
+    }
 
     return TextureLookupResult{
         img_view.view,
