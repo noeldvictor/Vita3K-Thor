@@ -83,6 +83,7 @@
 #include <limits>
 #include <optional>
 #include <sstream>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -529,6 +530,35 @@ static bool is_adb_truthy_value(const char *value) {
     return std::strcmp(value, "1") == 0 || string_utils::tolower(value) == "true" || string_utils::tolower(value) == "on" || string_utils::tolower(value) == "yes";
 }
 
+static bool log_dynarmic_signal_lines_enabled() {
+    char value[PROP_VALUE_MAX] = {};
+    if (__system_property_get("debug.vita3k.log_dynarmic_signal", value) <= 0)
+        return false;
+
+    return is_adb_truthy_value(value);
+}
+
+static bool is_dynarmic_predelegation_signal_line(std::string_view line) {
+    return line.starts_with("Unhandled SIGSEGV at pc ")
+        || line.starts_with("Unhandled SIGBUS at pc ");
+}
+
+static bool should_log_android_stdio_line(std::string_view line) {
+    if (!is_dynarmic_predelegation_signal_line(line))
+        return true;
+
+    if (log_dynarmic_signal_lines_enabled())
+        return true;
+
+    static uint64_t suppressed_count = 0;
+    suppressed_count++;
+    if (suppressed_count == 1 || (suppressed_count % 1000) == 0) {
+        LOG_DEBUG("Suppressed {} Dynarmic pre-delegation SIGSEGV/SIGBUS stderr lines; enable debug.vita3k.log_dynarmic_signal=1 and debug.vita3k.mem_protect_trace=1 to inspect handled memory-protection faults.",
+            suppressed_count);
+    }
+    return false;
+}
+
 static void update_thor_adb_debug_toggles(EmuEnvState &emuenv) {
     if (!emuenv.renderer)
         return;
@@ -870,6 +900,8 @@ int main(int argc, char *argv[]) {
             if (buf[rdsz - 1] == '\n')
                 --rdsz;
             buf[rdsz] = 0; /* add null-terminator */
+            if (!should_log_android_stdio_line(buf))
+                continue;
             LOG_DEBUG("{}", buf);
         }
     });
