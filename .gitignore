@@ -95,11 +95,13 @@ roms/
 
 # Generated ADB capture artifacts; keep durable summaries in reports/debug_knowledge.sqlite.
 reports/*.png
+reports/*.txt
 reports/*logcat*.txt
 reports/*crashbuffer*.txt
 reports/*meminfo*.txt
 reports/*window*.txt
 reports/**/*.png
+reports/**/*.txt
 reports/**/*logcat*.txt
 reports/**/*crashbuffer*.txt
 reports/**/*meminfo*.txt

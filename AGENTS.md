@@ -21,6 +21,7 @@ These notes are for work in Vita3K Thor Experiment, a personal Android-focused V
 - Commit and push often. Prefer small pushed checkpoints after a buildable code change, a useful report, an Android/Thor install, a debug-tool improvement, or a confirmed investigation result instead of letting local work pile up.
 - Keep Thor-specific changes easy to identify so broadly useful fixes can be proposed upstream separately.
 - Do not commit APK outputs, build folders, downloaded driver ZIPs, extracted drivers, caches, SDKs, firmware, license files, saves, shader caches, ELF dumps, screenshots/log dumps, or game content unless the user explicitly requests a narrow proof asset.
+- Upstream `master` may include structural rewrites. As of 2026-05-16, `upstream/master` contains the Qt/Android GUI overhaul from `91f533f8`; a direct merge conflicts with Thor Android, ImGui OSD, config/input, audio, kernel, and renderer-adjacent work. Do not merge it straight into `master`. Use a short-lived integration branch, record conflict findings in SQLite, and port Thor features deliberately or cherry-pick narrow upstream fixes when they do not depend on the overhaul.
 
 ## Debug Knowledge Base
 
