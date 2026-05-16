@@ -33,6 +33,8 @@
 
 static constexpr int TARGET_FPS = 60;
 static constexpr int64_t TARGET_MICRO_PER_FRAME = 1000000LL / TARGET_FPS;
+static constexpr uint32_t DISPLAY_WAIT_OK = 0;
+static constexpr uint32_t DISPLAY_WAIT_NO_PIXEL_DATA = 0x80290008;
 // how many cycles do we need to see before we start predicting the next frame
 static constexpr int predict_threshold = 3;
 static constexpr int max_expected_swapchain_size = 6;
@@ -70,7 +72,8 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
                 if (vblank_wait_info.target_vcount <= display.vblank_count) {
                     ThreadStatePtr target_wait = vblank_wait_info.target_thread;
 
-                    target_wait->update_status(ThreadStatus::run);
+                    if (!target_wait->complete_deferred_import_wait(display.abort.load() ? DISPLAY_WAIT_NO_PIXEL_DATA : DISPLAY_WAIT_OK))
+                        target_wait->update_status(ThreadStatus::run);
                     display.vblank_wait_infos.erase(display.vblank_wait_infos.begin() + i);
                 } else {
                     i++;
@@ -89,9 +92,18 @@ void start_sync_thread(EmuEnvState &emuenv) {
     emuenv.display.vblank_thread = std::make_unique<std::thread>(vblank_sync_thread, std::ref(emuenv));
 }
 
-void wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePtr &wait_thread, const uint64_t target_vcount, const bool is_cb) {
-    if (!wait_thread) {
-        return;
+bool wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePtr &wait_thread, const uint64_t target_vcount, const bool is_cb) {
+    if (!wait_thread)
+        return false;
+
+    if (!is_cb) {
+        const std::lock_guard<std::mutex> guard(display.mutex);
+        if (target_vcount <= display.vblank_count)
+            return false;
+        if (wait_thread->begin_deferred_import_wait()) {
+            display.vblank_wait_infos.push_back({ wait_thread, target_vcount, true });
+            return true;
+        }
     }
 
     {
@@ -101,10 +113,10 @@ void wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePt
             const std::lock_guard<std::mutex> guard(display.mutex);
 
             if (target_vcount <= display.vblank_count)
-                return;
+                return false;
 
             wait_thread->update_status(ThreadStatus::wait);
-            display.vblank_wait_infos.push_back({ wait_thread, target_vcount });
+            display.vblank_wait_infos.push_back({ wait_thread, target_vcount, false });
         }
 
         wait_thread->status_cond.wait(thread_lock, [=]() { return wait_thread->status == ThreadStatus::run; });
@@ -119,6 +131,8 @@ void wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePt
             }
         }
     }
+
+    return false;
 }
 
 static void reset_swapchain_cycle(DisplayState &display, Address sync_object) {

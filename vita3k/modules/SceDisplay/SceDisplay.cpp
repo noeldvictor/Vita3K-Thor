@@ -50,7 +50,8 @@ static int display_wait(EmuEnvState &emuenv, SceUID thread_id, int vcount, const
         target_vcount = thread->last_vblank_waited;
     }
 
-    wait_vblank(emuenv.display, emuenv.kernel, thread, target_vcount, is_cb);
+    if (wait_vblank(emuenv.display, emuenv.kernel, thread, target_vcount, is_cb))
+        return SCE_DISPLAY_ERROR_OK;
 
     if (emuenv.display.abort.load())
         return SCE_DISPLAY_ERROR_NO_PIXEL_DATA;

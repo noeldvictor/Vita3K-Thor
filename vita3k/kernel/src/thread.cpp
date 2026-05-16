@@ -134,6 +134,7 @@ int ThreadState::start(SceSize arglen, const Ptr<void> argp, bool run_entry_call
         return SCE_KERNEL_ERROR_RUNNING;
     std::unique_lock<std::mutex> thread_lock(mutex);
 
+    deferred_import_wait = false;
     run_start_callback = run_entry_callback;
     call_level = 1;
     load_context(*cpu, init_cpu_ctx);
@@ -174,6 +175,7 @@ void ThreadState::exit_delete(bool exit) {
     std::lock_guard<std::mutex> lock(mutex);
 
     run_end_callback = exit;
+    deferred_import_wait = false;
 
     const ThreadToDo last_to_do = to_do;
     to_do = ThreadToDo::remove;
@@ -476,6 +478,49 @@ void ThreadState::resume(bool step) {
         to_do = step ? ThreadToDo::step : ThreadToDo::run;
     }
     something_to_do.notify_one();
+}
+
+bool ThreadState::begin_deferred_import_wait() {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (to_do != ThreadToDo::run && to_do != ThreadToDo::step)
+        return false;
+
+    deferred_import_wait = true;
+    to_do = ThreadToDo::wait;
+    update_status(ThreadStatus::wait, ThreadStatus::run);
+    return true;
+}
+
+bool ThreadState::restore_deferred_import_wait() {
+    std::lock_guard<std::mutex> lock(mutex);
+    deferred_import_wait = true;
+    to_do = ThreadToDo::wait;
+    status = ThreadStatus::wait;
+    status_cond.notify_all();
+    return true;
+}
+
+bool ThreadState::complete_deferred_import_wait(uint32_t return_value) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!deferred_import_wait)
+        return false;
+
+    deferred_import_wait = false;
+    write_reg(*cpu, 0, return_value);
+    if (status == ThreadStatus::wait) {
+        status = ThreadStatus::run;
+        status_cond.notify_all();
+    }
+    if (to_do == ThreadToDo::wait || to_do == ThreadToDo::suspend) {
+        to_do = ThreadToDo::run;
+        something_to_do.notify_one();
+    }
+    return true;
+}
+
+bool ThreadState::has_deferred_import_wait() {
+    std::lock_guard<std::mutex> lock(mutex);
+    return deferred_import_wait;
 }
 
 std::string ThreadState::log_stack_traceback() const {

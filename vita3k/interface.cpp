@@ -1315,6 +1315,7 @@ struct QuickStatePredictedDisplayFrameSnapshot {
 struct QuickStateDisplayVBlankWaitSnapshot {
     SceUID thread_id = 0;
     uint64_t target_vcount = 0;
+    bool deferred_import_wait = false;
 };
 
 struct QuickStateDisplaySnapshot {
@@ -3077,7 +3078,11 @@ static bool quick_state_parse_display_vblank_wait_snapshot(const std::string &te
     if (!quick_state_parse_i32_text(fields.at("thread"), parsed_thread_id) || parsed_thread_id <= 0)
         return false;
     wait.thread_id = static_cast<SceUID>(parsed_thread_id);
-    return quick_state_parse_u64_text(fields.at("target"), wait.target_vcount);
+    if (!quick_state_parse_u64_text(fields.at("target"), wait.target_vcount))
+        return false;
+    if (fields.contains("deferred") && !quick_state_parse_bool_text(fields.at("deferred"), wait.deferred_import_wait))
+        return false;
+    return true;
 }
 
 static bool quick_state_parse_display_snapshot_section(const QuickStateSlot &slot, QuickStateDisplaySnapshot &snapshot) {
@@ -4242,6 +4247,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                 text << "vblank_wait." << i
                      << "=thread=" << thread_id
                      << ";target=" << vblank_wait.target_vcount
+                     << ";deferred=" << vblank_wait.deferred_import_wait
                      << "\n";
             }
             text << "vblank_callbacks=" << emuenv.display.vblank_callbacks.size() << "\n";
@@ -4755,7 +4761,14 @@ static bool restore_quick_state_display_state(EmuEnvState &emuenv, const QuickSt
                     slot.title_id, saved_wait.thread_id, saved_wait.target_vcount, snapshot.vblank_count);
                 return false;
             }
-            restored_vblank_waits.push_back({ thread->second, saved_wait.target_vcount });
+            if (!allow_live_host_state && !saved_wait.deferred_import_wait) {
+                LOG_WARN("Refused display restore for {} because vblank wait thread {} needs a live host wait stack.",
+                    slot.title_id, saved_wait.thread_id);
+                return false;
+            }
+            if (saved_wait.deferred_import_wait)
+                thread->second->restore_deferred_import_wait();
+            restored_vblank_waits.push_back({ thread->second, saved_wait.target_vcount, saved_wait.deferred_import_wait });
         }
     }
 
