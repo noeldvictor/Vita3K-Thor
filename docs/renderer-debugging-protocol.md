@@ -81,3 +81,35 @@ Never leave a renderer turn with mystery state. Record:
 - Installed Thor APK status if Android was affected.
 - Which packet is open or closed.
 - The next single hypothesis.
+
+## Tool Escalation
+
+Use heavier tools when live controls and dumps have stopped answering the question. Escalation is not a new guess; it must answer a specific unresolved question from SQLite.
+
+1. **RenderDoc on Windows**: first escalation for a bad Vulkan frame when the symptom reproduces on desktop. Capture the frame, inspect the event list, pipeline state, bound descriptors, texture contents, render target history, and debug labels. Local helper:
+
+```powershell
+.\tools\windows\start-renderdoc-capture.ps1 `
+  -TitleId PCSH00250 `
+  -CaseSlug doa-statue-renderdoc `
+  -BackendRenderer Vulkan `
+  -TraceLimit 256 `
+  -LogLevel 0 `
+  -ApiValidation
+```
+
+RenderDoc captures go under `tmp/renderdoc/<case>/`. Use the capture to decide whether the bad pixels first appear in a producer render target, texture upload, shader output, or final composition. Do not use RenderDoc to re-run broad fhash/depth/cull guesses.
+
+2. **GFXReconstruct**: use when we need a portable Vulkan API stream or replay independent of the live game. It is not currently installed in this workspace; install from the Vulkan SDK or LunarG releases before using. Store `.gfxr` files under ignored `tmp/gfxreconstruct/`.
+
+3. **Android GPU Inspector / Snapdragon Profiler**: use after Windows evidence when the issue is Android/Adreno/Turnip-specific or performance-related. They are not currently installed in this workspace. Use AGI for Android frame/system profiling and Snapdragon Profiler for Adreno counters/snapshots when available. Record device, driver, trace settings, and trace path in SQLite.
+
+4. **Ghidra**: use after capture/log evidence produces a concrete Vita-side question, such as which `sceGxm*` calls set a suspicious texture/surface, whether a title uses load/store depth-stencil in a way Vita3K ignores, or which shader constants/material flags feed a bad draw. Do not start from Ghidra just because the image is wrong.
+
+Local Ghidra headless path:
+
+```powershell
+$ghidra = 'C:\Users\leanerdesigner\Documents\SteamPortableTools\toolchains\ghidra_12.0.4_PUBLIC\support\analyzeHeadless.bat'
+```
+
+When analyzing legally owned local game modules, keep extracted ELFs, projects, scripts, and logs under ignored `tmp/ghidra/<case>/`. Commit only tooling/scripts and SQLite notes, never commercial binaries or decrypted game content.

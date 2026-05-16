@@ -137,6 +137,24 @@ Compare dumped surface PNGs with the window burst. If the surface dump is alread
 
 Use progressive `stop_after` to find the first visible bad family, then test whether `skip` of the same draw actually fixes the live frame. A `stop_after` transition alone does not prove a single draw is the root cause. If a sampled consumer skip does not remove the corruption, immediately compare the producer surface dump with a window burst before trying another presentation/cache change.
 
+## RenderDoc / Replay / Ghidra Escalation
+
+If SQLite shows we are repeating texture/depth/cull/shader guesses, stop live toggles and escalate to evidence tools.
+
+Use RenderDoc first for Windows Vulkan frames that reproduce locally:
+
+```powershell
+.\tools\windows\start-renderdoc-capture.ps1 -TitleId <TITLEID> -CaseSlug <case-renderdoc> -BackendRenderer Vulkan -TraceLimit 256 -LogLevel 0 -ApiValidation
+```
+
+Capture the bad frame and inspect event history, render target contents, descriptor bindings, sampled textures, shader IO, and debug labels. Record the capture path and the specific answer in SQLite. A RenderDoc capture should produce a question like "texture 0x722A0000 is already magenta before draw 27" or "producer target 0x62FF8000 is clean but consumer swizzle is wrong," not just "looks bad."
+
+Use GFXReconstruct when a replayable Vulkan API stream is needed. It is optional tooling and may not be installed locally; if missing, record that and do not pretend `.gfxr` proof exists.
+
+Use Android GPU Inspector or Snapdragon Profiler only after Windows evidence or for Android-only Adreno/Turnip/performance bugs. Record driver, device, trace settings, and trace path.
+
+Use Ghidra only after the renderer capture/log asks a Vita-side question: imported `sceGxm*` call ordering, texture descriptor setup, scene load/store depth surfaces, material flags, or constants feeding a suspicious draw. Keep extracted ELFs and Ghidra projects under ignored `tmp/ghidra/<case>/`; commit only scripts and SQLite findings.
+
 ## Shader And GXM Research RAG
 
 When a renderer bug points at shader translation or Vita GPU architecture, add a SQLite note before patching. Use public sources, local Vita3K source, and per-game artifacts; do not use leaked SDKs, proprietary compiler dumps, or commercial game binaries as committed evidence.
