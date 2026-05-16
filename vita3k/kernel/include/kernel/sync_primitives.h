@@ -21,12 +21,14 @@
 #include <kernel/types.h>
 #include <util/byte_ring_buffer.h>
 
+#include <memory>
+
 struct KernelState;
 
 struct WaitingThreadData {
     ThreadStatePtr thread;
     int32_t priority = 0;
-    bool *was_canceled = nullptr;
+    std::shared_ptr<bool> was_canceled;
     SceUInt32 *timeout = nullptr;
     SceUInt32 timeout_value = 0;
 

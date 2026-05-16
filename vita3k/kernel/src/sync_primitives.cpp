@@ -1077,14 +1077,14 @@ SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thr
         data.signal = needCount;
         capture_wait_timeout(data, pTimeout);
 
-        bool was_canceled = false;
-        data.was_canceled = &was_canceled;
+        auto was_canceled = std::make_shared<bool>(false);
+        data.was_canceled = was_canceled;
 
         const auto data_it = semaphore->waiting_threads->push(data);
         thread_lock.unlock();
 
         auto res = handle_timeout(kernel, thread, thread_lock, semaphore_lock, semaphore->waiting_threads, data_it, export_name, pTimeout);
-        if (was_canceled)
+        if (*was_canceled)
             res = SCE_KERNEL_ERROR_WAIT_CANCEL;
         return res;
     } else {
@@ -1484,8 +1484,8 @@ static int eventflag_waitorpoll(KernelState &kernel, const char *export_name, Sc
         data.priority = thread->priority;
         capture_wait_timeout(data, timeout);
 
-        bool was_canceled = false;
-        data.was_canceled = &was_canceled;
+        auto was_canceled = std::make_shared<bool>(false);
+        data.was_canceled = was_canceled;
 
         const auto data_it = event->waiting_threads->push(data);
         thread_lock.unlock();
@@ -1496,7 +1496,7 @@ static int eventflag_waitorpoll(KernelState &kernel, const char *export_name, Sc
             // otherwise set in eventflag_set
             *outBits = event->flags;
         }
-        if (was_canceled)
+        if (*was_canceled)
             err = SCE_KERNEL_ERROR_WAIT_CANCEL;
 
         return err;
@@ -1593,7 +1593,8 @@ SceInt32 eventflag_cancel(KernelState &kernel, const char *export_name, SceUID t
 
         const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
 
-        *waiting_thread_data.was_canceled = true;
+        if (waiting_thread_data.was_canceled)
+            *waiting_thread_data.was_canceled = true;
         if (waiting_thread_data.outBits)
             *waiting_thread_data.outBits = pattern;
 

@@ -3387,7 +3387,7 @@ static Address quick_state_guest_address_from_host_pointer(const MemState &mem, 
 }
 
 static const char *quick_state_wait_queue_cancel_source(const WaitingThreadData &data) {
-    return data.was_canceled ? "host-stack" : "none";
+    return data.was_canceled ? "owned-token" : "none";
 }
 
 template <typename FieldWriter>
