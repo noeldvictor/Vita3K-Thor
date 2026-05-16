@@ -201,6 +201,17 @@ Ptr<Ptr<void>> KernelState::get_thread_tls_addr(MemState &mem, SceUID thread_id,
     return address;
 }
 
+ThreadStatus KernelState::snapshot_thread_status_unlocked(const SceUID thread_id, const ThreadStatus current_status) const {
+    const auto paused_status = paused_threads_status.find(thread_id);
+    return paused_status == paused_threads_status.end() ? current_status : paused_status->second;
+}
+
+void KernelState::set_paused_thread_status_for_restore(const SceUID thread_id, const ThreadStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    if (!paused_threads_status.empty())
+        paused_threads_status[thread_id] = status;
+}
+
 void KernelState::exit_delete_all_threads() {
     const std::lock_guard<std::mutex> lock(mutex);
     for (auto &[_, thread] : threads)

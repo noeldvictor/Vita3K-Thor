@@ -171,6 +171,8 @@ struct KernelState {
 
     ThreadStatePtr get_thread(SceUID thread_id);
     Ptr<Ptr<void>> get_thread_tls_addr(MemState &mem, SceUID thread_id, int key);
+    ThreadStatus snapshot_thread_status_unlocked(SceUID thread_id, ThreadStatus current_status) const;
+    void set_paused_thread_status_for_restore(SceUID thread_id, ThreadStatus status);
 
     void exit_delete_all_threads();
     bool is_threads_paused() { return !paused_threads_status.empty(); }

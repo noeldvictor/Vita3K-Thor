@@ -2999,6 +2999,26 @@ static std::string quick_state_thread_status_name(const ThreadStatus status) {
     return "unknown";
 }
 
+static bool quick_state_thread_status_from_name(const std::string &name, ThreadStatus &status) {
+    if (name == "run") {
+        status = ThreadStatus::run;
+        return true;
+    }
+    if (name == "dormant") {
+        status = ThreadStatus::dormant;
+        return true;
+    }
+    if (name == "suspend") {
+        status = ThreadStatus::suspend;
+        return true;
+    }
+    if (name == "wait") {
+        status = ThreadStatus::wait;
+        return true;
+    }
+    return false;
+}
+
 static size_t quick_state_count_avplayer_threads(const QuickStateSlot &slot) {
     return static_cast<size_t>(std::count_if(slot.thread_contexts.begin(), slot.thread_contexts.end(), [](const QuickStateThreadContext &thread) {
         return thread.name.rfind("avPlayer ", 0) == 0;
@@ -3244,9 +3264,10 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         text << "threads=" << emuenv.kernel.threads.size() << "\n";
         for (const auto &[thread_id, thread] : emuenv.kernel.threads) {
             const std::lock_guard<std::mutex> thread_lock(thread->mutex);
+            const ThreadStatus snapshot_status = emuenv.kernel.snapshot_thread_status_unlocked(thread_id, thread->status);
             text << "thread." << thread_id
                  << ".name=" << thread->name
-                 << ";status=" << quick_state_thread_status_name(thread->status)
+                 << ";status=" << quick_state_thread_status_name(snapshot_status)
                  << ";entry=0x" << std::hex << thread->entry_point << std::dec
                  << ";stack=0x" << std::hex << thread->stack.get() << std::dec
                  << ";stack_size=" << thread->stack_size
@@ -3535,7 +3556,7 @@ static bool restore_quick_state_timing_state(EmuEnvState &emuenv, const QuickSta
     return true;
 }
 
-static bool restore_quick_state_thread_metadata(const QuickStateSlot &slot, const std::vector<ThreadStatePtr> &matched_threads) {
+static bool restore_quick_state_thread_metadata(EmuEnvState &emuenv, const QuickStateSlot &slot, const std::vector<ThreadStatePtr> &matched_threads) {
     std::map<SceUID, QuickStateThreadMetadata> metadata_by_id;
     if (!quick_state_parse_thread_metadata_section(slot, metadata_by_id)) {
         LOG_WARN("Refused thread metadata restore for {} because the thor.kernel.objects thread metadata is missing or invalid.", slot.title_id);
@@ -3573,13 +3594,25 @@ static bool restore_quick_state_thread_metadata(const QuickStateSlot &slot, cons
         const auto &thread_context = slot.thread_contexts[i];
         const QuickStateThreadMetadata &thread_metadata = metadata_by_id.at(thread_context.id);
         const auto &thread = matched_threads[i];
-        const std::lock_guard<std::mutex> thread_lock(thread->mutex);
-        thread->priority = thread_metadata.priority;
-        thread->affinity_mask = thread_metadata.affinity_mask;
-        thread->start_tick = thread_metadata.start_tick;
-        thread->last_vblank_waited = thread_metadata.last_vblank_waited;
-        thread->returned_value = thread_metadata.returned_value;
-        thread->is_processing_callbacks = thread_metadata.is_processing_callbacks;
+        ThreadStatus saved_status = ThreadStatus::dormant;
+        if (!quick_state_thread_status_from_name(thread_metadata.status, saved_status)) {
+            LOG_WARN("Refused thread metadata restore for {} because saved thread {} has unknown status '{}'.",
+                slot.title_id, thread_context.id, thread_metadata.status);
+            return false;
+        }
+
+        {
+            const std::lock_guard<std::mutex> thread_lock(thread->mutex);
+            thread->priority = thread_metadata.priority;
+            thread->affinity_mask = thread_metadata.affinity_mask;
+            thread->start_tick = thread_metadata.start_tick;
+            thread->last_vblank_waited = thread_metadata.last_vblank_waited;
+            thread->returned_value = thread_metadata.returned_value;
+            thread->is_processing_callbacks = thread_metadata.is_processing_callbacks;
+            thread->status = saved_status == ThreadStatus::run ? ThreadStatus::suspend : saved_status;
+            thread->status_cond.notify_all();
+        }
+        emuenv.kernel.set_paused_thread_status_for_restore(thread->id, saved_status);
     }
 
     LOG_INFO("Restored thread metadata snapshot for {} ({} matched thread(s)).", slot.title_id, matched_threads.size());
@@ -4163,7 +4196,7 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         return false;
     }
 
-    if (!restore_quick_state_thread_metadata(slot, matched_threads)) {
+    if (!restore_quick_state_thread_metadata(emuenv, slot, matched_threads)) {
         resume_after_quick_state(emuenv, already_paused);
         return false;
     }
