@@ -59,6 +59,7 @@
 #include <chrono>
 #include <cmath>
 #include <cctype>
+#include <cstdint>
 #include <cstring>
 #include <initializer_list>
 #include <limits>
@@ -1174,6 +1175,25 @@ struct QuickStateSyncMsgPipe {
     bool being_deleted = false;
 };
 
+struct QuickStateSyncWaitQueueEntry {
+    std::string kind;
+    SceUID object_id = 0;
+    uint32_t index = 0;
+    SceUID thread_id = 0;
+    int32_t priority = 0;
+    int32_t lock_count = 0;
+    bool is_write = false;
+    int32_t signal = 0;
+    int32_t pattern = 0;
+    Address result_pattern = 0;
+    Address user_data = 0;
+    int32_t wait = 0;
+    int32_t flags = 0;
+    Address out_bits = 0;
+    uint32_t request_size = 0;
+    std::string cancel_source;
+};
+
 struct QuickStateSyncSnapshot {
     bool valid = false;
     std::map<SceUID, QuickStateSyncSimpleEvent> simple_events;
@@ -1186,6 +1206,7 @@ struct QuickStateSyncSnapshot {
     std::map<SceUID, QuickStateSyncCondvar> lwcondvars;
     std::map<SceUID, QuickStateSyncRWLock> rwlocks;
     std::map<SceUID, QuickStateSyncMsgPipe> msgpipes;
+    std::vector<QuickStateSyncWaitQueueEntry> wait_queue_entries;
 
     size_t total_waiting_threads() const {
         size_t total = 0;
@@ -1217,6 +1238,58 @@ struct QuickStateSyncSnapshot {
         for (const auto &[_, item] : msgpipes)
             total += static_cast<size_t>(std::min<uint64_t>(item.used, static_cast<uint64_t>(std::numeric_limits<size_t>::max())));
         return total;
+    }
+
+    size_t wait_queue_entry_count(const std::string_view kind, const SceUID object_id) const {
+        return static_cast<size_t>(std::count_if(wait_queue_entries.begin(), wait_queue_entries.end(), [kind, object_id](const QuickStateSyncWaitQueueEntry &entry) {
+            return entry.object_id == object_id && entry.kind == kind;
+        }));
+    }
+
+    bool wait_queue_metadata_complete() const {
+        for (const auto &[uid, item] : simple_events) {
+            if (wait_queue_entry_count("simple_event", uid) != item.waiting_count)
+                return false;
+        }
+        for (const auto &[uid, item] : timers) {
+            if (wait_queue_entry_count("timer", uid) != item.waiting_count)
+                return false;
+        }
+        for (const auto &[uid, item] : semaphores) {
+            if (wait_queue_entry_count("semaphore", uid) != item.waiting_count)
+                return false;
+        }
+        for (const auto &[uid, item] : mutexes) {
+            if (wait_queue_entry_count("mutex", uid) != item.waiting_count)
+                return false;
+        }
+        for (const auto &[uid, item] : lwmutexes) {
+            if (wait_queue_entry_count("lwmutex", uid) != item.waiting_count)
+                return false;
+        }
+        for (const auto &[uid, item] : eventflags) {
+            if (wait_queue_entry_count("eventflag", uid) != item.waiting_count)
+                return false;
+        }
+        for (const auto &[uid, item] : condvars) {
+            if (wait_queue_entry_count("condvar", uid) != item.waiting_count)
+                return false;
+        }
+        for (const auto &[uid, item] : lwcondvars) {
+            if (wait_queue_entry_count("lwcondvar", uid) != item.waiting_count)
+                return false;
+        }
+        for (const auto &[uid, item] : rwlocks) {
+            if (wait_queue_entry_count("rwlock", uid) != item.waiting_count)
+                return false;
+        }
+        for (const auto &[uid, item] : msgpipes) {
+            if (wait_queue_entry_count("msgpipe_sender", uid) != item.sender_count
+                || wait_queue_entry_count("msgpipe_receiver", uid) != item.receiver_count) {
+                return false;
+            }
+        }
+        return wait_queue_entries.size() == total_waiting_threads();
     }
 };
 
@@ -1296,10 +1369,12 @@ struct QuickStateRestoreManifest {
     bool io_file_positions_restorable = false;
     bool io_file_handles_restorable = false;
     bool sync_primitives_restorable = false;
+    bool sync_wait_queue_metadata_complete = false;
     bool display_state_restorable = false;
     bool display_vblank_waits_restorable = false;
     bool audio_state_restorable = false;
     size_t sync_waiting_threads = 0;
+    size_t sync_wait_queue_entries = 0;
     size_t msgpipe_buffer_bytes = 0;
     size_t io_memory_file_handles = 0;
     size_t display_wait_entries = 0;
@@ -2661,6 +2736,105 @@ static bool quick_state_parse_sync_msgpipe(const std::string &key, const std::st
     return msgpipe.used <= msgpipe.capacity;
 }
 
+static bool quick_state_parse_sync_wait_queue_key(const std::string &key, QuickStateSyncWaitQueueEntry &entry) {
+    constexpr std::string_view prefix = "wait.";
+    if (key.rfind(prefix, 0) != 0)
+        return false;
+
+    const std::string rest = key.substr(prefix.size());
+    const size_t kind_end = rest.find('.');
+    if (kind_end == std::string::npos || kind_end == 0)
+        return false;
+    const size_t id_end = rest.find('.', kind_end + 1);
+    if (id_end == std::string::npos || id_end == kind_end + 1 || id_end + 1 >= rest.size())
+        return false;
+
+    int32_t parsed_id = 0;
+    uint32_t parsed_index = 0;
+    if (!quick_state_parse_i32_text(rest.substr(kind_end + 1, id_end - kind_end - 1), parsed_id)
+        || parsed_id <= 0
+        || !quick_state_parse_u32_text(rest.substr(id_end + 1), parsed_index)) {
+        return false;
+    }
+
+    entry.kind = rest.substr(0, kind_end);
+    entry.object_id = static_cast<SceUID>(parsed_id);
+    entry.index = parsed_index;
+    return true;
+}
+
+static bool quick_state_parse_sync_wait_queue_entry(const std::string &key, const std::string &value, QuickStateSyncWaitQueueEntry &entry) {
+    entry = {};
+    if (!quick_state_parse_sync_wait_queue_key(key, entry))
+        return false;
+
+    const auto fields = quick_state_parse_semicolon_fields(value);
+    int32_t parsed_thread_id = 0;
+    if (!fields.contains("thread")
+        || !fields.contains("priority")
+        || !quick_state_parse_i32_text(fields.at("thread"), parsed_thread_id)
+        || !quick_state_parse_i32_text(fields.at("priority"), entry.priority)
+        || parsed_thread_id <= 0) {
+        return false;
+    }
+    entry.thread_id = static_cast<SceUID>(parsed_thread_id);
+
+    const auto parse_address = [&](const char *name, Address &out) {
+        uint64_t parsed = 0;
+        if (!fields.contains(name)
+            || !quick_state_parse_u64_text(fields.at(name), parsed, 0)
+            || parsed > static_cast<uint64_t>(std::numeric_limits<Address>::max())) {
+            return false;
+        }
+        out = static_cast<Address>(parsed);
+        return true;
+    };
+    const auto parse_optional_cancel_source = [&]() {
+        entry.cancel_source = fields.contains("cancel") ? fields.at("cancel") : "none";
+        return true;
+    };
+
+    if (entry.kind == "simple_event") {
+        return fields.contains("pattern")
+            && quick_state_parse_i32_text(fields.at("pattern"), entry.pattern)
+            && parse_address("result_pattern", entry.result_pattern)
+            && parse_address("user_data", entry.user_data);
+    }
+    if (entry.kind == "timer") {
+        return parse_address("result_pattern", entry.result_pattern)
+            && parse_address("user_data", entry.user_data);
+    }
+    if (entry.kind == "semaphore") {
+        return fields.contains("signal")
+            && quick_state_parse_i32_text(fields.at("signal"), entry.signal)
+            && parse_optional_cancel_source();
+    }
+    if (entry.kind == "mutex" || entry.kind == "lwmutex") {
+        return fields.contains("lock_count")
+            && quick_state_parse_i32_text(fields.at("lock_count"), entry.lock_count);
+    }
+    if (entry.kind == "eventflag") {
+        return fields.contains("wait")
+            && fields.contains("flags")
+            && quick_state_parse_i32_text(fields.at("wait"), entry.wait)
+            && quick_state_parse_i32_text(fields.at("flags"), entry.flags)
+            && parse_address("out_bits", entry.out_bits)
+            && parse_optional_cancel_source();
+    }
+    if (entry.kind == "condvar" || entry.kind == "lwcondvar") {
+        return true;
+    }
+    if (entry.kind == "rwlock") {
+        return fields.contains("is_write")
+            && quick_state_parse_bool_text(fields.at("is_write"), entry.is_write);
+    }
+    if (entry.kind == "msgpipe_sender" || entry.kind == "msgpipe_receiver") {
+        return fields.contains("request_size")
+            && quick_state_parse_u32_text(fields.at("request_size"), entry.request_size);
+    }
+    return false;
+}
+
 static bool quick_state_parse_sync_primitives_section(const QuickStateSlot &slot, QuickStateSyncSnapshot &snapshot) {
     snapshot = {};
     const QuickStateSection *section = quick_state_find_section(slot, "thor.kernel.objects");
@@ -2682,6 +2856,7 @@ static bool quick_state_parse_sync_primitives_section(const QuickStateSlot &slot
     size_t expected_lwcondvars = 0;
     size_t expected_rwlocks = 0;
     size_t expected_msgpipes = 0;
+    size_t expected_wait_queue_entries = 0;
     if (!quick_state_parse_size(values, "simple_events", expected_simple_events)
         || !quick_state_parse_size(values, "timers", expected_timers)
         || !quick_state_parse_size(values, "semaphores", expected_semaphores)
@@ -2691,7 +2866,8 @@ static bool quick_state_parse_sync_primitives_section(const QuickStateSlot &slot
         || !quick_state_parse_size(values, "condvars", expected_condvars)
         || !quick_state_parse_size(values, "lwcondvars", expected_lwcondvars)
         || !quick_state_parse_size(values, "rwlocks", expected_rwlocks)
-        || !quick_state_parse_size(values, "msgpipes", expected_msgpipes)) {
+        || !quick_state_parse_size(values, "msgpipes", expected_msgpipes)
+        || !quick_state_parse_size(values, "wait_queue_entries", expected_wait_queue_entries)) {
         return false;
     }
 
@@ -2746,6 +2922,11 @@ static bool quick_state_parse_sync_primitives_section(const QuickStateSlot &slot
             if (!quick_state_parse_sync_msgpipe(key, value, msgpipe))
                 return false;
             snapshot.msgpipes[msgpipe.id] = std::move(msgpipe);
+        } else if (key.rfind("wait.", 0) == 0) {
+            QuickStateSyncWaitQueueEntry wait_entry;
+            if (!quick_state_parse_sync_wait_queue_entry(key, value, wait_entry))
+                return false;
+            snapshot.wait_queue_entries.push_back(std::move(wait_entry));
         }
     }
 
@@ -2758,7 +2939,8 @@ static bool quick_state_parse_sync_primitives_section(const QuickStateSlot &slot
         && snapshot.condvars.size() == expected_condvars
         && snapshot.lwcondvars.size() == expected_lwcondvars
         && snapshot.rwlocks.size() == expected_rwlocks
-        && snapshot.msgpipes.size() == expected_msgpipes;
+        && snapshot.msgpipes.size() == expected_msgpipes
+        && snapshot.wait_queue_entries.size() == expected_wait_queue_entries;
     return snapshot.valid;
 }
 
@@ -3092,6 +3274,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     manifest.sync_primitives_restorable = quick_state_parse_sync_primitives_section(slot, sync_snapshot);
     if (manifest.sync_primitives_restorable) {
         manifest.sync_waiting_threads = sync_snapshot.total_waiting_threads();
+        manifest.sync_wait_queue_entries = sync_snapshot.wait_queue_entries.size();
+        manifest.sync_wait_queue_metadata_complete = sync_snapshot.wait_queue_metadata_complete();
         manifest.msgpipe_buffer_bytes = sync_snapshot.msgpipe_buffer_bytes();
     }
     QuickStateDisplaySnapshot display_snapshot;
@@ -3114,8 +3298,11 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     if (!manifest.sync_primitives_restorable) {
         manifest.missing_serializers.push_back("kernel-sync-primitives");
     } else {
-        if (manifest.sync_waiting_threads > 0)
+        if (manifest.sync_waiting_threads > 0) {
+            if (!manifest.sync_wait_queue_metadata_complete)
+                manifest.missing_serializers.push_back("kernel-wait-queue-metadata");
             manifest.missing_serializers.push_back("kernel-wait-queues");
+        }
         if (manifest.msgpipe_buffer_bytes > 0)
             manifest.missing_serializers.push_back("kernel-msgpipe-buffers");
     }
@@ -3166,6 +3353,50 @@ static QuickStateSection quick_state_make_text_section(std::string tag, std::ost
 
 static size_t quick_state_waiting_count(const WaitingThreadQueuePtr &waiting_threads) {
     return waiting_threads ? waiting_threads->size() : 0;
+}
+
+static Address quick_state_guest_address_from_host_pointer(const MemState &mem, const void *pointer) {
+    if (!pointer || !mem.memory)
+        return 0;
+
+    const auto host_address = reinterpret_cast<std::uintptr_t>(pointer);
+    const auto base_address = reinterpret_cast<std::uintptr_t>(mem.memory.get());
+    constexpr uint64_t guest_memory_bytes = 1ull << 32;
+    if (host_address >= base_address && host_address < base_address + guest_memory_bytes) {
+        const auto guest_address = static_cast<Address>(host_address - base_address);
+        return is_valid_addr(mem, guest_address) ? guest_address : 0;
+    }
+
+    if (mem.use_page_table) {
+        const auto mapped = mem.external_mapping.lower_bound(static_cast<uint64_t>(host_address));
+        if (mapped != mem.external_mapping.end() && host_address < mapped->first + mapped->second.size) {
+            const auto guest_address = static_cast<Address>(host_address - mapped->first + mapped->second.address);
+            return is_valid_addr(mem, guest_address) ? guest_address : 0;
+        }
+    }
+
+    return 0;
+}
+
+static const char *quick_state_wait_queue_cancel_source(const WaitingThreadData &data) {
+    return data.was_canceled ? "host-stack" : "none";
+}
+
+template <typename FieldWriter>
+static size_t quick_state_write_wait_queue_entries(std::ostringstream &text, const char *kind, const SceUID uid, const WaitingThreadQueuePtr &queue, FieldWriter write_fields) {
+    if (!queue)
+        return 0;
+
+    size_t index = 0;
+    for (auto it = queue->begin(); it != queue->end(); ++it, ++index) {
+        const WaitingThreadData data = *it;
+        text << "wait." << kind << "." << uid << "." << index
+             << "=thread=" << (data.thread ? data.thread->id : 0)
+             << ";priority=" << data.priority;
+        write_fields(text, data);
+        text << "\n";
+    }
+    return index;
 }
 
 static uint64_t quick_state_host_time_us() {
@@ -3261,6 +3492,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         std::ostringstream text;
         text << "schema=thor.kernel.objects.v1\n";
         const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
+        size_t wait_queue_entries = 0;
         text << "threads=" << emuenv.kernel.threads.size() << "\n";
         for (const auto &[thread_id, thread] : emuenv.kernel.threads) {
             const std::lock_guard<std::mutex> thread_lock(thread->mutex);
@@ -3299,6 +3531,10 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";interval=" << timer->event_interval
                  << ";waiting=" << quick_state_waiting_count(timer->waiting_threads)
                  << "\n";
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, "timer", uid, timer->waiting_threads, [&emuenv](std::ostringstream &entry_text, const WaitingThreadData &data) {
+                entry_text << ";result_pattern=0x" << std::hex << quick_state_guest_address_from_host_pointer(emuenv.mem, data.result_pattern)
+                           << ";user_data=0x" << quick_state_guest_address_from_host_pointer(emuenv.mem, data.user_data) << std::dec;
+            });
         }
 
         text << "semaphores=" << emuenv.kernel.semaphores.size() << "\n";
@@ -3312,6 +3548,10 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";max=" << semaphore->max
                  << ";waiting=" << quick_state_waiting_count(semaphore->waiting_threads)
                  << "\n";
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, "semaphore", uid, semaphore->waiting_threads, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
+                entry_text << ";signal=" << data.signal
+                           << ";cancel=" << quick_state_wait_queue_cancel_source(data);
+            });
         }
 
         text << "mutexes=" << emuenv.kernel.mutexes.size() << "\n";
@@ -3325,6 +3565,9 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";owner=" << (mutex->owner ? mutex->owner->id : 0)
                  << ";waiting=" << quick_state_waiting_count(mutex->waiting_threads)
                  << "\n";
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, "mutex", uid, mutex->waiting_threads, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
+                entry_text << ";lock_count=" << data.lock_count;
+            });
         }
 
         text << "lwmutexes=" << emuenv.kernel.lwmutexes.size() << "\n";
@@ -3339,6 +3582,9 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";workarea=0x" << std::hex << mutex->workarea.address() << std::dec
                  << ";waiting=" << quick_state_waiting_count(mutex->waiting_threads)
                  << "\n";
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, "lwmutex", uid, mutex->waiting_threads, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
+                entry_text << ";lock_count=" << data.lock_count;
+            });
         }
 
         text << "eventflags=" << emuenv.kernel.eventflags.size() << "\n";
@@ -3350,6 +3596,12 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";flags=" << eventflag->flags
                  << ";waiting=" << quick_state_waiting_count(eventflag->waiting_threads)
                  << "\n";
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, "eventflag", uid, eventflag->waiting_threads, [&emuenv](std::ostringstream &entry_text, const WaitingThreadData &data) {
+                entry_text << ";wait=" << data.wait
+                           << ";flags=" << data.flags
+                           << ";out_bits=0x" << std::hex << quick_state_guest_address_from_host_pointer(emuenv.mem, data.outBits) << std::dec
+                           << ";cancel=" << quick_state_wait_queue_cancel_source(data);
+            });
         }
 
         text << "condvars=" << emuenv.kernel.condvars.size() << "\n";
@@ -3361,6 +3613,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";associated_mutex=" << (condvar->associated_mutex ? condvar->associated_mutex->uid : 0)
                  << ";waiting=" << quick_state_waiting_count(condvar->waiting_threads)
                  << "\n";
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, "condvar", uid, condvar->waiting_threads, [](std::ostringstream &, const WaitingThreadData &) {});
         }
 
         text << "lwcondvars=" << emuenv.kernel.lwcondvars.size() << "\n";
@@ -3372,6 +3625,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";associated_mutex=" << (condvar->associated_mutex ? condvar->associated_mutex->uid : 0)
                  << ";waiting=" << quick_state_waiting_count(condvar->waiting_threads)
                  << "\n";
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, "lwcondvar", uid, condvar->waiting_threads, [](std::ostringstream &, const WaitingThreadData &) {});
         }
 
         text << "rwlocks=" << emuenv.kernel.rwlocks.size() << "\n";
@@ -3385,6 +3639,9 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";owners_detail=" << quick_state_rwlock_owners_detail(rwlock->owners)
                  << ";waiting=" << quick_state_waiting_count(rwlock->waiting_threads)
                  << "\n";
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, "rwlock", uid, rwlock->waiting_threads, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
+                entry_text << ";is_write=" << data.is_write;
+            });
         }
 
         text << "msgpipes=" << emuenv.kernel.msgpipes.size() << "\n";
@@ -3399,6 +3656,12 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";used=" << msgpipe->data_buffer.Used()
                  << ";being_deleted=" << msgpipe->beingDeleted
                  << "\n";
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, "msgpipe_sender", uid, msgpipe->senders, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
+                entry_text << ";request_size=" << data.mp.request_size;
+            });
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, "msgpipe_receiver", uid, msgpipe->receivers, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
+                entry_text << ";request_size=" << data.mp.request_size;
+            });
         }
 
         text << "callbacks=" << emuenv.kernel.callbacks.size() << "\n";
@@ -3414,7 +3677,13 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";cb_wakeup_only=" << event->cb_wakeup_only
                  << ";waiting=" << quick_state_waiting_count(event->waiting_threads)
                  << "\n";
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, "simple_event", uid, event->waiting_threads, [&emuenv](std::ostringstream &entry_text, const WaitingThreadData &data) {
+                entry_text << ";pattern=" << data.pattern
+                           << ";result_pattern=0x" << std::hex << quick_state_guest_address_from_host_pointer(emuenv.mem, data.result_pattern)
+                           << ";user_data=0x" << quick_state_guest_address_from_host_pointer(emuenv.mem, data.user_data) << std::dec;
+            });
         }
+        text << "wait_queue_entries=" << wait_queue_entries << "\n";
         text << "loaded_modules=" << emuenv.kernel.loaded_modules.size() << "\n";
         sections.push_back(quick_state_make_text_section("thor.kernel.objects", text));
     }
@@ -4240,15 +4509,50 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     return true;
 }
 
+static std::string quick_state_wait_queue_entry_detail(const QuickStateSyncWaitQueueEntry &entry) {
+    std::ostringstream detail;
+    detail << "#" << entry.index
+           << " thread=" << entry.thread_id
+           << " priority=" << entry.priority;
+    if (entry.kind == "simple_event") {
+        detail << " pattern=" << entry.pattern
+               << " result_pattern=0x" << std::hex << entry.result_pattern
+               << " user_data=0x" << entry.user_data << std::dec;
+    } else if (entry.kind == "timer") {
+        detail << " result_pattern=0x" << std::hex << entry.result_pattern
+               << " user_data=0x" << entry.user_data << std::dec;
+    } else if (entry.kind == "semaphore") {
+        detail << " signal=" << entry.signal
+               << " cancel=" << entry.cancel_source;
+    } else if (entry.kind == "mutex" || entry.kind == "lwmutex") {
+        detail << " lock_count=" << entry.lock_count;
+    } else if (entry.kind == "eventflag") {
+        detail << " wait=" << entry.wait
+               << " flags=" << entry.flags
+               << " out_bits=0x" << std::hex << entry.out_bits << std::dec
+               << " cancel=" << entry.cancel_source;
+    } else if (entry.kind == "rwlock") {
+        detail << " is_write=" << entry.is_write;
+    } else if (entry.kind == "msgpipe_sender" || entry.kind == "msgpipe_receiver") {
+        detail << " request_size=" << entry.request_size;
+    }
+    return detail.str();
+}
+
 static void write_quick_state_wait_queue_marker(std::ostream &marker, const QuickStateSlot &slot) {
     QuickStateSyncSnapshot snapshot;
     if (!quick_state_parse_sync_primitives_section(slot, snapshot))
         return;
 
     marker << "\nKernel wait queue snapshot\n";
-    const auto write_wait = [&marker](const char *kind, const SceUID uid, const std::string &name, const uint32_t count) {
-        if (count > 0)
+    const auto write_wait = [&marker, &snapshot](const char *kind, const SceUID uid, const std::string &name, const uint32_t count) {
+        if (count > 0) {
             marker << kind << " " << uid << " (" << name << "): " << count << "\n";
+            for (const QuickStateSyncWaitQueueEntry &entry : snapshot.wait_queue_entries) {
+                if (entry.kind == kind && entry.object_id == uid)
+                    marker << "  " << quick_state_wait_queue_entry_detail(entry) << "\n";
+            }
+        }
     };
     for (const auto &[uid, item] : snapshot.semaphores)
         write_wait("semaphore", uid, item.name, item.waiting_count);
@@ -4269,10 +4573,20 @@ static void write_quick_state_wait_queue_marker(std::ostream &marker, const Quic
     for (const auto &[uid, item] : snapshot.simple_events)
         write_wait("simple_event", uid, item.name, item.waiting_count);
     for (const auto &[uid, item] : snapshot.msgpipes) {
-        if (item.sender_count > 0)
+        if (item.sender_count > 0) {
             marker << "msgpipe " << uid << " (" << item.name << ") senders: " << item.sender_count << "\n";
-        if (item.receiver_count > 0)
+            for (const QuickStateSyncWaitQueueEntry &entry : snapshot.wait_queue_entries) {
+                if (entry.kind == "msgpipe_sender" && entry.object_id == uid)
+                    marker << "  " << quick_state_wait_queue_entry_detail(entry) << "\n";
+            }
+        }
+        if (item.receiver_count > 0) {
             marker << "msgpipe " << uid << " (" << item.name << ") receivers: " << item.receiver_count << "\n";
+            for (const QuickStateSyncWaitQueueEntry &entry : snapshot.wait_queue_entries) {
+                if (entry.kind == "msgpipe_receiver" && entry.object_id == uid)
+                    marker << "  " << quick_state_wait_queue_entry_detail(entry) << "\n";
+            }
+        }
     }
 }
 
@@ -4302,6 +4616,8 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "Thread metadata restore layer: " << (manifest.thread_metadata_restorable ? "ready" : "missing") << "\n";
     marker << "Sync primitive scalar restore layer: " << (manifest.sync_primitives_restorable ? "ready" : "missing") << "\n";
     marker << "Sync wait queue entries: " << manifest.sync_waiting_threads << "\n";
+    marker << "Sync wait queue metadata: " << (manifest.sync_wait_queue_metadata_complete ? "ready" : "missing")
+           << " (" << manifest.sync_wait_queue_entries << " serialized)\n";
     marker << "Message-pipe buffered bytes: " << manifest.msgpipe_buffer_bytes << "\n";
     marker << "IO file-position restore layer: " << (manifest.io_file_positions_restorable ? "ready" : "missing") << "\n";
     marker << "IO file-handle restore layer: " << (manifest.io_file_handles_restorable ? "ready" : "missing") << "\n";
