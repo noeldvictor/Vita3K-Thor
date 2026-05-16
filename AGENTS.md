@@ -91,11 +91,13 @@ python tools/debug_knowledge.py search "doa venus black terrain android 564cd0" 
 
 - Use committed input helpers instead of asking the user to repeatedly press obvious buttons during repro setup.
 - Windows desktop debug loop: use `tools/windows/send-vita3k-input.ps1`, which focuses the Vita3K window and sends the default keyboard-mapped Vita controls. Examples: `-Sequence circle,wait:500,start`, `-Sequence down:2,cross`, `-Sequence osd`, `-Sequence fast_forward`, `-Sequence click`.
-- Android/AYN Thor loop: use `tools/android/send-thor-input.ps1`. Default `KeyEvent` mode is best for simple prompts; `-Mode Sendevent` is best for raw Odin Controller routing, Back/Select conflicts, OSD chords, and cases where Android keyevents do not reach SDL like a real controller.
+- Android/AYN Thor loop: use `tools/android/send-thor-input.ps1`. Default `KeyEvent` mode is best for simple prompts; add `-DisplayId 0` when display routing is suspect. `-Mode Sendevent` is best for raw Odin Controller routing, Back/Select conflicts, OSD chords, and cases where Android keyevents do not reach SDL like a real controller; pass `-InputDevicePath /dev/input/eventN` if auto-discovery picks the wrong event.
 - Supported common button names include `cross`, `circle`, `square`, `triangle`, `start`, `select`, `back`, `up`, `down`, `left`, `right`, `l1`, `r1`, `l2`, `r2`, `l3`, and `r3`; use `button:count`, `wait:ms`, or `button+button` chords for short sequences.
+- Android input helpers also accept `tap:x:y` and `keyevent:<code>` tokens for visible prompt buttons and raw mapping checks. Quoted `'tap:x,y'` works too, but use `tap:x:y` in examples so PowerShell does not split coordinates into two array values.
 - Useful aliases are `osd` for L3+R3 and `fast_forward` for Select+R1. Windows also supports `save_state` and `load_state` through the default keyboard right-stick mapping. On Android, prefer runtime control or OSD automation for quickstates until the exact Thor right-stick axis events are captured for the current firmware.
 - For Japanese/Asian Vita games, Circle/O can be confirm and Cross/X can be cancel. Prefer `circle` for DOA Venus autosave/title prompts unless a screenshot/log proves Cross is expected.
 - Use Windows `click` automation for Vita3K/ImGui modal buttons that do not respond to Vita controls. `click:x,y` is window-relative and `click@x,y` is absolute desktop coordinates.
+- If a prompt is stuck, use `.agents/skills/vita3k-input-automation/SKILL.md` as the escalation ladder before asking the user to press the same button manually: focus/app responsiveness, normal keyevent, display-routed keyevent, raw Odin `sendevent`, touch fallback, then SDL/input-code investigation.
 - After input automation materially changes a repro state, add a SQLite `test` or `observation` entry with the exact script, sequence, platform, and result.
 
 ## Safety Scope

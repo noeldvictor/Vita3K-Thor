@@ -6,6 +6,8 @@ param(
     [ValidateSet("KeyEvent", "Sendevent")]
     [string]$Mode = "KeyEvent",
     [string]$InputDeviceName = "Odin Controller",
+    [string]$InputDevicePath = "",
+    [string]$DisplayId = "",
     [int]$PressMs = 90,
     [int]$GapMs = 90,
     [switch]$DryRun
@@ -28,6 +30,13 @@ function Invoke-Adb([string[]]$AdbArgs) {
 
 function Normalize-Token([string]$Token) {
     return ($Token.Trim().ToLowerInvariant() -replace "-", "_")
+}
+
+function Get-DisplayArgs {
+    if ([string]::IsNullOrWhiteSpace($DisplayId)) {
+        return @()
+    }
+    return @("-d", $DisplayId)
 }
 
 $AndroidKeyMap = @{
@@ -82,6 +91,9 @@ function Resolve-Buttons([string]$Token) {
 }
 
 function Resolve-InputEventPath {
+    if (-not [string]::IsNullOrWhiteSpace($InputDevicePath)) {
+        return $InputDevicePath
+    }
     $text = Invoke-Adb @("shell", "getevent", "-lp")
     $current = ""
     foreach ($line in $text) {
@@ -104,9 +116,26 @@ function Send-KeyEventPress([string[]]$Buttons) {
         if (-not $AndroidKeyMap.ContainsKey($button)) {
             throw "Unknown Android keyevent button '$button'."
         }
-        Invoke-Adb @("shell", "input", "keyevent", "$($AndroidKeyMap[$button])") | Out-Null
+        $args = @("shell", "input", "keyboard")
+        $args += Get-DisplayArgs
+        $args += @("keyevent", "$($AndroidKeyMap[$button])")
+        Invoke-Adb $args | Out-Null
         Start-Sleep -Milliseconds $GapMs
     }
+}
+
+function Send-RawKeyEvent([int]$KeyCode) {
+    $args = @("shell", "input", "keyboard")
+    $args += Get-DisplayArgs
+    $args += @("keyevent", "$KeyCode")
+    Invoke-Adb $args | Out-Null
+}
+
+function Send-Tap([int]$X, [int]$Y) {
+    $args = @("shell", "input", "touchscreen")
+    $args += Get-DisplayArgs
+    $args += @("tap", "$X", "$Y")
+    Invoke-Adb $args | Out-Null
 }
 
 function Send-SendeventChord([string]$EventPath, [string[]]$Buttons) {
@@ -139,6 +168,28 @@ if ($Mode -eq "Sendevent") {
 foreach ($item in $Sequence) {
     $token = $item
     $repeat = 1
+
+    if ($item -match "^(?<name>tap|touch|click)[:@](?<x>-?\d+)(?:,|:|x)(?<y>-?\d+)$") {
+        $x = [int]$Matches["x"]
+        $y = [int]$Matches["y"]
+        Write-Host "tap $x,$y"
+        Send-Tap $x $y
+        Start-Sleep -Milliseconds $GapMs
+        continue
+    }
+
+    if ($item -match "^(?<name>tap|touch|click)[:@]") {
+        throw "Malformed tap token '$item'. Use tap:x:y in PowerShell, or quote 'tap:x,y'."
+    }
+
+    if ($item -match "^(?<name>key|keyevent|rawkey):(?<code>\d+)$") {
+        $code = [int]$Matches["code"]
+        Write-Host "keyevent $code"
+        Send-RawKeyEvent $code
+        Start-Sleep -Milliseconds $GapMs
+        continue
+    }
+
     if ($item -match "^(?<name>[^:]+):(?<value>\d+)$") {
         $token = $Matches["name"]
         $value = [int]$Matches["value"]
