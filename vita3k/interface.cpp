@@ -4240,6 +4240,42 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     return true;
 }
 
+static void write_quick_state_wait_queue_marker(std::ostream &marker, const QuickStateSlot &slot) {
+    QuickStateSyncSnapshot snapshot;
+    if (!quick_state_parse_sync_primitives_section(slot, snapshot))
+        return;
+
+    marker << "\nKernel wait queue snapshot\n";
+    const auto write_wait = [&marker](const char *kind, const SceUID uid, const std::string &name, const uint32_t count) {
+        if (count > 0)
+            marker << kind << " " << uid << " (" << name << "): " << count << "\n";
+    };
+    for (const auto &[uid, item] : snapshot.semaphores)
+        write_wait("semaphore", uid, item.name, item.waiting_count);
+    for (const auto &[uid, item] : snapshot.eventflags)
+        write_wait("eventflag", uid, item.name, item.waiting_count);
+    for (const auto &[uid, item] : snapshot.condvars)
+        write_wait("condvar", uid, item.name, item.waiting_count);
+    for (const auto &[uid, item] : snapshot.lwcondvars)
+        write_wait("lwcondvar", uid, item.name, item.waiting_count);
+    for (const auto &[uid, item] : snapshot.mutexes)
+        write_wait("mutex", uid, item.name, item.waiting_count);
+    for (const auto &[uid, item] : snapshot.lwmutexes)
+        write_wait("lwmutex", uid, item.name, item.waiting_count);
+    for (const auto &[uid, item] : snapshot.rwlocks)
+        write_wait("rwlock", uid, item.name, item.waiting_count);
+    for (const auto &[uid, item] : snapshot.timers)
+        write_wait("timer", uid, item.name, item.waiting_count);
+    for (const auto &[uid, item] : snapshot.simple_events)
+        write_wait("simple_event", uid, item.name, item.waiting_count);
+    for (const auto &[uid, item] : snapshot.msgpipes) {
+        if (item.sender_count > 0)
+            marker << "msgpipe " << uid << " (" << item.name << ") senders: " << item.sender_count << "\n";
+        if (item.receiver_count > 0)
+            marker << "msgpipe " << uid << " (" << item.name << ") receivers: " << item.receiver_count << "\n";
+    }
+}
+
 static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &slot) {
     const fs::path state_dir = quick_state_dir(emuenv, slot.title_id);
     fs::create_directories(state_dir);
@@ -4292,6 +4328,7 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "Callbacks: " << manifest.kernel.callbacks << "\n";
     marker << "Simple events: " << manifest.kernel.simple_events << "\n";
     marker << "Loaded modules: " << manifest.kernel.loaded_modules << "\n";
+    write_quick_state_wait_queue_marker(marker, slot);
     marker << "\nIO/VFS snapshot at manifest time\n";
     marker << "TTY files: " << manifest.io.tty_files << "\n";
     marker << "Open std files: " << manifest.io.std_files << "\n";
