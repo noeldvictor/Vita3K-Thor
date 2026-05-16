@@ -1233,6 +1233,11 @@ struct QuickStatePredictedDisplayFrameSnapshot {
     Address sync_object = 0;
 };
 
+struct QuickStateDisplayVBlankWaitSnapshot {
+    SceUID thread_id = 0;
+    uint64_t target_vcount = 0;
+};
+
 struct QuickStateDisplaySnapshot {
     bool valid = false;
     uint32_t speed_percent = 100;
@@ -1247,6 +1252,8 @@ struct QuickStateDisplaySnapshot {
     uint32_t predicted_cycles_seen = 0;
     bool predicting = false;
     uint32_t vblank_wait_info_count = 0;
+    bool vblank_waits_complete = false;
+    std::vector<QuickStateDisplayVBlankWaitSnapshot> vblank_waits;
     uint32_t vblank_callback_count = 0;
 };
 
@@ -1290,6 +1297,7 @@ struct QuickStateRestoreManifest {
     bool io_file_handles_restorable = false;
     bool sync_primitives_restorable = false;
     bool display_state_restorable = false;
+    bool display_vblank_waits_restorable = false;
     bool audio_state_restorable = false;
     size_t sync_waiting_threads = 0;
     size_t msgpipe_buffer_bytes = 0;
@@ -2789,6 +2797,25 @@ static bool quick_state_parse_predicted_display_frame_key(const std::string &key
     return quick_state_parse_u32_text(key.substr(prefix.size()), index);
 }
 
+static bool quick_state_parse_display_vblank_wait_key(const std::string &key, uint32_t &index) {
+    constexpr std::string_view prefix = "vblank_wait.";
+    if (key.rfind(prefix, 0) != 0 || key.size() <= prefix.size())
+        return false;
+    return quick_state_parse_u32_text(key.substr(prefix.size()), index);
+}
+
+static bool quick_state_parse_display_vblank_wait_snapshot(const std::string &text, QuickStateDisplayVBlankWaitSnapshot &wait) {
+    const auto fields = quick_state_parse_semicolon_fields(text);
+    if (!fields.contains("thread") || !fields.contains("target"))
+        return false;
+
+    int32_t parsed_thread_id = 0;
+    if (!quick_state_parse_i32_text(fields.at("thread"), parsed_thread_id) || parsed_thread_id <= 0)
+        return false;
+    wait.thread_id = static_cast<SceUID>(parsed_thread_id);
+    return quick_state_parse_u64_text(fields.at("target"), wait.target_vcount);
+}
+
 static bool quick_state_parse_display_snapshot_section(const QuickStateSlot &slot, QuickStateDisplaySnapshot &snapshot) {
     snapshot = {};
     const QuickStateSection *section = quick_state_find_section(slot, "thor.display");
@@ -2853,6 +2880,23 @@ static bool quick_state_parse_display_snapshot_section(const QuickStateSlot &slo
         return false;
     if (snapshot.speed_percent == 0 || snapshot.speed_percent > 1000)
         return false;
+
+    snapshot.vblank_waits.resize(snapshot.vblank_wait_info_count);
+    std::vector<bool> seen_waits(snapshot.vblank_wait_info_count, false);
+    for (const auto &[key, value] : values) {
+        uint32_t index = 0;
+        if (!quick_state_parse_display_vblank_wait_key(key, index))
+            continue;
+        if (index >= snapshot.vblank_wait_info_count)
+            return false;
+
+        QuickStateDisplayVBlankWaitSnapshot wait;
+        if (!quick_state_parse_display_vblank_wait_snapshot(value, wait))
+            return false;
+        snapshot.vblank_waits[index] = wait;
+        seen_waits[index] = true;
+    }
+    snapshot.vblank_waits_complete = !std::any_of(seen_waits.begin(), seen_waits.end(), [](const bool value) { return !value; });
 
     snapshot.valid = true;
     return true;
@@ -3035,6 +3079,7 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     if (manifest.display_state_restorable) {
         manifest.display_wait_entries = display_snapshot.vblank_wait_info_count;
         manifest.display_callback_entries = display_snapshot.vblank_callback_count;
+        manifest.display_vblank_waits_restorable = display_snapshot.vblank_waits_complete;
     }
     QuickStateAudioSnapshot audio_snapshot;
     manifest.audio_state_restorable = quick_state_parse_audio_snapshot_section(slot, audio_snapshot);
@@ -3059,7 +3104,7 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     if (!manifest.display_state_restorable) {
         manifest.missing_serializers.push_back("display-state");
     } else {
-        if (manifest.display_wait_entries > 0)
+        if (manifest.display_wait_entries > 0 && !manifest.display_vblank_waits_restorable)
             manifest.missing_serializers.push_back("display-vblank-waits");
         if (manifest.display_callback_entries > 0)
             manifest.missing_serializers.push_back("display-vblank-callbacks");
@@ -3420,6 +3465,14 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         {
             const std::lock_guard<std::mutex> display_lock(emuenv.display.mutex);
             text << "vblank_wait_infos=" << emuenv.display.vblank_wait_infos.size() << "\n";
+            for (size_t i = 0; i < emuenv.display.vblank_wait_infos.size(); i++) {
+                const auto &vblank_wait = emuenv.display.vblank_wait_infos[i];
+                const SceUID thread_id = vblank_wait.target_thread ? vblank_wait.target_thread->id : 0;
+                text << "vblank_wait." << i
+                     << "=thread=" << thread_id
+                     << ";target=" << vblank_wait.target_vcount
+                     << "\n";
+            }
             text << "vblank_callbacks=" << emuenv.display.vblank_callbacks.size() << "\n";
         }
         sections.push_back(quick_state_make_text_section("thor.display", text));
@@ -3819,26 +3872,50 @@ static DisplayFrameInfo quick_state_to_display_frame_info(const QuickStateDispla
     return frame;
 }
 
-static bool restore_quick_state_display_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+static bool restore_quick_state_display_state(EmuEnvState &emuenv, const QuickStateSlot &slot, const std::vector<ThreadStatePtr> &matched_threads) {
     QuickStateDisplaySnapshot snapshot;
     if (!quick_state_parse_display_snapshot_section(slot, snapshot)) {
         LOG_WARN("Refused display restore for {} because the thor.display section is missing or invalid.", slot.title_id);
         return false;
     }
 
-    if (snapshot.vblank_wait_info_count > 0 || snapshot.vblank_callback_count > 0) {
-        LOG_WARN("Refused display restore for {} because vblank waits/callbacks still need lifecycle serialization (waits={}, callbacks={}).",
-            slot.title_id, snapshot.vblank_wait_info_count, snapshot.vblank_callback_count);
+    if (!snapshot.vblank_waits_complete) {
+        LOG_WARN("Refused display restore for {} because vblank wait target metadata is incomplete (waits={}).",
+            slot.title_id, snapshot.vblank_wait_info_count);
         return false;
+    }
+
+    if (snapshot.vblank_callback_count > 0) {
+        LOG_WARN("Refused display restore for {} because vblank callbacks still need callback lifecycle serialization (callbacks={}).",
+            slot.title_id, snapshot.vblank_callback_count);
+        return false;
+    }
+
+    const auto threads_by_saved_id = quick_state_matched_threads_by_saved_id(slot, matched_threads);
+    std::vector<DisplayStateVBlankWaitInfo> restored_vblank_waits;
+    restored_vblank_waits.reserve(snapshot.vblank_waits.size());
+    for (const auto &saved_wait : snapshot.vblank_waits) {
+        const auto thread = threads_by_saved_id.find(saved_wait.thread_id);
+        if (thread == threads_by_saved_id.end() || !thread->second) {
+            LOG_WARN("Refused display restore for {} because vblank wait thread {} was not matched.",
+                slot.title_id, saved_wait.thread_id);
+            return false;
+        }
+        if (saved_wait.target_vcount <= snapshot.vblank_count) {
+            LOG_WARN("Refused display restore for {} because vblank wait thread {} has stale target vcount {} at saved vblank {}.",
+                slot.title_id, saved_wait.thread_id, saved_wait.target_vcount, snapshot.vblank_count);
+            return false;
+        }
+        restored_vblank_waits.push_back({ thread->second, saved_wait.target_vcount });
     }
 
     {
         const std::lock_guard<std::mutex> display_lock(emuenv.display.mutex);
-        if (emuenv.display.vblank_wait_infos.size() != snapshot.vblank_wait_info_count
-            || emuenv.display.vblank_callbacks.size() != snapshot.vblank_callback_count) {
-            LOG_WARN("Refused display restore for {} because current vblank wait/callback counts do not match the saved snapshot.", slot.title_id);
+        if (emuenv.display.vblank_callbacks.size() != snapshot.vblank_callback_count) {
+            LOG_WARN("Refused display restore for {} because current vblank callback count does not match the saved snapshot.", slot.title_id);
             return false;
         }
+        emuenv.display.vblank_wait_infos = std::move(restored_vblank_waits);
     }
 
     emuenv.display.speed_percent.store(snapshot.speed_percent);
@@ -3863,9 +3940,10 @@ static bool restore_quick_state_display_state(EmuEnvState &emuenv, const QuickSt
         emuenv.display.predicted_cycles_seen = snapshot.predicted_cycles_seen;
     }
 
-    LOG_INFO("Restored display scalar snapshot for {} (vblank={}, predicted_frames={}, speed={}%).",
+    LOG_INFO("Restored display scalar snapshot for {} (vblank={}, waits={}, predicted_frames={}, speed={}%).",
         slot.title_id,
         snapshot.vblank_count,
+        snapshot.vblank_wait_info_count,
         snapshot.predicted_frames.size(),
         snapshot.speed_percent);
     return true;
@@ -4100,7 +4178,7 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         return false;
     }
 
-    if (!restore_quick_state_display_state(emuenv, slot)) {
+    if (!restore_quick_state_display_state(emuenv, slot, matched_threads)) {
         resume_after_quick_state(emuenv, already_paused);
         return false;
     }
@@ -4160,6 +4238,7 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "IO file-handle restore layer: " << (manifest.io_file_handles_restorable ? "ready" : "missing") << "\n";
     marker << "IO memory-backed file handles: " << manifest.io_memory_file_handles << "\n";
     marker << "Display scalar restore layer: " << (manifest.display_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Display vblank wait restore layer: " << (manifest.display_vblank_waits_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank waits: " << manifest.display_wait_entries << "\n";
     marker << "Display vblank callbacks: " << manifest.display_callback_entries << "\n";
     marker << "Audio scalar restore layer: " << (manifest.audio_state_restorable ? "ready" : "missing") << "\n";
@@ -4315,7 +4394,7 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
     const auto manifest = build_quick_state_restore_manifest(emuenv, quick_state_slot0);
     if (!manifest.restore_enabled) {
         LOG_WARN("Refused quickstate slot 0 restore for {} because {}.", title_id, manifest.block_reason);
-        LOG_INFO("Quickstate slot 0 manifest for {}: guest={} MiB, pages={}, saved_threads={}, sections={}, timing_restorable={}, thread_metadata_restorable={}, sync_primitives_restorable={}, sync_wait_entries={}, msgpipe_buffer_bytes={}, io_file_positions_restorable={}, io_file_handles_restorable={}, io_memory_file_handles={}, display_state_restorable={}, display_wait_entries={}, display_callback_entries={}, audio_state_restorable={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
+        LOG_INFO("Quickstate slot 0 manifest for {}: guest={} MiB, pages={}, saved_threads={}, sections={}, timing_restorable={}, thread_metadata_restorable={}, sync_primitives_restorable={}, sync_wait_entries={}, msgpipe_buffer_bytes={}, io_file_positions_restorable={}, io_file_handles_restorable={}, io_memory_file_handles={}, display_state_restorable={}, display_vblank_waits_restorable={}, display_wait_entries={}, display_callback_entries={}, audio_state_restorable={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
             title_id,
             manifest.guest_memory_bytes / (1024 * 1024),
             manifest.memory_pages,
@@ -4330,6 +4409,7 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
             manifest.io_file_handles_restorable,
             manifest.io_memory_file_handles,
             manifest.display_state_restorable,
+            manifest.display_vblank_waits_restorable,
             manifest.display_wait_entries,
             manifest.display_callback_entries,
             manifest.audio_state_restorable,
