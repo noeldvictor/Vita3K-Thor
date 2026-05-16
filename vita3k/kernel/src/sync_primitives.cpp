@@ -24,6 +24,7 @@
 #include <util/log.h>
 
 #include <algorithm>
+#include <thread>
 
 static constexpr bool LOG_SYNC_PRIMITIVES = false;
 
@@ -92,6 +93,51 @@ inline static uint64_t kernel_speed_to_guest_us(const KernelState &kernel, const
 inline static void capture_wait_timeout(WaitingThreadData &data, SceUInt32 *timeout) {
     data.timeout = timeout;
     data.timeout_value = timeout ? *timeout : 0;
+}
+
+inline uint64_t get_current_time() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::high_resolution_clock::now().time_since_epoch())
+        .count();
+}
+
+inline static void capture_wait_timeout_start(WaitingThreadData &data) {
+    if (data.timeout)
+        data.timeout_start_host_us = get_current_time();
+}
+
+inline static SceUInt32 remaining_timeout_us(const KernelState &kernel, const WaitingThreadData &data) {
+    if (!data.timeout || data.timeout_value == 0)
+        return 0;
+
+    const uint64_t now = get_current_time();
+    const uint64_t elapsed_host = now > data.timeout_start_host_us ? now - data.timeout_start_host_us : 0;
+    const uint64_t elapsed_guest = kernel_speed_to_guest_us(kernel, elapsed_host);
+    if (elapsed_guest >= data.timeout_value)
+        return 0;
+    return static_cast<SceUInt32>(data.timeout_value - elapsed_guest);
+}
+
+static void schedule_deferred_semaphore_timeout(const KernelState &kernel, const SemaphorePtr &semaphore, const ThreadStatePtr &thread, const SceUInt32 timeout_value) {
+    std::thread([&kernel, semaphore, thread, timeout_value]() {
+        std::this_thread::sleep_for(std::chrono::microseconds{ kernel_speed_to_host_us(kernel, timeout_value) });
+
+        const std::lock_guard<std::mutex> semaphore_lock(semaphore->mutex);
+        auto data_it = semaphore->waiting_threads->find(thread);
+        if (data_it == semaphore->waiting_threads->end())
+            return;
+
+        const WaitingThreadData data = *data_it;
+        if (!data.deferred_import_wait || !data.timeout)
+            return;
+
+        if (remaining_timeout_us(kernel, data) > 0)
+            return;
+
+        *data.timeout = 0;
+        semaphore->waiting_threads->erase(data_it);
+        thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_TIMEOUT));
+    }).detach();
 }
 
 inline static int handle_timeout(const KernelState &kernel, const ThreadStatePtr &thread, std::unique_lock<std::mutex> &thread_lock,
@@ -328,12 +374,6 @@ SceInt32 simple_event_delete(KernelState &kernel, const char *export_name, SceUI
 // *********
 // * Timer *
 // *********
-
-inline uint64_t get_current_time() {
-    return std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::high_resolution_clock::now().time_since_epoch())
-        .count();
-}
 
 SceUID timer_create(KernelState &kernel, MemState &mem, const char *export_name, const char *name, SceUID thread_id, SceUInt32 attr) {
     if ((strlen(name) > 31) && ((attr & 0x80) == 0x80)) {
@@ -1073,13 +1113,20 @@ SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thr
         data.priority = thread->priority;
         data.signal = needCount;
         capture_wait_timeout(data, pTimeout);
+        capture_wait_timeout_start(data);
 
         auto was_canceled = std::make_shared<bool>(false);
         data.was_canceled = was_canceled;
 
-        if (!pTimeout && thread->begin_deferred_import_wait()) {
+        if (pTimeout && *pTimeout == 0) {
+            return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+        }
+
+        if (thread->begin_deferred_import_wait()) {
             data.deferred_import_wait = true;
             semaphore->waiting_threads->push(data);
+            if (pTimeout)
+                schedule_deferred_semaphore_timeout(kernel, semaphore, thread, data.timeout_value);
             return SCE_KERNEL_OK;
         }
 
@@ -1129,6 +1176,9 @@ int semaphore_signal(KernelState &kernel, const char *export_name, SceUID thread
 
         if (semaphore->val < waiting_signal_count)
             break;
+
+        if (waiting_thread_data.timeout)
+            *waiting_thread_data.timeout = remaining_timeout_us(kernel, waiting_thread_data);
 
         if (!waiting_thread->complete_deferred_import_wait(SCE_KERNEL_OK)) {
             const std::unique_lock<std::mutex> waiting_thread_lock(waiting_thread->mutex);
