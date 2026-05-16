@@ -22,6 +22,7 @@ These notes are for work in Vita3K Thor Experiment, a personal Android-focused V
 - Keep Thor-specific changes easy to identify so broadly useful fixes can be proposed upstream separately.
 - Do not commit APK outputs, build folders, downloaded driver ZIPs, extracted drivers, caches, SDKs, firmware, license files, saves, shader caches, ELF dumps, screenshots/log dumps, or game content unless the user explicitly requests a narrow proof asset.
 - Upstream `master` may include structural rewrites. As of 2026-05-16, `upstream/master` contains the Qt/Android GUI overhaul from `91f533f8`; a direct merge conflicts with Thor Android, ImGui OSD, config/input, audio, kernel, and renderer-adjacent work. Do not merge it straight into `master`. Use a short-lived integration branch, record conflict findings in SQLite, and port Thor features deliberately or cherry-pick narrow upstream fixes when they do not depend on the overhaul.
+- If the user wants GitHub's "behind upstream" count cleared after a structural upstream batch has been reviewed and rejected, use an ancestry-only `ours` merge with a clear commit message and SQLite note. This keeps the Thor tree unchanged while recording that the upstream batch was intentionally acknowledged.
 
 ## Debug Knowledge Base
 
