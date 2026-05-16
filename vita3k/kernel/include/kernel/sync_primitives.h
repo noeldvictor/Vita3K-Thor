@@ -249,6 +249,7 @@ SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thr
 int semaphore_signal(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID semaid, int signal);
 int semaphore_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID semaid);
 int semaphore_cancel(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID semaid, SceInt32 setCount, SceUInt32 *pNumWaitThreads);
+void semaphore_schedule_deferred_timeout(const KernelState &kernel, const SemaphorePtr &semaphore, const ThreadStatePtr &thread, SceUInt32 timeout_value);
 
 // Condition Variable
 SceUID condvar_create(SceUID *uid_out, KernelState &kernel, const char *export_name, const char *name, SceUID thread_id, SceUInt attr, SceUID assoc_mutexid, SyncWeight weight);

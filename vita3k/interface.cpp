@@ -3543,6 +3543,38 @@ static const QuickStateSyncWaitQueueEntry *quick_state_find_wait_queue_entry(con
     return entry == snapshot.wait_queue_entries.end() ? nullptr : &*entry;
 }
 
+static bool quick_state_wait_queue_entries_all_deferred(const QuickStateSyncSnapshot &snapshot, const std::string_view kind, const SceUID object_id, const uint32_t expected_count) {
+    for (uint32_t index = 0; index < expected_count; index++) {
+        const QuickStateSyncWaitQueueEntry *entry = quick_state_find_wait_queue_entry(snapshot, kind, object_id, index);
+        if (!entry || !entry->deferred_import_wait)
+            return false;
+    }
+    return true;
+}
+
+static bool quick_state_wait_queue_has_nondeferred_entries(const QuickStateSyncSnapshot &snapshot) {
+    return std::any_of(snapshot.wait_queue_entries.begin(), snapshot.wait_queue_entries.end(), [](const QuickStateSyncWaitQueueEntry &entry) {
+        return !entry.deferred_import_wait;
+    });
+}
+
+static bool quick_state_wait_queue_contains_only_deferred_current_waiters(const WaitingThreadQueuePtr &queue) {
+    if (!queue)
+        return true;
+    for (auto it = queue->begin(); it != queue->end(); ++it) {
+        if (!(*it).deferred_import_wait)
+            return false;
+    }
+    return true;
+}
+
+static void quick_state_clear_wait_queue(const WaitingThreadQueuePtr &queue) {
+    if (!queue)
+        return;
+    while (!queue->empty())
+        queue->pop();
+}
+
 static bool quick_state_wait_queue_common_matches(const MemState &mem, const QuickStateSyncWaitQueueEntry &saved, const WaitingThreadData &current, const std::string_view label, std::string *detail) {
     const SceUID current_thread_id = current.thread ? current.thread->id : 0;
     const Address current_timeout = quick_state_guest_address_from_host_pointer(mem, current.timeout);
@@ -3663,6 +3695,15 @@ static bool quick_state_is_drainable_extra_waiter(const std::map<SceUID, ThreadS
 }
 
 static bool quick_state_wait_queue_matches_live(const QuickStateSyncSnapshot &snapshot, const MemState &mem, const std::map<SceUID, ThreadStatus> &saved_statuses, const std::string_view kind, const SceUID object_id, const uint32_t expected_count, const WaitingThreadQueuePtr &queue, std::vector<ThreadStatePtr> *drained_threads, std::string *detail) {
+    if (expected_count > 0 && quick_state_wait_queue_entries_all_deferred(snapshot, kind, object_id, expected_count)) {
+        if (!quick_state_wait_queue_contains_only_deferred_current_waiters(queue)) {
+            if (detail)
+                *detail = fmt::format("{} {} has non-deferred current waiters and cannot be rebuilt from deferred metadata", kind, object_id);
+            return false;
+        }
+        return true;
+    }
+
     if (expected_count == 0)
         return !queue || queue->empty() || [&]() {
             if (!drained_threads) {
@@ -4441,6 +4482,105 @@ static uint64_t quick_state_timer_restore_next_event(const QuickStateSyncTimer &
     return quick_state_host_time_us() + saved_timer.next_event_delta_us;
 }
 
+static bool quick_state_restore_u32_pointer(MemState &mem, const Address address, SceUInt32 *&out) {
+    out = nullptr;
+    if (address == 0)
+        return true;
+    Ptr<SceUInt32> ptr(address);
+    if (!ptr.valid(mem))
+        return false;
+    out = ptr.get(mem);
+    return true;
+}
+
+static bool quick_state_restore_deferred_semaphore_waits(EmuEnvState &emuenv, const QuickStateSyncSnapshot &snapshot, const std::map<SceUID, ThreadStatePtr> &threads_by_saved_id, const SceUID uid, const QuickStateSyncSemaphore &saved_semaphore, const SemaphorePtr &semaphore) {
+    if (saved_semaphore.waiting_count == 0)
+        return true;
+    if (!quick_state_wait_queue_entries_all_deferred(snapshot, "semaphore", uid, saved_semaphore.waiting_count))
+        return true;
+
+    if (!quick_state_wait_queue_contains_only_deferred_current_waiters(semaphore->waiting_threads)) {
+        quick_state_last_restore_detail = fmt::format("semaphore {} has non-deferred current waiters", uid);
+        return false;
+    }
+
+    quick_state_clear_wait_queue(semaphore->waiting_threads);
+    for (uint32_t index = 0; index < saved_semaphore.waiting_count; index++) {
+        const QuickStateSyncWaitQueueEntry *entry = quick_state_find_wait_queue_entry(snapshot, "semaphore", uid, index);
+        if (!entry)
+            return false;
+
+        const auto thread = threads_by_saved_id.find(entry->thread_id);
+        if (thread == threads_by_saved_id.end() || !thread->second) {
+            quick_state_last_restore_detail = fmt::format("semaphore {} waiter thread {} was not matched", uid, entry->thread_id);
+            return false;
+        }
+
+        WaitingThreadData data;
+        data.thread = thread->second;
+        data.priority = entry->priority;
+        data.signal = entry->signal;
+        data.timeout_value = entry->timeout_value;
+        data.timeout_start_host_us = quick_state_host_time_us();
+        data.deferred_import_wait = true;
+        data.was_canceled = std::make_shared<bool>(false);
+        if (!quick_state_restore_u32_pointer(emuenv.mem, entry->timeout, data.timeout)) {
+            quick_state_last_restore_detail = fmt::format("semaphore {} waiter {} timeout pointer 0x{:X} is invalid", uid, index, entry->timeout);
+            return false;
+        }
+
+        thread->second->restore_deferred_import_wait();
+        semaphore->waiting_threads->push(data);
+        if (data.timeout && data.timeout_value > 0)
+            semaphore_schedule_deferred_timeout(emuenv.kernel, semaphore, thread->second, data.timeout_value);
+    }
+    return true;
+}
+
+static bool quick_state_restore_deferred_eventflag_waits(EmuEnvState &emuenv, const QuickStateSyncSnapshot &snapshot, const std::map<SceUID, ThreadStatePtr> &threads_by_saved_id, const SceUID uid, const QuickStateSyncEventFlag &saved_eventflag, const EventFlagPtr &eventflag) {
+    if (saved_eventflag.waiting_count == 0)
+        return true;
+    if (!quick_state_wait_queue_entries_all_deferred(snapshot, "eventflag", uid, saved_eventflag.waiting_count))
+        return true;
+
+    if (!quick_state_wait_queue_contains_only_deferred_current_waiters(eventflag->waiting_threads)) {
+        quick_state_last_restore_detail = fmt::format("event flag {} has non-deferred current waiters", uid);
+        return false;
+    }
+
+    quick_state_clear_wait_queue(eventflag->waiting_threads);
+    for (uint32_t index = 0; index < saved_eventflag.waiting_count; index++) {
+        const QuickStateSyncWaitQueueEntry *entry = quick_state_find_wait_queue_entry(snapshot, "eventflag", uid, index);
+        if (!entry)
+            return false;
+
+        const auto thread = threads_by_saved_id.find(entry->thread_id);
+        if (thread == threads_by_saved_id.end() || !thread->second) {
+            quick_state_last_restore_detail = fmt::format("event flag {} waiter thread {} was not matched", uid, entry->thread_id);
+            return false;
+        }
+
+        WaitingThreadData data;
+        data.thread = thread->second;
+        data.priority = entry->priority;
+        data.wait = entry->wait;
+        data.flags = entry->flags;
+        data.timeout_value = entry->timeout_value;
+        data.timeout_start_host_us = quick_state_host_time_us();
+        data.deferred_import_wait = true;
+        data.was_canceled = std::make_shared<bool>(false);
+        if (!quick_state_restore_u32_pointer(emuenv.mem, entry->timeout, data.timeout)
+            || !quick_state_restore_u32_pointer(emuenv.mem, entry->out_bits, data.outBits)) {
+            quick_state_last_restore_detail = fmt::format("event flag {} waiter {} has invalid guest pointers", uid, index);
+            return false;
+        }
+
+        thread->second->restore_deferred_import_wait();
+        eventflag->waiting_threads->push(data);
+    }
+    return true;
+}
+
 static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const QuickStateSlot &slot, const std::vector<ThreadStatePtr> &matched_threads, const bool allow_live_host_state) {
     QuickStateSyncSnapshot snapshot;
     if (!quick_state_parse_sync_primitives_section(slot, snapshot)) {
@@ -4449,10 +4589,10 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
         return false;
     }
 
-    if (snapshot.total_waiting_threads() > 0 && !allow_live_host_state) {
-        LOG_WARN("Refused sync primitive restore for {} because {} waiting thread queue entry/entries still need queue serialization.",
-            slot.title_id, snapshot.total_waiting_threads());
-        quick_state_last_restore_detail = fmt::format("{} waiting thread queue entry/entries still need queue serialization", snapshot.total_waiting_threads());
+    if (snapshot.total_waiting_threads() > 0 && !allow_live_host_state && quick_state_wait_queue_has_nondeferred_entries(snapshot)) {
+        LOG_WARN("Refused sync primitive restore for {} because non-deferred waiting thread queue entries still need live host stacks.",
+            slot.title_id);
+        quick_state_last_restore_detail = "non-deferred waiting thread queue entries still need live host stacks";
         return false;
     }
 
@@ -4537,8 +4677,11 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
             return false;
         }
         const std::lock_guard<std::mutex> semaphore_lock(current->second->mutex);
+        const bool rebuild_deferred_waiters = saved_semaphore.waiting_count > 0
+            && quick_state_wait_queue_entries_all_deferred(snapshot, "semaphore", uid, saved_semaphore.waiting_count);
         if (!quick_state_sync_identity_matches(*current->second, saved_semaphore.name, saved_semaphore.attr)
-            || quick_state_waiting_count(current->second->waiting_threads) != saved_semaphore.waiting_count) {
+            || (!rebuild_deferred_waiters && quick_state_waiting_count(current->second->waiting_threads) != saved_semaphore.waiting_count)
+            || (rebuild_deferred_waiters && !quick_state_wait_queue_contains_only_deferred_current_waiters(current->second->waiting_threads))) {
             LOG_WARN("Refused sync primitive restore for {} because semaphore {} does not match the saved identity.", slot.title_id, uid);
             quick_state_last_restore_detail = fmt::format("semaphore {} does not match the saved identity", uid);
             return false;
@@ -4580,8 +4723,11 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
             return false;
         }
         const std::lock_guard<std::mutex> eventflag_lock(current->second->mutex);
+        const bool rebuild_deferred_waiters = saved_eventflag.waiting_count > 0
+            && quick_state_wait_queue_entries_all_deferred(snapshot, "eventflag", uid, saved_eventflag.waiting_count);
         if (!quick_state_sync_identity_matches(*current->second, saved_eventflag.name, saved_eventflag.attr)
-            || quick_state_waiting_count(current->second->waiting_threads) != saved_eventflag.waiting_count) {
+            || (!rebuild_deferred_waiters && quick_state_waiting_count(current->second->waiting_threads) != saved_eventflag.waiting_count)
+            || (rebuild_deferred_waiters && !quick_state_wait_queue_contains_only_deferred_current_waiters(current->second->waiting_threads))) {
             LOG_WARN("Refused sync primitive restore for {} because event flag {} does not match the saved identity.", slot.title_id, uid);
             quick_state_last_restore_detail = fmt::format("event flag {} does not match the saved identity", uid);
             return false;
@@ -4693,6 +4839,8 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
         semaphore->init_val = saved_semaphore.init_val;
         semaphore->val = saved_semaphore.value;
         semaphore->max = saved_semaphore.max;
+        if (!quick_state_restore_deferred_semaphore_waits(emuenv, snapshot, threads_by_saved_id, uid, saved_semaphore, semaphore))
+            return false;
     }
 
     const auto restore_mutex_map = [&](MutexPtrs &current_map, const std::map<SceUID, QuickStateSyncMutex> &saved_map) {
@@ -4711,6 +4859,8 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
         auto &eventflag = emuenv.kernel.eventflags.at(uid);
         const std::lock_guard<std::mutex> eventflag_lock(eventflag->mutex);
         eventflag->flags = saved_eventflag.flags;
+        if (!quick_state_restore_deferred_eventflag_waits(emuenv, snapshot, threads_by_saved_id, uid, saved_eventflag, eventflag))
+            return false;
     }
 
     const auto restore_condvar_map = [&](CondvarPtrs &current_map, MutexPtrs &associated_mutexes, const std::map<SceUID, QuickStateSyncCondvar> &saved_map) {

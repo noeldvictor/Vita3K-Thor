@@ -118,7 +118,7 @@ inline static SceUInt32 remaining_timeout_us(const KernelState &kernel, const Wa
     return static_cast<SceUInt32>(data.timeout_value - elapsed_guest);
 }
 
-static void schedule_deferred_semaphore_timeout(const KernelState &kernel, const SemaphorePtr &semaphore, const ThreadStatePtr &thread, const SceUInt32 timeout_value) {
+void semaphore_schedule_deferred_timeout(const KernelState &kernel, const SemaphorePtr &semaphore, const ThreadStatePtr &thread, const SceUInt32 timeout_value) {
     std::thread([&kernel, semaphore, thread, timeout_value]() {
         std::this_thread::sleep_for(std::chrono::microseconds{ kernel_speed_to_host_us(kernel, timeout_value) });
 
@@ -1126,7 +1126,7 @@ SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thr
             data.deferred_import_wait = true;
             semaphore->waiting_threads->push(data);
             if (pTimeout)
-                schedule_deferred_semaphore_timeout(kernel, semaphore, thread, data.timeout_value);
+                semaphore_schedule_deferred_timeout(kernel, semaphore, thread, data.timeout_value);
             return SCE_KERNEL_OK;
         }
 
