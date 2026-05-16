@@ -1049,6 +1049,17 @@ struct QuickStateIOCounts {
     size_t archive_dirs = 0;
 };
 
+struct QuickStateTimingSnapshot {
+    bool valid = false;
+    uint64_t kernel_start_tick = 0;
+    uint64_t kernel_base_tick = 0;
+    uint64_t kernel_guest_tick = 0;
+    uint64_t kernel_process_time = 0;
+    uint32_t kernel_speed_percent = 100;
+    uint64_t speed_anchor_host_process_us = 0;
+    uint64_t speed_anchor_guest_process_us = 0;
+};
+
 struct QuickStateRestoreManifest {
     uint32_t format_version = QUICKSTATE_VERSION;
     uint64_t guest_memory_bytes = 0;
@@ -1058,6 +1069,7 @@ struct QuickStateRestoreManifest {
     size_t thread_contexts = 0;
     size_t avplayer_threads = 0;
     std::vector<std::string> captured_sections;
+    bool timing_restorable = false;
     QuickStateKernelObjectCounts kernel;
     QuickStateIOCounts io;
     std::vector<std::string> missing_serializers;
@@ -1816,6 +1828,84 @@ static std::vector<std::string> quick_state_section_tags(const QuickStateSlot &s
     return tags;
 }
 
+static const QuickStateSection *quick_state_find_section(const QuickStateSlot &slot, const std::string_view tag) {
+    const auto section = std::find_if(slot.sections.begin(), slot.sections.end(), [tag](const QuickStateSection &candidate) {
+        return candidate.tag == tag;
+    });
+    return section == slot.sections.end() ? nullptr : &*section;
+}
+
+static std::string quick_state_section_text(const QuickStateSection &section) {
+    return std::string(section.bytes.begin(), section.bytes.end());
+}
+
+static std::map<std::string, std::string> quick_state_parse_text_section(const QuickStateSection &section) {
+    std::map<std::string, std::string> values;
+    std::istringstream text(quick_state_section_text(section));
+    std::string line;
+    while (std::getline(text, line)) {
+        if (line.empty() || line.front() == '#')
+            continue;
+
+        const auto separator = line.find('=');
+        if (separator == std::string::npos)
+            continue;
+
+        values[line.substr(0, separator)] = line.substr(separator + 1);
+    }
+    return values;
+}
+
+static bool quick_state_parse_u64(const std::map<std::string, std::string> &values, const std::string &key, uint64_t &out) {
+    const auto value = values.find(key);
+    if (value == values.end() || value->second.empty())
+        return false;
+
+    size_t consumed = 0;
+    try {
+        out = std::stoull(value->second, &consumed, 10);
+    } catch (...) {
+        return false;
+    }
+    return consumed == value->second.size();
+}
+
+static bool quick_state_parse_u32(const std::map<std::string, std::string> &values, const std::string &key, uint32_t &out) {
+    uint64_t parsed = 0;
+    if (!quick_state_parse_u64(values, key, parsed) || parsed > std::numeric_limits<uint32_t>::max())
+        return false;
+    out = static_cast<uint32_t>(parsed);
+    return true;
+}
+
+static bool quick_state_parse_timing_snapshot(const QuickStateSlot &slot, QuickStateTimingSnapshot &timing) {
+    timing = {};
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.timing");
+    if (!section || section->version != 1)
+        return false;
+
+    const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    if (schema == values.end() || schema->second != "thor.timing.v1")
+        return false;
+
+    if (!quick_state_parse_u64(values, "kernel_start_tick", timing.kernel_start_tick)
+        || !quick_state_parse_u64(values, "kernel_base_tick", timing.kernel_base_tick)
+        || !quick_state_parse_u64(values, "kernel_guest_tick", timing.kernel_guest_tick)
+        || !quick_state_parse_u64(values, "kernel_process_time", timing.kernel_process_time)
+        || !quick_state_parse_u32(values, "kernel_speed_percent", timing.kernel_speed_percent)
+        || !quick_state_parse_u64(values, "speed_anchor_host_process_us", timing.speed_anchor_host_process_us)
+        || !quick_state_parse_u64(values, "speed_anchor_guest_process_us", timing.speed_anchor_guest_process_us)) {
+        return false;
+    }
+
+    if (timing.kernel_speed_percent == 0 || timing.kernel_speed_percent > 1000)
+        return false;
+
+    timing.valid = true;
+    return true;
+}
+
 static std::string quick_state_thread_status_name(const ThreadStatus status) {
     switch (status) {
     case ThreadStatus::run:
@@ -1887,6 +1977,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     manifest.thread_contexts = slot.thread_contexts.size();
     manifest.avplayer_threads = quick_state_count_avplayer_threads(slot);
     manifest.captured_sections = quick_state_section_tags(slot);
+    QuickStateTimingSnapshot timing;
+    manifest.timing_restorable = quick_state_parse_timing_snapshot(slot, timing);
     manifest.kernel = quick_state_count_kernel_objects(emuenv);
     manifest.io = quick_state_count_io_objects(emuenv);
 
@@ -1894,12 +1986,13 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         "kernel-thread-lifecycle",
         "kernel-wait-objects",
         "host-syscall-state",
-        "timing-clocks",
         "io-vfs-handles",
         "gpu-display-state",
         "renderer-resources",
         "audio-state",
     };
+    if (!manifest.timing_restorable)
+        manifest.missing_serializers.push_back("timing-clocks");
     if (manifest.avplayer_threads > 0)
         manifest.missing_serializers.push_back("avplayer-movie-state");
 
@@ -2206,6 +2299,32 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
     return sections;
 }
 
+static bool restore_quick_state_timing_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    QuickStateTimingSnapshot timing;
+    if (!quick_state_parse_timing_snapshot(slot, timing)) {
+        LOG_WARN("Refused timing restore for {} because the thor.timing section is missing or invalid.", slot.title_id);
+        return false;
+    }
+
+    {
+        const std::lock_guard<std::mutex> speed_lock(emuenv.kernel.speed_mutex);
+        emuenv.kernel.start_tick = timing.kernel_start_tick;
+        emuenv.kernel.base_tick = { timing.kernel_base_tick };
+        emuenv.kernel.speed_anchor_host_process_us = timing.speed_anchor_host_process_us;
+        emuenv.kernel.speed_anchor_guest_process_us = timing.speed_anchor_guest_process_us;
+        emuenv.kernel.speed_percent.store(timing.kernel_speed_percent);
+    }
+    emuenv.display.speed_percent.store(timing.kernel_speed_percent);
+    emuenv.audio.speed_percent.store(timing.kernel_speed_percent);
+
+    LOG_INFO("Restored timing snapshot for {}: guest_tick={} process_time={} speed={}%",
+        slot.title_id,
+        timing.kernel_guest_tick,
+        timing.kernel_process_time,
+        timing.kernel_speed_percent);
+    return true;
+}
+
 static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     if (!slot.valid || (slot.title_id != emuenv.io.title_id))
         return false;
@@ -2245,6 +2364,11 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         resume_after_quick_state(emuenv, already_paused);
         LOG_WARN("Refused quickstate restore for {} because {} guest memory page(s) are not allocated in the current session. Restart/load-state support needs full kernel object and allocation-map serialization before this can be restored safely.",
             slot.title_id, missing_pages);
+        return false;
+    }
+
+    if (!restore_quick_state_timing_state(emuenv, slot)) {
+        resume_after_quick_state(emuenv, already_paused);
         return false;
     }
 
@@ -2289,6 +2413,7 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "State file: " << quick_state_file(emuenv, slot.title_id) << "\n";
     marker << "\nRestore readiness\n";
     marker << "Restore enabled: " << (manifest.restore_enabled ? "yes" : "no") << "\n";
+    marker << "Timing restore layer: " << (manifest.timing_restorable ? "ready" : "missing") << "\n";
     marker << "Block reason: " << manifest.block_reason << "\n";
     marker << "Missing serializers: " << quick_state_join_strings(manifest.missing_serializers) << "\n";
     marker << "\nKernel object snapshot at manifest time\n";
@@ -2441,12 +2566,13 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
     const auto manifest = build_quick_state_restore_manifest(emuenv, quick_state_slot0);
     if (!manifest.restore_enabled) {
         LOG_WARN("Refused quickstate slot 0 restore for {} because {}.", title_id, manifest.block_reason);
-        LOG_INFO("Quickstate slot 0 manifest for {}: guest={} MiB, pages={}, saved_threads={}, sections={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
+        LOG_INFO("Quickstate slot 0 manifest for {}: guest={} MiB, pages={}, saved_threads={}, sections={}, timing_restorable={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
             title_id,
             manifest.guest_memory_bytes / (1024 * 1024),
             manifest.memory_pages,
             manifest.thread_contexts,
             quick_state_join_strings(manifest.captured_sections),
+            manifest.timing_restorable,
             manifest.kernel.cpu_threads,
             manifest.kernel.timers,
             manifest.kernel.semaphores,
