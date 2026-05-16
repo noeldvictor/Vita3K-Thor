@@ -59,6 +59,7 @@ These are the practical differences you should notice first compared with upstre
 - Better ROM folder scanning: scan common `/sdcard/roms/psvita` and SD-card folders, detect some translated or nonstandard ZIP layouts, and keep cached game icons/backgrounds so the list does not need a full archive scan every launch.
 - Clear library badges: encrypted virtual cartridges show an `E` badge instead of failing mysteriously, and games with matching cheat files show a `C` badge.
 - In-game OSD menu: press Back during gameplay to open a controller-friendly menu for resume, pause, save/load state, fast-forward speed, screenshots, renderer trace, and cheats.
+- OSD control help: switch the emulator system confirm button between O/Japan and X/West, and set a per-game X/O swap for Japanese games whose in-game confirm/cancel feels backwards.
 - Thor controller shortcuts: `Select + R1` toggles fast-forward, `Select + right-stick down` saves state, and `Select + right-stick up` loads state.
 - Fast-forward presets: choose Off, 2x, 3x, or 4x from the OSD. Fast-forward avoids high-pitched chipmunk audio by using pitch-preserving tempo filtering when available, or normal-pitch buffer skipping when that filter is missing.
 - Per-game quickstate slot: save/load slot 0 for the current game from the OSD or shortcuts.

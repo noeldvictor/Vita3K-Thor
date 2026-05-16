@@ -580,6 +580,34 @@ static void update_thor_adb_debug_toggles(EmuEnvState &) {
 }
 #endif
 
+static bool runtime_game_cross_circle_swap_enabled(const EmuEnvState &emuenv) {
+    if (emuenv.io.title_id.empty())
+        return false;
+
+    const auto &title_ids = emuenv.cfg.game_swap_cross_circle_title_ids;
+    return std::find(title_ids.begin(), title_ids.end(), emuenv.io.title_id) != title_ids.end();
+}
+
+static void runtime_set_game_cross_circle_swap(EmuEnvState &emuenv, const bool enabled) {
+    if (emuenv.io.title_id.empty())
+        return;
+
+    auto &title_ids = emuenv.cfg.game_swap_cross_circle_title_ids;
+    const auto existing = std::find(title_ids.begin(), title_ids.end(), emuenv.io.title_id);
+    if (enabled) {
+        if (existing == title_ids.end()) {
+            title_ids.push_back(emuenv.io.title_id);
+            std::sort(title_ids.begin(), title_ids.end());
+        }
+    } else if (existing != title_ids.end()) {
+        title_ids.erase(existing);
+    }
+
+    if (config::serialize_config(emuenv.cfg, emuenv.cfg.config_path) != Success)
+        LOG_WARN("Failed to save runtime game X/O swap setting");
+    LOG_INFO("Runtime game X/O swap {} for {}", enabled ? "enabled" : "disabled", emuenv.io.title_id);
+}
+
 static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &runtime_cheats, const int32_t main_module_id) {
     if (!runtime_osd_is_open())
         return;
@@ -701,7 +729,8 @@ static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &
     draw_speed_preset("4x", 400);
 
     const ImVec2 confirm_button(std::max(128.f, (content_width - spacing) / 2.f), 52.f);
-    ImGui::TextUnformatted("Confirm Button");
+    ImGui::TextUnformatted("Controls");
+    ImGui::TextUnformatted("System Confirm");
     const auto draw_confirm_button = [&](const char *label, const int sys_button) {
         const bool active = emuenv.cfg.sys_button == sys_button;
         if (active) {
@@ -722,6 +751,31 @@ static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &
     draw_confirm_button("O / Japan", 0);
     ImGui::SameLine();
     draw_confirm_button("X / West", 1);
+
+    ImGui::TextUnformatted("Game X/O");
+    const auto draw_game_swap_button = [&](const char *label, const bool enabled) {
+        const bool active = runtime_game_cross_circle_swap_enabled(emuenv) == enabled;
+        if (active) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.40f, 0.62f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.52f, 0.76f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.20f, 0.60f, 0.86f, 1.0f));
+        }
+        if (ImGui::Button(label, confirm_button))
+            runtime_set_game_cross_circle_swap(emuenv, enabled);
+        if (active)
+            ImGui::PopStyleColor(3);
+    };
+
+    draw_game_swap_button("Normal", false);
+    ImGui::SameLine();
+    draw_game_swap_button("Swap X/O", true);
+
+    const ImVec2 preset_button(std::max(128.f, content_width), 52.f);
+    if (ImGui::Button("Japanese Game Help", preset_button)) {
+        emuenv.cfg.sys_button = 0;
+        runtime_set_game_cross_circle_swap(emuenv, true);
+        LOG_INFO("Japanese Game Help preset enabled for {}", emuenv.io.title_id);
+    }
 
     ImGui::Separator();
 

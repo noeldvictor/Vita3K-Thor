@@ -239,6 +239,7 @@ inline std::vector<std::string> default_virtual_cartridge_dirs() {
     code(std::vector<short>, "controller-binds", std::vector<short>{}, controller_binds)                \
     code(std::vector<int>, "controller-led-color", std::vector<int>{}, controller_led_color)            \
     code(std::vector<std::string>, "virtual-cartridge-dirs", default_virtual_cartridge_dirs(), virtual_cartridge_dirs) \
+    code(std::vector<std::string>, "game-swap-cross-circle-title-ids", std::vector<std::string>{}, game_swap_cross_circle_title_ids) \
     code(std::vector<std::string>, "lle-modules", std::vector<std::string>{}, lle_modules)              \
     code(std::vector<uint64_t>, "ime-langs", std::vector<uint64_t>{4}, ime_langs)                       \
     code(std::vector<std::string>, "tracy-advanced-profiling-modules", std::vector<std::string>{}, tracy_advanced_profiling_modules)

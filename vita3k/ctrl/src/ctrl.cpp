@@ -23,10 +23,13 @@
 #include <dialog/state.h>
 #include <display/functions.h>
 #include <display/state.h>
+#include <io/state.h>
 #include <kernel/state.h>
 #include <util/log.h>
 
 #include <SDL3/SDL_keyboard.h>
+
+#include <algorithm>
 
 #ifdef ANDROID
 #include <SDL3/SDL_joystick.h>
@@ -327,6 +330,25 @@ static void apply_controller(EmuEnvState &emuenv, uint32_t *buttons, float axes[
     axes[3] += axis_to_axis(SDL_GetGamepadAxis(controller, SDL_GAMEPAD_AXIS_RIGHTY), analog_multiplier);
 }
 
+static bool game_cross_circle_swap_enabled(const EmuEnvState &emuenv) {
+    if (emuenv.io.title_id.empty())
+        return false;
+
+    const auto &title_ids = emuenv.cfg.game_swap_cross_circle_title_ids;
+    return std::find(title_ids.begin(), title_ids.end(), emuenv.io.title_id) != title_ids.end();
+}
+
+static void swap_cross_circle_buttons(uint32_t &buttons) {
+    const bool circle_pressed = (buttons & SCE_CTRL_CIRCLE) != 0;
+    const bool cross_pressed = (buttons & SCE_CTRL_CROSS) != 0;
+
+    buttons &= ~(SCE_CTRL_CIRCLE | SCE_CTRL_CROSS);
+    if (circle_pressed)
+        buttons |= SCE_CTRL_CROSS;
+    if (cross_pressed)
+        buttons |= SCE_CTRL_CIRCLE;
+}
+
 static void retrieve_ctrl_data(EmuEnvState &emuenv, int port, bool is_v2, bool negative, bool from_ext_function, SceUInt32 &buttons, SceUInt8 &lx, SceUInt8 &ly, SceUInt8 &rx, SceUInt8 &ry) {
     std::lock_guard<std::mutex> guard(emuenv.ctrl.mutex);
 
@@ -378,6 +400,9 @@ static void retrieve_ctrl_data(EmuEnvState &emuenv, int port, bool is_v2, bool n
             apply_controller(emuenv, &buttons, axes.data(), controller.controller.get(), is_v2);
         }
     }
+
+    if (game_cross_circle_swap_enabled(emuenv))
+        swap_cross_circle_buttons(buttons);
 
     reset_axes();
 }
