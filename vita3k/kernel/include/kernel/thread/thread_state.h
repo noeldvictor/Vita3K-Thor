@@ -24,6 +24,7 @@
 #include <mem/ptr.h>
 
 #include <condition_variable>
+#include <atomic>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -122,6 +123,7 @@ struct ThreadState {
     bool complete_deferred_import_wait(uint32_t return_value);
     bool consume_deferred_import_return();
     bool has_deferred_import_wait();
+    std::string quick_state_debug_summary() const;
     std::string log_stack_traceback() const;
 
 private:
@@ -147,6 +149,8 @@ private:
     bool run_end_callback = false;
     bool deferred_import_wait = false;
     bool deferred_import_return = false;
+    std::atomic<uint32_t> active_import_nid{ 0 };
+    std::atomic<Address> active_import_pc{ 0 };
 
     MemState &mem;
 };

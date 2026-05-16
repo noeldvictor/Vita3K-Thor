@@ -92,7 +92,13 @@ public:
     }
 
     size_t size() {
+        std::unique_lock<std::mutex> mlock(mutex_);
         return queue_.size();
+    }
+
+    bool empty() {
+        std::unique_lock<std::mutex> mlock(mutex_);
+        return queue_.empty();
     }
 
     void abort() {

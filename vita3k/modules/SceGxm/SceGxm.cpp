@@ -893,6 +893,39 @@ std::string to_debug_str<SceGxmTransferFlags>(const MemState &mem, SceGxmTransfe
     return std::to_string(type);
 }
 
+static void complete_display_queue_waiters(EmuEnvState &emuenv) {
+    if (!emuenv.gxm.display_queue.empty())
+        return;
+
+    std::vector<SceUID> waiters;
+    {
+        const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
+        waiters.swap(emuenv.gxm.display_queue_waiters);
+    }
+
+    for (const SceUID waiter_id : waiters) {
+        const ThreadStatePtr waiter = emuenv.kernel.get_thread(waiter_id);
+        if (waiter)
+            waiter->complete_deferred_import_wait(0);
+    }
+}
+
+static bool defer_display_queue_empty_wait(EmuEnvState &emuenv, const SceUID thread_id) {
+    if (emuenv.gxm.display_queue.empty())
+        return false;
+
+    const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread || !thread->begin_deferred_import_wait())
+        return false;
+
+    {
+        const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
+        emuenv.gxm.display_queue_waiters.push_back(thread_id);
+    }
+    complete_display_queue_waiters(emuenv);
+    return true;
+}
+
 static void display_entry_thread(EmuEnvState &emuenv) {
     auto &display_queue = emuenv.gxm.display_queue;
     const Address callback_address = emuenv.gxm.params.displayQueueCallback.address();
@@ -917,6 +950,7 @@ static void display_entry_thread(EmuEnvState &emuenv) {
 
         // now we can remove the thread from the display queue
         display_queue.pop();
+        complete_display_queue_waiters(emuenv);
 
         // specify whether the call to SceDisplaySetFrameBuf is expected to do something
         emuenv.display.predicting = display_callback->frame_predicted;
@@ -2130,15 +2164,22 @@ EXPORT(int, sceGxmDisplayQueueAddEntry, Ptr<SceGxmSyncObject> oldBuffer, Ptr<Sce
     // TODO: I do this because the sync function does not have access to the display state, but this is not great
     renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::NewFrame, false, frame, &emuenv.display);
 
-    if (emuenv.gxm.params.displayQueueMaxPendingCount == 1)
+    if (emuenv.gxm.params.displayQueueMaxPendingCount == 1) {
+        if (defer_display_queue_empty_wait(emuenv, thread_id))
+            return 0;
+
         // double buffering, not handled by the queue configuration
         emuenv.gxm.display_queue.wait_empty();
+    }
 
     return 0;
 }
 
 EXPORT(int, sceGxmDisplayQueueFinish) {
     TRACY_FUNC(sceGxmDisplayQueueFinish);
+    if (defer_display_queue_empty_wait(emuenv, thread_id))
+        return 0;
+
     emuenv.gxm.display_queue.wait_empty();
 
     return 0;
@@ -2735,6 +2776,10 @@ EXPORT(int, sceGxmInitialize, const SceGxmInitializeParams *params) {
 
     // Reset the queue in case sceGxmTerminate was called earlier
     emuenv.gxm.display_queue.reset();
+    {
+        const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
+        emuenv.gxm.display_queue_waiters.clear();
+    }
     std::thread display_host_thread(display_entry_thread, std::ref(emuenv));
     display_host_thread.detach();
     emuenv.gxm.notification_region = Ptr<uint32_t>(alloc(emuenv.mem, MiB(1), "SceGxmNotificationRegion"));
@@ -2847,6 +2892,15 @@ EXPORT(int, _sceGxmMidSceneFlush, SceGxmContext *immediateContext, uint32_t flag
     return CALL_EXPORT(sceGxmMidSceneFlush, immediateContext, flags, vertexSyncObject, vertexNotification);
 }
 
+static void schedule_deferred_notification_wait(renderer::State *renderer, DisplayState *display, const ThreadStatePtr &thread, std::uint32_t volatile *value, const std::uint32_t target_value) {
+    std::thread([renderer, display, thread, value, target_value]() {
+        std::unique_lock<std::mutex> lock(renderer->notification_mutex);
+        renderer->notification_ready.wait(lock, [&]() { return *value == target_value || display->abort.load(); });
+        lock.unlock();
+        thread->complete_deferred_import_wait(0);
+    }).detach();
+}
+
 EXPORT(int, sceGxmNotificationWait, const SceGxmNotification *notification) {
     TRACY_FUNC(sceGxmNotificationWait, notification);
     if (!notification) {
@@ -2858,6 +2912,14 @@ EXPORT(int, sceGxmNotificationWait, const SceGxmNotification *notification) {
 
     std::unique_lock<std::mutex> lock(emuenv.renderer->notification_mutex);
     if (*value != target_value) {
+        lock.unlock();
+        const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
+        if (thread && thread->begin_deferred_import_wait()) {
+            schedule_deferred_notification_wait(emuenv.renderer.get(), &emuenv.display, thread, value, target_value);
+            return 0;
+        }
+
+        lock.lock();
         emuenv.renderer->notification_ready.wait(lock, [&]() { return *value == target_value || emuenv.display.abort.load(); });
     }
 

@@ -20,6 +20,7 @@
 
 #include <kernel/state.h>
 #include <mem/ptr.h>
+#include <nids/functions.h>
 #include <util/align.h>
 
 #include <util/log.h>
@@ -285,7 +286,11 @@ bool ThreadState::run_loop() {
                 // handle svc call if this was what stopped the cpu
                 if (cpu->svc_called) {
                     const uint32_t nid = *Ptr<uint32_t>(read_pc(*cpu) + 4).get(mem);
+                    active_import_pc.store(read_pc(*cpu), std::memory_order_relaxed);
+                    active_import_nid.store(nid, std::memory_order_relaxed);
                     kernel.call_import(*cpu, nid, id);
+                    active_import_nid.store(0, std::memory_order_relaxed);
+                    active_import_pc.store(0, std::memory_order_relaxed);
                     clear_exclusive(*cpu);
                 }
 
@@ -531,6 +536,69 @@ bool ThreadState::consume_deferred_import_return() {
 bool ThreadState::has_deferred_import_wait() {
     std::lock_guard<std::mutex> lock(mutex);
     return deferred_import_wait;
+}
+
+static const char *thread_status_name(const ThreadStatus status) {
+    switch (status) {
+    case ThreadStatus::run:
+        return "run";
+    case ThreadStatus::dormant:
+        return "dormant";
+    case ThreadStatus::suspend:
+        return "suspend";
+    case ThreadStatus::wait:
+        return "wait";
+    }
+    return "unknown";
+}
+
+static const char *thread_todo_name(const ThreadToDo to_do) {
+    switch (to_do) {
+    case ThreadToDo::remove:
+        return "remove";
+    case ThreadToDo::run:
+        return "run";
+    case ThreadToDo::step:
+        return "step";
+    case ThreadToDo::suspend:
+        return "suspend";
+    case ThreadToDo::wait:
+        return "wait";
+    }
+    return "unknown";
+}
+
+std::string ThreadState::quick_state_debug_summary() const {
+    std::ostringstream out;
+    out << id << ":" << name
+        << " status=" << thread_status_name(status)
+        << " todo=" << thread_todo_name(to_do)
+        << " call_level=" << call_level
+        << " deferred_wait=" << deferred_import_wait
+        << " deferred_return=" << deferred_import_return
+        << " returned=0x" << std::hex << returned_value << std::dec;
+
+    if (cpu) {
+        out << " pc=0x" << std::hex << read_pc(*cpu)
+            << " lr=0x" << read_lr(*cpu)
+            << " sp=0x" << read_sp(*cpu)
+            << " r0=0x" << read_reg(*cpu, 0)
+            << " abort_pending=" << cpu->abort_pending.load()
+            << " abort_fault=0x" << cpu->abort_fault_addr.load()
+            << std::dec;
+    } else {
+        out << " cpu=null";
+    }
+
+    const uint32_t import_nid = active_import_nid.load(std::memory_order_relaxed);
+    if (import_nid != 0) {
+        out << " active_import=0x" << std::hex << import_nid
+            << "(" << import_name(import_nid) << ")"
+            << " import_pc=0x" << active_import_pc.load(std::memory_order_relaxed)
+            << std::dec;
+    }
+
+    return out.str();
 }
 
 std::string ThreadState::log_stack_traceback() const {

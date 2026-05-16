@@ -998,6 +998,8 @@ constexpr uint32_t QUICKSTATE_COMPRESSION_MINIZ = 1;
 constexpr auto QUICKSTATE_PAUSE_TIMEOUT = std::chrono::milliseconds(3000);
 constexpr auto QUICKSTATE_MUTEX_LOCK_TIMEOUT = std::chrono::milliseconds(500);
 
+static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvState &emuenv, const QuickStateSlot &slot);
+
 struct RuntimeControlFileState {
     bool initialized = false;
     fs::path path;
@@ -1665,7 +1667,7 @@ static bool wait_for_guest_threads_paused(KernelState &kernel, std::string_view 
             if (thread->status != ThreadStatus::run)
                 continue;
 
-            running_threads.push_back(fmt::format("{}:{}", thread_id, thread->name));
+            running_threads.push_back(thread->quick_state_debug_summary());
             if (running_threads.size() >= 8)
                 break;
         }
@@ -1780,6 +1782,7 @@ static bool capture_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         captured.memory_pages.push_back(std::move(snapshot_page));
     }
 
+    captured.sections = build_quick_state_capture_sections(emuenv, captured);
     slot = std::move(captured);
     resume_after_quick_state(emuenv, already_paused);
 
@@ -3673,22 +3676,22 @@ static bool quick_state_parse_saved_thread_statuses(const QuickStateSlot &slot, 
     return true;
 }
 
-static bool quick_state_is_drainable_extra_waiter(const std::map<SceUID, ThreadStatus> &saved_statuses, const WaitingThreadData &current, std::string *detail) {
+static bool quick_state_is_drainable_extra_waiter(const std::map<SceUID, ThreadStatus> &saved_statuses, const WaitingThreadData &current, const std::string_view kind, const SceUID object_id, std::string *detail) {
     const SceUID thread_id = current.thread ? current.thread->id : 0;
     const auto saved_status = saved_statuses.find(thread_id);
     if (thread_id == 0 || saved_status == saved_statuses.end()) {
         if (detail)
-            *detail = fmt::format("current extra waiter thread {} has no saved metadata", thread_id);
+            *detail = fmt::format("{} {} current extra waiter thread {} has no saved metadata", kind, object_id, thread_id);
         return false;
     }
     if (saved_status->second == ThreadStatus::wait) {
         if (detail)
-            *detail = fmt::format("current extra waiter thread {} was also waiting in the saved state", thread_id);
+            *detail = fmt::format("{} {} current extra waiter thread {} was also waiting in the saved state", kind, object_id, thread_id);
         return false;
     }
     if (saved_status->second == ThreadStatus::dormant) {
         if (detail)
-            *detail = fmt::format("current extra waiter thread {} was dormant in the saved state", thread_id);
+            *detail = fmt::format("{} {} current extra waiter thread {} was dormant in the saved state", kind, object_id, thread_id);
         return false;
     }
     return true;
@@ -3708,14 +3711,14 @@ static bool quick_state_wait_queue_matches_live(const QuickStateSyncSnapshot &sn
         return !queue || queue->empty() || [&]() {
             if (!drained_threads) {
                 for (auto it = queue->begin(); it != queue->end(); ++it) {
-                    if (!quick_state_is_drainable_extra_waiter(saved_statuses, *it, detail))
+                    if (!quick_state_is_drainable_extra_waiter(saved_statuses, *it, kind, object_id, detail))
                         return false;
                 }
                 return true;
             }
             for (auto it = queue->begin(); it != queue->end();) {
                 const WaitingThreadData current = *it;
-                if (!quick_state_is_drainable_extra_waiter(saved_statuses, current, detail))
+                if (!quick_state_is_drainable_extra_waiter(saved_statuses, current, kind, object_id, detail))
                     return false;
                 if (current.thread) {
                     current.thread->update_status(ThreadStatus::run, ThreadStatus::wait);
@@ -3745,7 +3748,7 @@ static bool quick_state_wait_queue_matches_live(const QuickStateSyncSnapshot &sn
             continue;
         }
 
-        if (!quick_state_is_drainable_extra_waiter(saved_statuses, current, detail))
+        if (!quick_state_is_drainable_extra_waiter(saved_statuses, current, kind, object_id, detail))
             return false;
         if (drained_threads) {
             if (current.thread) {
@@ -4062,7 +4065,9 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         text << "threads=" << emuenv.kernel.threads.size() << "\n";
         for (const auto &[thread_id, thread] : emuenv.kernel.threads) {
             const std::lock_guard<std::mutex> thread_lock(thread->mutex);
-            const ThreadStatus snapshot_status = emuenv.kernel.snapshot_thread_status_unlocked(thread_id, thread->status);
+            ThreadStatus snapshot_status = emuenv.kernel.snapshot_thread_status_unlocked(thread_id, thread->status);
+            if (thread->status == ThreadStatus::wait || thread->status == ThreadStatus::dormant)
+                snapshot_status = thread->status;
             text << "thread." << thread_id
                  << ".name=" << thread->name
                  << ";status=" << quick_state_thread_status_name(snapshot_status)
@@ -5637,7 +5642,6 @@ void runtime_request_save_state(EmuEnvState &emuenv) {
     const fs::path state_dir = quick_state_dir(emuenv, title_id);
     fs::create_directories(state_dir);
     if (capture_quick_state(emuenv, quick_state_slot0)) {
-        quick_state_slot0.sections = build_quick_state_capture_sections(emuenv, quick_state_slot0);
         const bool saved_to_disk = save_quick_state_to_disk(emuenv, quick_state_slot0);
         if (saved_to_disk)
             write_quick_state_marker(emuenv, quick_state_slot0);

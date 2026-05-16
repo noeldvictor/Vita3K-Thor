@@ -23,6 +23,7 @@
 
 #include <map>
 #include <mutex>
+#include <vector>
 
 struct SceGxmInitializeParams {
     uint32_t flags = 0;
@@ -52,6 +53,8 @@ struct GxmState {
 
     Queue<DisplayCallback> display_queue;
     SceUID display_queue_thread;
+    std::mutex display_queue_waiters_mutex;
+    std::vector<SceUID> display_queue_waiters;
 
     // global timestamp used by sync objects
     std::atomic<uint32_t> global_timestamp{ 1 };
