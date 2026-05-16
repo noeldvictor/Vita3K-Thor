@@ -25,8 +25,10 @@ struct KernelState;
 
 struct WaitingThreadData {
     ThreadStatePtr thread;
-    int32_t priority;
-    bool *was_canceled;
+    int32_t priority = 0;
+    bool *was_canceled = nullptr;
+    SceUInt32 *timeout = nullptr;
+    SceUInt32 timeout_value = 0;
 
     // additional fields for each primitive
     union {

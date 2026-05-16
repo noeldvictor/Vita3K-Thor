@@ -89,6 +89,11 @@ inline static uint64_t kernel_speed_to_guest_us(const KernelState &kernel, const
     return (host_us * speed_percent) / 100;
 }
 
+inline static void capture_wait_timeout(WaitingThreadData &data, SceUInt32 *timeout) {
+    data.timeout = timeout;
+    data.timeout_value = timeout ? *timeout : 0;
+}
+
 inline static int handle_timeout(const KernelState &kernel, const ThreadStatePtr &thread, std::unique_lock<std::mutex> &thread_lock,
     std::unique_lock<std::mutex> &primitive_lock, WaitingThreadQueuePtr &queue,
     const ThreadDataQueueInterator<WaitingThreadData> &data_it, const char *export_name,
@@ -204,6 +209,7 @@ SceInt32 simple_event_waitorpoll(KernelState &kernel, const char *export_name, S
         data.user_data = user_data;
         data.pattern = wait_pattern;
         data.priority = thread->priority;
+        capture_wait_timeout(data, timeout);
 
         const auto data_it = event->waiting_threads->push(data);
         thread_lock.unlock();
@@ -471,6 +477,7 @@ SceInt32 timer_waitorpoll(KernelState &kernel, const char *export_name, SceUID t
         data.result_pattern = result_pattern;
         data.user_data = user_data;
         data.priority = thread->priority;
+        capture_wait_timeout(data, timeout);
 
         const auto data_it = timer->waiting_threads->push(data);
 
@@ -672,6 +679,7 @@ inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char
         data.thread = thread;
         data.lock_count = lock_count;
         data.priority = thread->priority;
+        capture_wait_timeout(data, timeout);
 
         const auto data_it = mutex->waiting_threads->push(data);
         thread_lock.unlock();
@@ -891,6 +899,7 @@ SceInt32 rwlock_lock(KernelState &kernel, MemState &mem, const char *export_name
         data.thread = thread;
         data.is_write = is_write;
         data.priority = thread->priority;
+        capture_wait_timeout(data, timeout);
 
         const auto data_it = rwlock->waiting_threads->push(data);
         thread_lock.unlock();
@@ -1066,6 +1075,7 @@ SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thr
         data.thread = thread;
         data.priority = thread->priority;
         data.signal = needCount;
+        capture_wait_timeout(data, pTimeout);
 
         bool was_canceled = false;
         data.was_canceled = &was_canceled;
@@ -1263,6 +1273,7 @@ int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, Sc
     WaitingThreadData data;
     data.thread = thread;
     data.priority = thread->priority;
+    capture_wait_timeout(data, timeout);
 
     const auto data_it = condvar->waiting_threads->push(data);
     thread_lock.unlock();
@@ -1471,6 +1482,7 @@ static int eventflag_waitorpoll(KernelState &kernel, const char *export_name, Sc
         data.flags = flags;
         data.outBits = outBits;
         data.priority = thread->priority;
+        capture_wait_timeout(data, timeout);
 
         bool was_canceled = false;
         data.was_canceled = &was_canceled;
@@ -1741,6 +1753,7 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
         wait_data.thread = thread;
         wait_data.priority = thread->priority;
         wait_data.mp.request_size = (ASAP) ? 1 : recvSize; // If ASAP, we can read as low as 1 byte
+        capture_wait_timeout(wait_data, pTimeout);
 
         msgpipe->receivers->push(wait_data);
 
@@ -1844,6 +1857,7 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
         wait_data.thread = thread;
         wait_data.priority = thread->priority;
         wait_data.mp.request_size = (ASAP) ? 1 : sendSize; // If ASAP, we can insert as low as 1 byte
+        capture_wait_timeout(wait_data, pTimeout);
 
         msgpipe->senders->push(wait_data);
 

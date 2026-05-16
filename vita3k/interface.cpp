@@ -1181,6 +1181,8 @@ struct QuickStateSyncWaitQueueEntry {
     uint32_t index = 0;
     SceUID thread_id = 0;
     int32_t priority = 0;
+    Address timeout = 0;
+    uint32_t timeout_value = 0;
     int32_t lock_count = 0;
     bool is_write = false;
     int32_t signal = 0;
@@ -2794,6 +2796,12 @@ static bool quick_state_parse_sync_wait_queue_entry(const std::string &key, cons
         return true;
     };
 
+    if (!fields.contains("timeout_value")
+        || !parse_address("timeout", entry.timeout)
+        || !quick_state_parse_u32_text(fields.at("timeout_value"), entry.timeout_value)) {
+        return false;
+    }
+
     if (entry.kind == "simple_event") {
         return fields.contains("pattern")
             && quick_state_parse_i32_text(fields.at("pattern"), entry.pattern)
@@ -3383,7 +3391,7 @@ static const char *quick_state_wait_queue_cancel_source(const WaitingThreadData 
 }
 
 template <typename FieldWriter>
-static size_t quick_state_write_wait_queue_entries(std::ostringstream &text, const char *kind, const SceUID uid, const WaitingThreadQueuePtr &queue, FieldWriter write_fields) {
+static size_t quick_state_write_wait_queue_entries(std::ostringstream &text, const MemState &mem, const char *kind, const SceUID uid, const WaitingThreadQueuePtr &queue, FieldWriter write_fields) {
     if (!queue)
         return 0;
 
@@ -3392,7 +3400,9 @@ static size_t quick_state_write_wait_queue_entries(std::ostringstream &text, con
         const WaitingThreadData data = *it;
         text << "wait." << kind << "." << uid << "." << index
              << "=thread=" << (data.thread ? data.thread->id : 0)
-             << ";priority=" << data.priority;
+             << ";priority=" << data.priority
+             << ";timeout=0x" << std::hex << quick_state_guest_address_from_host_pointer(mem, data.timeout) << std::dec
+             << ";timeout_value=" << data.timeout_value;
         write_fields(text, data);
         text << "\n";
     }
@@ -3531,7 +3541,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";interval=" << timer->event_interval
                  << ";waiting=" << quick_state_waiting_count(timer->waiting_threads)
                  << "\n";
-            wait_queue_entries += quick_state_write_wait_queue_entries(text, "timer", uid, timer->waiting_threads, [&emuenv](std::ostringstream &entry_text, const WaitingThreadData &data) {
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, emuenv.mem, "timer", uid, timer->waiting_threads, [&emuenv](std::ostringstream &entry_text, const WaitingThreadData &data) {
                 entry_text << ";result_pattern=0x" << std::hex << quick_state_guest_address_from_host_pointer(emuenv.mem, data.result_pattern)
                            << ";user_data=0x" << quick_state_guest_address_from_host_pointer(emuenv.mem, data.user_data) << std::dec;
             });
@@ -3548,7 +3558,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";max=" << semaphore->max
                  << ";waiting=" << quick_state_waiting_count(semaphore->waiting_threads)
                  << "\n";
-            wait_queue_entries += quick_state_write_wait_queue_entries(text, "semaphore", uid, semaphore->waiting_threads, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, emuenv.mem, "semaphore", uid, semaphore->waiting_threads, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
                 entry_text << ";signal=" << data.signal
                            << ";cancel=" << quick_state_wait_queue_cancel_source(data);
             });
@@ -3565,7 +3575,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";owner=" << (mutex->owner ? mutex->owner->id : 0)
                  << ";waiting=" << quick_state_waiting_count(mutex->waiting_threads)
                  << "\n";
-            wait_queue_entries += quick_state_write_wait_queue_entries(text, "mutex", uid, mutex->waiting_threads, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, emuenv.mem, "mutex", uid, mutex->waiting_threads, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
                 entry_text << ";lock_count=" << data.lock_count;
             });
         }
@@ -3582,7 +3592,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";workarea=0x" << std::hex << mutex->workarea.address() << std::dec
                  << ";waiting=" << quick_state_waiting_count(mutex->waiting_threads)
                  << "\n";
-            wait_queue_entries += quick_state_write_wait_queue_entries(text, "lwmutex", uid, mutex->waiting_threads, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, emuenv.mem, "lwmutex", uid, mutex->waiting_threads, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
                 entry_text << ";lock_count=" << data.lock_count;
             });
         }
@@ -3596,7 +3606,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";flags=" << eventflag->flags
                  << ";waiting=" << quick_state_waiting_count(eventflag->waiting_threads)
                  << "\n";
-            wait_queue_entries += quick_state_write_wait_queue_entries(text, "eventflag", uid, eventflag->waiting_threads, [&emuenv](std::ostringstream &entry_text, const WaitingThreadData &data) {
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, emuenv.mem, "eventflag", uid, eventflag->waiting_threads, [&emuenv](std::ostringstream &entry_text, const WaitingThreadData &data) {
                 entry_text << ";wait=" << data.wait
                            << ";flags=" << data.flags
                            << ";out_bits=0x" << std::hex << quick_state_guest_address_from_host_pointer(emuenv.mem, data.outBits) << std::dec
@@ -3613,7 +3623,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";associated_mutex=" << (condvar->associated_mutex ? condvar->associated_mutex->uid : 0)
                  << ";waiting=" << quick_state_waiting_count(condvar->waiting_threads)
                  << "\n";
-            wait_queue_entries += quick_state_write_wait_queue_entries(text, "condvar", uid, condvar->waiting_threads, [](std::ostringstream &, const WaitingThreadData &) {});
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, emuenv.mem, "condvar", uid, condvar->waiting_threads, [](std::ostringstream &, const WaitingThreadData &) {});
         }
 
         text << "lwcondvars=" << emuenv.kernel.lwcondvars.size() << "\n";
@@ -3625,7 +3635,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";associated_mutex=" << (condvar->associated_mutex ? condvar->associated_mutex->uid : 0)
                  << ";waiting=" << quick_state_waiting_count(condvar->waiting_threads)
                  << "\n";
-            wait_queue_entries += quick_state_write_wait_queue_entries(text, "lwcondvar", uid, condvar->waiting_threads, [](std::ostringstream &, const WaitingThreadData &) {});
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, emuenv.mem, "lwcondvar", uid, condvar->waiting_threads, [](std::ostringstream &, const WaitingThreadData &) {});
         }
 
         text << "rwlocks=" << emuenv.kernel.rwlocks.size() << "\n";
@@ -3639,7 +3649,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";owners_detail=" << quick_state_rwlock_owners_detail(rwlock->owners)
                  << ";waiting=" << quick_state_waiting_count(rwlock->waiting_threads)
                  << "\n";
-            wait_queue_entries += quick_state_write_wait_queue_entries(text, "rwlock", uid, rwlock->waiting_threads, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, emuenv.mem, "rwlock", uid, rwlock->waiting_threads, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
                 entry_text << ";is_write=" << data.is_write;
             });
         }
@@ -3656,10 +3666,10 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";used=" << msgpipe->data_buffer.Used()
                  << ";being_deleted=" << msgpipe->beingDeleted
                  << "\n";
-            wait_queue_entries += quick_state_write_wait_queue_entries(text, "msgpipe_sender", uid, msgpipe->senders, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, emuenv.mem, "msgpipe_sender", uid, msgpipe->senders, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
                 entry_text << ";request_size=" << data.mp.request_size;
             });
-            wait_queue_entries += quick_state_write_wait_queue_entries(text, "msgpipe_receiver", uid, msgpipe->receivers, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, emuenv.mem, "msgpipe_receiver", uid, msgpipe->receivers, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
                 entry_text << ";request_size=" << data.mp.request_size;
             });
         }
@@ -3677,7 +3687,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";cb_wakeup_only=" << event->cb_wakeup_only
                  << ";waiting=" << quick_state_waiting_count(event->waiting_threads)
                  << "\n";
-            wait_queue_entries += quick_state_write_wait_queue_entries(text, "simple_event", uid, event->waiting_threads, [&emuenv](std::ostringstream &entry_text, const WaitingThreadData &data) {
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, emuenv.mem, "simple_event", uid, event->waiting_threads, [&emuenv](std::ostringstream &entry_text, const WaitingThreadData &data) {
                 entry_text << ";pattern=" << data.pattern
                            << ";result_pattern=0x" << std::hex << quick_state_guest_address_from_host_pointer(emuenv.mem, data.result_pattern)
                            << ";user_data=0x" << quick_state_guest_address_from_host_pointer(emuenv.mem, data.user_data) << std::dec;
@@ -4513,7 +4523,9 @@ static std::string quick_state_wait_queue_entry_detail(const QuickStateSyncWaitQ
     std::ostringstream detail;
     detail << "#" << entry.index
            << " thread=" << entry.thread_id
-           << " priority=" << entry.priority;
+           << " priority=" << entry.priority
+           << " timeout=0x" << std::hex << entry.timeout << std::dec
+           << " timeout_value=" << entry.timeout_value;
     if (entry.kind == "simple_event") {
         detail << " pattern=" << entry.pattern
                << " result_pattern=0x" << std::hex << entry.result_pattern
