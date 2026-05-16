@@ -57,6 +57,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cctype>
 #include <cstring>
 #include <initializer_list>
@@ -1219,6 +1220,61 @@ struct QuickStateSyncSnapshot {
     }
 };
 
+struct QuickStateDisplayFrameSnapshot {
+    Address base = 0;
+    uint32_t pitch = 0;
+    uint32_t pixelformat = SCE_DISPLAY_PIXELFORMAT_A8B8G8R8;
+    int32_t width = 0;
+    int32_t height = 0;
+};
+
+struct QuickStatePredictedDisplayFrameSnapshot {
+    QuickStateDisplayFrameSnapshot frame;
+    Address sync_object = 0;
+};
+
+struct QuickStateDisplaySnapshot {
+    bool valid = false;
+    uint32_t speed_percent = 100;
+    uint64_t vblank_count = 0;
+    uint64_t last_setframe_vblank_count = 0;
+    Address current_sync_object = 0;
+    QuickStateDisplayFrameSnapshot sce_frame;
+    QuickStateDisplayFrameSnapshot next_rendered_frame;
+    bool fps_hack = false;
+    std::vector<QuickStatePredictedDisplayFrameSnapshot> predicted_frames;
+    uint32_t predicted_frame_position = 0;
+    uint32_t predicted_cycles_seen = 0;
+    bool predicting = false;
+    uint32_t vblank_wait_info_count = 0;
+    uint32_t vblank_callback_count = 0;
+};
+
+struct QuickStateAudioPortSnapshot {
+    int32_t id = 0;
+    int32_t type = 0;
+    int32_t len = 0;
+    int32_t freq = 0;
+    int32_t mode = 0;
+    int32_t len_bytes = 0;
+    uint64_t len_microseconds = 0;
+    uint64_t last_output = 0;
+    int32_t left_channel_volume = SCE_AUDIO_VOLUME_0DB;
+    int32_t right_channel_volume = SCE_AUDIO_VOLUME_0DB;
+    float volume = 1.0f;
+};
+
+struct QuickStateAudioSnapshot {
+    bool valid = false;
+    uint32_t speed_percent = 100;
+    std::string backend;
+    float global_volume = 1.0f;
+    int32_t next_port_id = 1;
+    std::map<int32_t, QuickStateAudioPortSnapshot> out_ports;
+    bool audio_in_running = false;
+    int32_t audio_in_len_bytes = 0;
+};
+
 struct QuickStateRestoreManifest {
     uint32_t format_version = QUICKSTATE_VERSION;
     uint64_t guest_memory_bytes = 0;
@@ -1232,8 +1288,12 @@ struct QuickStateRestoreManifest {
     bool thread_metadata_restorable = false;
     bool io_file_positions_restorable = false;
     bool sync_primitives_restorable = false;
+    bool display_state_restorable = false;
+    bool audio_state_restorable = false;
     size_t sync_waiting_threads = 0;
     size_t msgpipe_buffer_bytes = 0;
+    size_t display_wait_entries = 0;
+    size_t display_callback_entries = 0;
     QuickStateKernelObjectCounts kernel;
     QuickStateIOCounts io;
     std::vector<std::string> missing_serializers;
@@ -2101,6 +2161,19 @@ static bool quick_state_parse_bool_text(const std::string &text, bool &out) {
     return false;
 }
 
+static bool quick_state_parse_float_text(const std::string &text, float &out) {
+    if (text.empty())
+        return false;
+
+    size_t consumed = 0;
+    try {
+        out = std::stof(text, &consumed);
+    } catch (...) {
+        return false;
+    }
+    return consumed == text.size() && std::isfinite(out);
+}
+
 static bool quick_state_parse_size(const std::map<std::string, std::string> &values, const std::string &key, size_t &out) {
     uint64_t parsed = 0;
     if (!quick_state_parse_u64(values, key, parsed) || parsed > static_cast<uint64_t>(std::numeric_limits<size_t>::max()))
@@ -2674,6 +2747,193 @@ static bool quick_state_parse_sync_primitives_section(const QuickStateSlot &slot
     return snapshot.valid;
 }
 
+static bool quick_state_parse_display_frame_snapshot(const std::string &text, QuickStateDisplayFrameSnapshot &frame) {
+    const auto fields = quick_state_parse_semicolon_fields(text);
+    if (!fields.contains("base")
+        || !fields.contains("pitch")
+        || !fields.contains("format")
+        || !fields.contains("width")
+        || !fields.contains("height")) {
+        return false;
+    }
+
+    uint64_t parsed_base = 0;
+    uint32_t parsed_u32 = 0;
+    int32_t parsed_i32 = 0;
+    if (!quick_state_parse_u64_text(fields.at("base"), parsed_base, 0)
+        || !quick_state_parse_u32_text(fields.at("pitch"), frame.pitch)
+        || !quick_state_parse_u32_text(fields.at("format"), frame.pixelformat)
+        || !quick_state_parse_i32_text(fields.at("width"), parsed_i32)
+        || parsed_i32 < 0) {
+        return false;
+    }
+    frame.base = static_cast<Address>(parsed_base);
+    frame.width = parsed_i32;
+    if (!quick_state_parse_i32_text(fields.at("height"), parsed_i32) || parsed_i32 < 0)
+        return false;
+    frame.height = parsed_i32;
+    return frame.pitch <= 8192 && frame.width <= 8192 && frame.height <= 8192;
+}
+
+static bool quick_state_parse_predicted_display_frame_key(const std::string &key, uint32_t &index) {
+    constexpr std::string_view prefix = "predicted_frame.";
+    if (key.rfind(prefix, 0) != 0 || key.size() <= prefix.size())
+        return false;
+    return quick_state_parse_u32_text(key.substr(prefix.size()), index);
+}
+
+static bool quick_state_parse_display_snapshot_section(const QuickStateSlot &slot, QuickStateDisplaySnapshot &snapshot) {
+    snapshot = {};
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.display");
+    if (!section || section->version != 1)
+        return false;
+
+    const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    if (schema == values.end() || schema->second != "thor.display.v1")
+        return false;
+
+    uint64_t parsed_hex = 0;
+    size_t predicted_frame_count = 0;
+    bool parsed_bool = false;
+    if (!quick_state_parse_u32(values, "speed_percent", snapshot.speed_percent)
+        || !quick_state_parse_u64(values, "vblank_count", snapshot.vblank_count)
+        || !quick_state_parse_u64(values, "last_setframe_vblank_count", snapshot.last_setframe_vblank_count)
+        || !values.contains("current_sync_object")
+        || !quick_state_parse_u64_text(values.at("current_sync_object"), parsed_hex, 0)
+        || !values.contains("sce_frame")
+        || !quick_state_parse_display_frame_snapshot(values.at("sce_frame"), snapshot.sce_frame)
+        || !values.contains("next_rendered_frame")
+        || !quick_state_parse_display_frame_snapshot(values.at("next_rendered_frame"), snapshot.next_rendered_frame)
+        || !values.contains("fps_hack")
+        || !quick_state_parse_bool_text(values.at("fps_hack"), parsed_bool)
+        || !quick_state_parse_size(values, "predicted_frames", predicted_frame_count)
+        || !quick_state_parse_u32(values, "predicted_frame_position", snapshot.predicted_frame_position)
+        || !quick_state_parse_u32(values, "predicted_cycles_seen", snapshot.predicted_cycles_seen)
+        || !values.contains("predicting")
+        || !quick_state_parse_bool_text(values.at("predicting"), snapshot.predicting)
+        || !quick_state_parse_u32(values, "vblank_wait_infos", snapshot.vblank_wait_info_count)
+        || !quick_state_parse_u32(values, "vblank_callbacks", snapshot.vblank_callback_count)) {
+        return false;
+    }
+    snapshot.current_sync_object = static_cast<Address>(parsed_hex);
+    snapshot.fps_hack = parsed_bool;
+
+    snapshot.predicted_frames.resize(predicted_frame_count);
+    std::vector<bool> seen(predicted_frame_count, false);
+    for (const auto &[key, value] : values) {
+        uint32_t index = 0;
+        if (!quick_state_parse_predicted_display_frame_key(key, index))
+            continue;
+        if (index >= predicted_frame_count)
+            return false;
+
+        const auto fields = quick_state_parse_semicolon_fields(value);
+        if (!fields.contains("sync"))
+            return false;
+        QuickStatePredictedDisplayFrameSnapshot predicted;
+        if (!quick_state_parse_display_frame_snapshot(value, predicted.frame)
+            || !quick_state_parse_u64_text(fields.at("sync"), parsed_hex, 0)) {
+            return false;
+        }
+        predicted.sync_object = static_cast<Address>(parsed_hex);
+        snapshot.predicted_frames[index] = predicted;
+        seen[index] = true;
+    }
+    if (std::any_of(seen.begin(), seen.end(), [](const bool value) { return !value; }))
+        return false;
+    if (predicted_frame_count > 0 && snapshot.predicted_frame_position >= predicted_frame_count)
+        return false;
+    if (snapshot.speed_percent == 0 || snapshot.speed_percent > 1000)
+        return false;
+
+    snapshot.valid = true;
+    return true;
+}
+
+static bool quick_state_parse_audio_port_snapshot(const std::string &key, const std::string &value, QuickStateAudioPortSnapshot &port) {
+    SceUID port_id = 0;
+    if (!quick_state_parse_uid_from_key(key, "port.", ".type", port_id))
+        return false;
+    port.id = port_id;
+
+    const auto fields = quick_state_parse_semicolon_fields("type=" + value);
+    if (!fields.contains("type")
+        || !fields.contains("len")
+        || !fields.contains("freq")
+        || !fields.contains("mode")
+        || !fields.contains("len_bytes")
+        || !fields.contains("len_us")
+        || !fields.contains("last_output")
+        || !fields.contains("left")
+        || !fields.contains("right")
+        || !fields.contains("volume")
+        || !quick_state_parse_i32_text(fields.at("type"), port.type)
+        || !quick_state_parse_i32_text(fields.at("len"), port.len)
+        || !quick_state_parse_i32_text(fields.at("freq"), port.freq)
+        || !quick_state_parse_i32_text(fields.at("mode"), port.mode)
+        || !quick_state_parse_i32_text(fields.at("len_bytes"), port.len_bytes)
+        || !quick_state_parse_u64_text(fields.at("len_us"), port.len_microseconds)
+        || !quick_state_parse_u64_text(fields.at("last_output"), port.last_output)
+        || !quick_state_parse_i32_text(fields.at("left"), port.left_channel_volume)
+        || !quick_state_parse_i32_text(fields.at("right"), port.right_channel_volume)
+        || !quick_state_parse_float_text(fields.at("volume"), port.volume)) {
+        return false;
+    }
+
+    return port.id > 0 && port.len >= 0 && port.freq >= 0 && port.len_bytes >= 0 && port.volume >= 0.0f && port.volume <= 4.0f;
+}
+
+static bool quick_state_parse_audio_snapshot_section(const QuickStateSlot &slot, QuickStateAudioSnapshot &snapshot) {
+    snapshot = {};
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.audio");
+    if (!section || section->version != 1)
+        return false;
+
+    const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    if (schema == values.end() || schema->second != "thor.audio.v1")
+        return false;
+
+    size_t expected_ports = 0;
+    int32_t parsed_i32 = 0;
+    bool parsed_bool = false;
+    if (!quick_state_parse_u32(values, "speed_percent", snapshot.speed_percent)
+        || !values.contains("backend")
+        || !values.contains("global_volume")
+        || !values.contains("next_port_id")
+        || !values.contains("audio_in_len_bytes")
+        || !quick_state_parse_float_text(values.at("global_volume"), snapshot.global_volume)
+        || !quick_state_parse_i32_text(values.at("next_port_id"), snapshot.next_port_id)
+        || !quick_state_parse_size(values, "out_ports", expected_ports)
+        || !values.contains("audio_in_running")
+        || !quick_state_parse_bool_text(values.at("audio_in_running"), parsed_bool)
+        || !quick_state_parse_i32_text(values.at("audio_in_len_bytes"), parsed_i32)) {
+        return false;
+    }
+    snapshot.backend = values.at("backend");
+    snapshot.audio_in_running = parsed_bool;
+    snapshot.audio_in_len_bytes = parsed_i32;
+
+    for (const auto &[key, value] : values) {
+        if (key.rfind("port.", 0) != 0)
+            continue;
+        QuickStateAudioPortSnapshot port;
+        if (!quick_state_parse_audio_port_snapshot(key, value, port))
+            return false;
+        snapshot.out_ports[port.id] = std::move(port);
+    }
+
+    snapshot.valid = snapshot.speed_percent > 0
+        && snapshot.speed_percent <= 1000
+        && snapshot.global_volume >= 0.0f
+        && snapshot.global_volume <= 4.0f
+        && snapshot.next_port_id > 0
+        && snapshot.audio_in_len_bytes >= 0
+        && snapshot.out_ports.size() == expected_ports;
+    return snapshot.valid;
+}
+
 static std::string quick_state_thread_status_name(const ThreadStatus status) {
     switch (status) {
     case ThreadStatus::run:
@@ -2757,6 +3017,14 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         manifest.sync_waiting_threads = sync_snapshot.total_waiting_threads();
         manifest.msgpipe_buffer_bytes = sync_snapshot.msgpipe_buffer_bytes();
     }
+    QuickStateDisplaySnapshot display_snapshot;
+    manifest.display_state_restorable = quick_state_parse_display_snapshot_section(slot, display_snapshot);
+    if (manifest.display_state_restorable) {
+        manifest.display_wait_entries = display_snapshot.vblank_wait_info_count;
+        manifest.display_callback_entries = display_snapshot.vblank_callback_count;
+    }
+    QuickStateAudioSnapshot audio_snapshot;
+    manifest.audio_state_restorable = quick_state_parse_audio_snapshot_section(slot, audio_snapshot);
     manifest.kernel = quick_state_count_kernel_objects(emuenv);
     manifest.io = quick_state_count_io_objects(emuenv);
 
@@ -2764,9 +3032,7 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         "kernel-thread-lifecycle",
         "host-syscall-state",
         "io-vfs-handles",
-        "gpu-display-state",
         "renderer-resources",
-        "audio-state",
     };
     if (!manifest.sync_primitives_restorable) {
         manifest.missing_serializers.push_back("kernel-sync-primitives");
@@ -2778,6 +3044,16 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     }
     if (!manifest.thread_metadata_restorable)
         manifest.missing_serializers.push_back("kernel-thread-metadata");
+    if (!manifest.display_state_restorable) {
+        manifest.missing_serializers.push_back("display-state");
+    } else {
+        if (manifest.display_wait_entries > 0)
+            manifest.missing_serializers.push_back("display-vblank-waits");
+        if (manifest.display_callback_entries > 0)
+            manifest.missing_serializers.push_back("display-vblank-callbacks");
+    }
+    if (!manifest.audio_state_restorable)
+        manifest.missing_serializers.push_back("audio-state");
     if (!manifest.io_file_positions_restorable)
         manifest.missing_serializers.push_back("io-file-positions");
     if (!manifest.timing_restorable)
@@ -2821,6 +3097,15 @@ static uint64_t quick_state_timer_next_event_delta_us(const uint64_t next_event)
 
     const uint64_t now = quick_state_host_time_us();
     return next_event > now ? next_event - now : 0;
+}
+
+static std::string quick_state_display_frame_text(const DisplayFrameInfo &frame) {
+    return fmt::format("base=0x{:X};pitch={};format={};width={};height={}",
+        frame.base.address(),
+        frame.pitch,
+        frame.pixelformat,
+        frame.image_size.x,
+        frame.image_size.y);
 }
 
 static std::string quick_state_rwlock_owners_detail(const RWLockOwners &owners) {
@@ -3097,10 +3382,23 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         text << "vblank_count=" << emuenv.display.vblank_count.load() << "\n";
         text << "last_setframe_vblank_count=" << emuenv.display.last_setframe_vblank_count.load() << "\n";
         text << "current_sync_object=0x" << std::hex << emuenv.display.current_sync_object.load() << std::dec << "\n";
-        text << "predicted_frames=" << emuenv.display.predicted_frames.size() << "\n";
-        text << "predicted_frame_position=" << emuenv.display.predicted_frame_position << "\n";
-        text << "predicted_cycles_seen=" << emuenv.display.predicted_cycles_seen << "\n";
-        text << "predicting=" << emuenv.display.predicting.load() << "\n";
+        {
+            const std::lock_guard<std::mutex> display_info_lock(emuenv.display.display_info_mutex);
+            text << "sce_frame=" << quick_state_display_frame_text(emuenv.display.sce_frame) << "\n";
+            text << "next_rendered_frame=" << quick_state_display_frame_text(emuenv.display.next_rendered_frame) << "\n";
+            text << "predicted_frames=" << emuenv.display.predicted_frames.size() << "\n";
+            for (size_t i = 0; i < emuenv.display.predicted_frames.size(); i++) {
+                const auto &predicted_frame = emuenv.display.predicted_frames[i];
+                text << "predicted_frame." << i
+                     << "=" << quick_state_display_frame_text(predicted_frame.frame_info)
+                     << ";sync=0x" << std::hex << predicted_frame.sync_object << std::dec
+                     << "\n";
+            }
+            text << "predicted_frame_position=" << emuenv.display.predicted_frame_position << "\n";
+            text << "predicted_cycles_seen=" << emuenv.display.predicted_cycles_seen << "\n";
+            text << "predicting=" << emuenv.display.predicting.load() << "\n";
+        }
+        text << "fps_hack=" << emuenv.display.fps_hack << "\n";
         {
             const std::lock_guard<std::mutex> display_lock(emuenv.display.mutex);
             text << "vblank_wait_infos=" << emuenv.display.vblank_wait_infos.size() << "\n";
@@ -3494,6 +3792,121 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
     return true;
 }
 
+static DisplayFrameInfo quick_state_to_display_frame_info(const QuickStateDisplayFrameSnapshot &snapshot) {
+    DisplayFrameInfo frame;
+    frame.base = Ptr<const void>(snapshot.base);
+    frame.pitch = snapshot.pitch;
+    frame.pixelformat = snapshot.pixelformat;
+    frame.image_size = { snapshot.width, snapshot.height };
+    return frame;
+}
+
+static bool restore_quick_state_display_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    QuickStateDisplaySnapshot snapshot;
+    if (!quick_state_parse_display_snapshot_section(slot, snapshot)) {
+        LOG_WARN("Refused display restore for {} because the thor.display section is missing or invalid.", slot.title_id);
+        return false;
+    }
+
+    if (snapshot.vblank_wait_info_count > 0 || snapshot.vblank_callback_count > 0) {
+        LOG_WARN("Refused display restore for {} because vblank waits/callbacks still need lifecycle serialization (waits={}, callbacks={}).",
+            slot.title_id, snapshot.vblank_wait_info_count, snapshot.vblank_callback_count);
+        return false;
+    }
+
+    {
+        const std::lock_guard<std::mutex> display_lock(emuenv.display.mutex);
+        if (emuenv.display.vblank_wait_infos.size() != snapshot.vblank_wait_info_count
+            || emuenv.display.vblank_callbacks.size() != snapshot.vblank_callback_count) {
+            LOG_WARN("Refused display restore for {} because current vblank wait/callback counts do not match the saved snapshot.", slot.title_id);
+            return false;
+        }
+    }
+
+    emuenv.display.speed_percent.store(snapshot.speed_percent);
+    emuenv.display.vblank_count.store(snapshot.vblank_count);
+    emuenv.display.last_setframe_vblank_count.store(snapshot.last_setframe_vblank_count);
+    emuenv.display.current_sync_object.store(snapshot.current_sync_object);
+    emuenv.display.fps_hack = snapshot.fps_hack;
+    emuenv.display.predicting.store(snapshot.predicting);
+    {
+        const std::lock_guard<std::mutex> display_info_lock(emuenv.display.display_info_mutex);
+        emuenv.display.sce_frame = quick_state_to_display_frame_info(snapshot.sce_frame);
+        emuenv.display.next_rendered_frame = quick_state_to_display_frame_info(snapshot.next_rendered_frame);
+        emuenv.display.predicted_frames.clear();
+        emuenv.display.predicted_frames.reserve(snapshot.predicted_frames.size());
+        for (const auto &saved_predicted_frame : snapshot.predicted_frames) {
+            PredictedDisplayFrame frame;
+            frame.frame_info = quick_state_to_display_frame_info(saved_predicted_frame.frame);
+            frame.sync_object = saved_predicted_frame.sync_object;
+            emuenv.display.predicted_frames.push_back(frame);
+        }
+        emuenv.display.predicted_frame_position = snapshot.predicted_frame_position;
+        emuenv.display.predicted_cycles_seen = snapshot.predicted_cycles_seen;
+    }
+
+    LOG_INFO("Restored display scalar snapshot for {} (vblank={}, predicted_frames={}, speed={}%).",
+        slot.title_id,
+        snapshot.vblank_count,
+        snapshot.predicted_frames.size(),
+        snapshot.speed_percent);
+    return true;
+}
+
+static bool restore_quick_state_audio_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    QuickStateAudioSnapshot snapshot;
+    if (!quick_state_parse_audio_snapshot_section(slot, snapshot)) {
+        LOG_WARN("Refused audio restore for {} because the thor.audio section is missing or invalid.", slot.title_id);
+        return false;
+    }
+
+    const std::lock_guard<std::mutex> audio_lock(emuenv.audio.mutex);
+    if (emuenv.audio.audio_backend != snapshot.backend || emuenv.audio.out_ports.size() != snapshot.out_ports.size()) {
+        LOG_WARN("Refused audio restore for {} because current backend/port count does not match the saved snapshot.", slot.title_id);
+        return false;
+    }
+
+    for (const auto &[port_id, saved_port] : snapshot.out_ports) {
+        const auto current = emuenv.audio.out_ports.find(port_id);
+        if (current == emuenv.audio.out_ports.end()) {
+            LOG_WARN("Refused audio restore for {} because audio port {} is not open in the current session.", slot.title_id, port_id);
+            return false;
+        }
+        if (!current->second) {
+            LOG_WARN("Refused audio restore for {} because audio port {} is null.", slot.title_id, port_id);
+            return false;
+        }
+    }
+
+    emuenv.audio.speed_percent.store(snapshot.speed_percent);
+    emuenv.audio.global_volume = snapshot.global_volume;
+    emuenv.audio.next_port_id = snapshot.next_port_id;
+    emuenv.audio.in_port.running = snapshot.audio_in_running;
+    emuenv.audio.in_port.len_bytes = snapshot.audio_in_len_bytes;
+    for (const auto &[port_id, saved_port] : snapshot.out_ports) {
+        auto &port = *emuenv.audio.out_ports.at(port_id);
+        port.type = saved_port.type;
+        port.len = saved_port.len;
+        port.freq = saved_port.freq;
+        port.mode = saved_port.mode;
+        port.len_bytes = saved_port.len_bytes;
+        port.len_microseconds = saved_port.len_microseconds;
+        port.last_output = saved_port.last_output;
+        port.left_channel_volume = saved_port.left_channel_volume;
+        port.right_channel_volume = saved_port.right_channel_volume;
+        port.volume = saved_port.volume;
+        if (emuenv.audio.adapter)
+            emuenv.audio.adapter->set_volume(port, saved_port.volume * snapshot.global_volume);
+    }
+
+    LOG_INFO("Restored audio scalar snapshot for {} (ports={}, backend={}, speed={}%).",
+        slot.title_id,
+        snapshot.out_ports.size(),
+        snapshot.backend,
+        snapshot.speed_percent);
+    return true;
+}
+
 static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const QuickStateSlot &slot) {
     std::map<SceUID, QuickStateIOFilePosition> positions_by_fd;
     if (!quick_state_parse_io_file_positions_section(slot, positions_by_fd)) {
@@ -3599,6 +4012,16 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         return false;
     }
 
+    if (!restore_quick_state_display_state(emuenv, slot)) {
+        resume_after_quick_state(emuenv, already_paused);
+        return false;
+    }
+
+    if (!restore_quick_state_audio_state(emuenv, slot)) {
+        resume_after_quick_state(emuenv, already_paused);
+        return false;
+    }
+
     for (const auto &page : slot.memory_pages)
         std::memcpy(Ptr<uint8_t>(page.address).get(emuenv.mem), page.bytes.data(), page.bytes.size());
 
@@ -3646,6 +4069,10 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "Sync wait queue entries: " << manifest.sync_waiting_threads << "\n";
     marker << "Message-pipe buffered bytes: " << manifest.msgpipe_buffer_bytes << "\n";
     marker << "IO file-position restore layer: " << (manifest.io_file_positions_restorable ? "ready" : "missing") << "\n";
+    marker << "Display scalar restore layer: " << (manifest.display_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Display vblank waits: " << manifest.display_wait_entries << "\n";
+    marker << "Display vblank callbacks: " << manifest.display_callback_entries << "\n";
+    marker << "Audio scalar restore layer: " << (manifest.audio_state_restorable ? "ready" : "missing") << "\n";
     marker << "Block reason: " << manifest.block_reason << "\n";
     marker << "Missing serializers: " << quick_state_join_strings(manifest.missing_serializers) << "\n";
     marker << "\nKernel object snapshot at manifest time\n";
@@ -3798,7 +4225,7 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
     const auto manifest = build_quick_state_restore_manifest(emuenv, quick_state_slot0);
     if (!manifest.restore_enabled) {
         LOG_WARN("Refused quickstate slot 0 restore for {} because {}.", title_id, manifest.block_reason);
-        LOG_INFO("Quickstate slot 0 manifest for {}: guest={} MiB, pages={}, saved_threads={}, sections={}, timing_restorable={}, thread_metadata_restorable={}, sync_primitives_restorable={}, sync_wait_entries={}, msgpipe_buffer_bytes={}, io_file_positions_restorable={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
+        LOG_INFO("Quickstate slot 0 manifest for {}: guest={} MiB, pages={}, saved_threads={}, sections={}, timing_restorable={}, thread_metadata_restorable={}, sync_primitives_restorable={}, sync_wait_entries={}, msgpipe_buffer_bytes={}, io_file_positions_restorable={}, display_state_restorable={}, display_wait_entries={}, display_callback_entries={}, audio_state_restorable={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
             title_id,
             manifest.guest_memory_bytes / (1024 * 1024),
             manifest.memory_pages,
@@ -3810,6 +4237,10 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
             manifest.sync_waiting_threads,
             manifest.msgpipe_buffer_bytes,
             manifest.io_file_positions_restorable,
+            manifest.display_state_restorable,
+            manifest.display_wait_entries,
+            manifest.display_callback_entries,
+            manifest.audio_state_restorable,
             manifest.kernel.cpu_threads,
             manifest.kernel.timers,
             manifest.kernel.semaphores,
