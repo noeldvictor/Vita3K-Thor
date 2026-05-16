@@ -1287,11 +1287,13 @@ struct QuickStateRestoreManifest {
     bool timing_restorable = false;
     bool thread_metadata_restorable = false;
     bool io_file_positions_restorable = false;
+    bool io_file_handles_restorable = false;
     bool sync_primitives_restorable = false;
     bool display_state_restorable = false;
     bool audio_state_restorable = false;
     size_t sync_waiting_threads = 0;
     size_t msgpipe_buffer_bytes = 0;
+    size_t io_memory_file_handles = 0;
     size_t display_wait_entries = 0;
     size_t display_callback_entries = 0;
     QuickStateKernelObjectCounts kernel;
@@ -2435,7 +2437,7 @@ static bool quick_state_parse_io_file_position(const std::string &key, const std
     return true;
 }
 
-static bool quick_state_parse_io_file_positions_section(const QuickStateSlot &slot, std::map<SceUID, QuickStateIOFilePosition> &positions_by_fd) {
+static bool quick_state_parse_io_file_positions_section(const QuickStateSlot &slot, std::map<SceUID, QuickStateIOFilePosition> &positions_by_fd, SceUID *next_fd_out = nullptr) {
     positions_by_fd.clear();
     const QuickStateSection *section = quick_state_find_section(slot, "thor.io.vfs");
     if (!section || section->version != 1)
@@ -2449,6 +2451,9 @@ static bool quick_state_parse_io_file_positions_section(const QuickStateSlot &sl
     uint64_t expected_file_count = 0;
     if (!quick_state_parse_u64(values, "std_files", expected_file_count) || expected_file_count > 1024)
         return false;
+    int32_t parsed_next_fd = 0;
+    if (!values.contains("next_fd") || !quick_state_parse_i32_text(values.at("next_fd"), parsed_next_fd) || parsed_next_fd < 0)
+        return false;
 
     for (const auto &[key, value] : values) {
         if (key.rfind("file.", 0) != 0)
@@ -2460,6 +2465,8 @@ static bool quick_state_parse_io_file_positions_section(const QuickStateSlot &sl
         positions_by_fd[position.fd] = std::move(position);
     }
 
+    if (next_fd_out)
+        *next_fd_out = static_cast<SceUID>(parsed_next_fd);
     return positions_by_fd.size() == expected_file_count;
 }
 
@@ -3011,6 +3018,12 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     manifest.thread_metadata_restorable = quick_state_parse_thread_metadata_section(slot, thread_metadata);
     std::map<SceUID, QuickStateIOFilePosition> io_file_positions;
     manifest.io_file_positions_restorable = quick_state_parse_io_file_positions_section(slot, io_file_positions);
+    if (manifest.io_file_positions_restorable) {
+        manifest.io_memory_file_handles = static_cast<size_t>(std::count_if(io_file_positions.begin(), io_file_positions.end(), [](const auto &item) {
+            return item.second.memory_file;
+        }));
+        manifest.io_file_handles_restorable = true;
+    }
     QuickStateSyncSnapshot sync_snapshot;
     manifest.sync_primitives_restorable = quick_state_parse_sync_primitives_section(slot, sync_snapshot);
     if (manifest.sync_primitives_restorable) {
@@ -3031,7 +3044,6 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     manifest.missing_serializers = {
         "kernel-thread-lifecycle",
         "host-syscall-state",
-        "io-vfs-handles",
         "renderer-resources",
     };
     if (!manifest.sync_primitives_restorable) {
@@ -3054,8 +3066,14 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     }
     if (!manifest.audio_state_restorable)
         manifest.missing_serializers.push_back("audio-state");
-    if (!manifest.io_file_positions_restorable)
+    if (!manifest.io_file_positions_restorable) {
         manifest.missing_serializers.push_back("io-file-positions");
+    } else {
+        if (manifest.io.dir_entries > 0)
+            manifest.missing_serializers.push_back("io-directory-handles");
+        if (manifest.io.overlays > 0)
+            manifest.missing_serializers.push_back("io-overlays");
+    }
     if (!manifest.timing_restorable)
         manifest.missing_serializers.push_back("timing-clocks");
     if (manifest.avplayer_threads > 0)
@@ -3907,17 +3925,86 @@ static bool restore_quick_state_audio_state(EmuEnvState &emuenv, const QuickStat
     return true;
 }
 
+static std::optional<fs::path> quick_state_app0_relative_path(const std::string &vita_path) {
+    std::string normalized = vita_path;
+    string_utils::replace(normalized, "\\", "/");
+    const std::string lower = string_utils::tolower(normalized);
+    constexpr std::string_view app0_prefix = "app0:";
+    if (lower.rfind(app0_prefix, 0) != 0)
+        return std::nullopt;
+
+    normalized.erase(0, app0_prefix.size());
+    while (!normalized.empty() && normalized.front() == '/')
+        normalized.erase(normalized.begin());
+    if (normalized.empty())
+        return std::nullopt;
+
+    return fs_utils::utf8_to_path(normalized);
+}
+
+static std::optional<FileStats> quick_state_recreate_file_stats(EmuEnvState &emuenv, const QuickStateIOFilePosition &position) {
+    if (position.memory_file) {
+        const auto relative_path = quick_state_app0_relative_path(position.vita_path);
+        if (!relative_path.has_value())
+            return std::nullopt;
+
+        vfs::FileBuffer buffer;
+        if (!vfs::read_current_app_file(buffer, emuenv.io, emuenv.pref_path, *relative_path))
+            return std::nullopt;
+
+        return FileStats(position.vita_path.c_str(), position.translated_path, position.host_path, position.open_mode, buffer);
+    }
+
+    if (!fs::exists(position.host_path))
+        return std::nullopt;
+
+    FileStats file_stats(position.vita_path.c_str(), position.translated_path, position.host_path, position.open_mode);
+    if (!file_stats.get_file_pointer())
+        return std::nullopt;
+    return file_stats;
+}
+
 static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const QuickStateSlot &slot) {
     std::map<SceUID, QuickStateIOFilePosition> positions_by_fd;
-    if (!quick_state_parse_io_file_positions_section(slot, positions_by_fd)) {
+    SceUID saved_next_fd = 0;
+    if (!quick_state_parse_io_file_positions_section(slot, positions_by_fd, &saved_next_fd)) {
         LOG_WARN("Refused IO file-position restore for {} because the thor.io.vfs file metadata is missing or invalid.", slot.title_id);
         return false;
     }
 
     if (positions_by_fd.size() != emuenv.io.std_files.size()) {
-        LOG_WARN("Refused IO file-position restore for {} because open file count {} does not match saved count {}.",
-            slot.title_id, emuenv.io.std_files.size(), positions_by_fd.size());
-        return false;
+        for (const auto &[fd, position] : positions_by_fd) {
+            if (emuenv.io.tty_files.contains(fd) || emuenv.io.dir_entries.contains(fd)) {
+                LOG_WARN("Refused IO file-handle restore for {} because saved fd {} collides with an existing tty or directory handle.",
+                    slot.title_id, fd);
+                return false;
+            }
+        }
+
+        StdFiles rebuilt_files;
+        SceUID highest_fd = saved_next_fd;
+        for (const auto &[fd, position] : positions_by_fd) {
+            auto file = quick_state_recreate_file_stats(emuenv, position);
+            if (!file.has_value()) {
+                const std::string source = position.memory_file ? std::string("archive memory file") : fs_utils::path_to_utf8(position.host_path);
+                LOG_WARN("Refused IO file-handle restore for {} because saved fd {} could not be recreated from {}.",
+                    slot.title_id, fd, source);
+                return false;
+            }
+            if (!file->seek(position.offset, SCE_SEEK_SET)) {
+                LOG_WARN("Refused IO file-handle restore for {} because recreated fd {} could not seek to {}.",
+                    slot.title_id, fd, position.offset);
+                return false;
+            }
+            rebuilt_files.emplace(fd, std::move(*file));
+            highest_fd = std::max<SceUID>(highest_fd, fd + 1);
+        }
+
+        emuenv.io.std_files = std::move(rebuilt_files);
+        emuenv.io.next_fd = std::max(saved_next_fd, highest_fd);
+        LOG_INFO("Recreated IO file handles for {} ({} open file(s), next_fd={}).",
+            slot.title_id, positions_by_fd.size(), emuenv.io.next_fd);
+        return true;
     }
 
     for (const auto &[fd, position] : positions_by_fd) {
@@ -3945,6 +4032,7 @@ static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const Qui
             return false;
         }
     }
+    emuenv.io.next_fd = std::max(emuenv.io.next_fd, saved_next_fd);
 
     LOG_INFO("Restored IO file positions for {} ({} open file(s)).", slot.title_id, positions_by_fd.size());
     return true;
@@ -4069,6 +4157,8 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "Sync wait queue entries: " << manifest.sync_waiting_threads << "\n";
     marker << "Message-pipe buffered bytes: " << manifest.msgpipe_buffer_bytes << "\n";
     marker << "IO file-position restore layer: " << (manifest.io_file_positions_restorable ? "ready" : "missing") << "\n";
+    marker << "IO file-handle restore layer: " << (manifest.io_file_handles_restorable ? "ready" : "missing") << "\n";
+    marker << "IO memory-backed file handles: " << manifest.io_memory_file_handles << "\n";
     marker << "Display scalar restore layer: " << (manifest.display_state_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank waits: " << manifest.display_wait_entries << "\n";
     marker << "Display vblank callbacks: " << manifest.display_callback_entries << "\n";
@@ -4225,7 +4315,7 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
     const auto manifest = build_quick_state_restore_manifest(emuenv, quick_state_slot0);
     if (!manifest.restore_enabled) {
         LOG_WARN("Refused quickstate slot 0 restore for {} because {}.", title_id, manifest.block_reason);
-        LOG_INFO("Quickstate slot 0 manifest for {}: guest={} MiB, pages={}, saved_threads={}, sections={}, timing_restorable={}, thread_metadata_restorable={}, sync_primitives_restorable={}, sync_wait_entries={}, msgpipe_buffer_bytes={}, io_file_positions_restorable={}, display_state_restorable={}, display_wait_entries={}, display_callback_entries={}, audio_state_restorable={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
+        LOG_INFO("Quickstate slot 0 manifest for {}: guest={} MiB, pages={}, saved_threads={}, sections={}, timing_restorable={}, thread_metadata_restorable={}, sync_primitives_restorable={}, sync_wait_entries={}, msgpipe_buffer_bytes={}, io_file_positions_restorable={}, io_file_handles_restorable={}, io_memory_file_handles={}, display_state_restorable={}, display_wait_entries={}, display_callback_entries={}, audio_state_restorable={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
             title_id,
             manifest.guest_memory_bytes / (1024 * 1024),
             manifest.memory_pages,
@@ -4237,6 +4327,8 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
             manifest.sync_waiting_threads,
             manifest.msgpipe_buffer_bytes,
             manifest.io_file_positions_restorable,
+            manifest.io_file_handles_restorable,
+            manifest.io_memory_file_handles,
             manifest.display_state_restorable,
             manifest.display_wait_entries,
             manifest.display_callback_entries,
