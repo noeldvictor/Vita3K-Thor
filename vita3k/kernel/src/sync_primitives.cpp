@@ -1481,9 +1481,6 @@ static int eventflag_waitorpoll(KernelState &kernel, const char *export_name, Sc
 
         return SCE_KERNEL_OK;
     } else if (dowait) {
-        std::unique_lock<std::mutex> thread_lock(thread->mutex);
-        thread->update_status(ThreadStatus::wait, ThreadStatus::run);
-
         WaitingThreadData data;
         data.thread = thread;
         data.wait = wait;
@@ -1494,6 +1491,15 @@ static int eventflag_waitorpoll(KernelState &kernel, const char *export_name, Sc
 
         auto was_canceled = std::make_shared<bool>(false);
         data.was_canceled = was_canceled;
+
+        if (!timeout && thread->begin_deferred_import_wait()) {
+            data.deferred_import_wait = true;
+            event->waiting_threads->push(data);
+            return SCE_KERNEL_OK;
+        }
+
+        std::unique_lock<std::mutex> thread_lock(thread->mutex);
+        thread->update_status(ThreadStatus::wait, ThreadStatus::run);
 
         const auto data_it = event->waiting_threads->push(data);
         thread_lock.unlock();
@@ -1565,9 +1571,10 @@ SceInt32 eventflag_set(KernelState &kernel, const char *export_name, SceUID thre
                 event->flags &= ~waiting_flags;
             }
 
-            const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
-
-            waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+            if (!waiting_thread->complete_deferred_import_wait(SCE_KERNEL_OK)) {
+                const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
+                waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+            }
 
             event->waiting_threads->erase(it++);
         } else {
@@ -1599,14 +1606,15 @@ SceInt32 eventflag_cancel(KernelState &kernel, const char *export_name, SceUID t
         const auto &waiting_thread_data = *event->waiting_threads->begin();
         const auto waiting_thread = waiting_thread_data.thread;
 
-        const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
-
         if (waiting_thread_data.was_canceled)
             *waiting_thread_data.was_canceled = true;
         if (waiting_thread_data.outBits)
             *waiting_thread_data.outBits = pattern;
 
-        waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+        if (!waiting_thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_CANCEL))) {
+            const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
+            waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+        }
 
         event->waiting_threads->erase(event->waiting_threads->begin());
         nb_threads++;
