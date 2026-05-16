@@ -137,12 +137,29 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
         lookup_result = TextureLookupResult{
             image.view,
             image.layout,
-            image.format
+            image.format,
+            TextureLookupDebugInfo{
+                .source = TextureLookupDebugSource::GuestTexture,
+                .mode = TextureLookupDebugMode::TextureCache,
+                .texture_addr = static_cast<uint32_t>(texture.data_addr << 2),
+                .surface_addr = static_cast<uint32_t>(texture.data_addr << 2),
+                .texture_width = gxm::get_width(texture),
+                .texture_height = gxm::get_height(texture),
+                .source_width = image.width,
+                .source_height = image.height,
+                .requested_format = static_cast<uint32_t>(base_format),
+                .image_format = static_cast<uint32_t>(image.format)
+            }
         };
     }
 
     const vk::ImageLayout layout = vkutil::get_underlying_layout(lookup_result->layout);
     const vk::Sampler sampler = context.state.texture_cache.get_retrieved_sampler();
+
+    TextureLookupDebugInfo &debug_info = is_vertex
+        ? context.vertex_texture_debug[index - SCE_GXM_MAX_TEXTURE_UNITS]
+        : context.fragment_texture_debug[index];
+    debug_info = lookup_result->debug;
 
     vk::DescriptorImageInfo &image_info = is_vertex
         ? context.vertex_textures[index - SCE_GXM_MAX_TEXTURE_UNITS]

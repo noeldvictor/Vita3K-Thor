@@ -147,11 +147,46 @@ struct DepthStencilSurfaceCacheInfo : public SurfaceCacheInfo {
     std::vector<DepthSurfaceView> read_surfaces;
 };
 
+enum class TextureLookupDebugSource : uint8_t {
+    Unknown,
+    GuestTexture,
+    ColorSurface,
+    DepthStencil
+};
+
+enum class TextureLookupDebugMode : uint8_t {
+    Unknown,
+    TextureCache,
+    ViewportDirect,
+    ViewportAlt,
+    CastedReuse,
+    CastedCopy,
+    Direct,
+    DirectAlt,
+    DepthDirect,
+    DepthCopyReuse,
+    DepthCopy
+};
+
+struct TextureLookupDebugInfo {
+    TextureLookupDebugSource source = TextureLookupDebugSource::Unknown;
+    TextureLookupDebugMode mode = TextureLookupDebugMode::Unknown;
+    uint32_t texture_addr = 0;
+    uint32_t surface_addr = 0;
+    uint32_t texture_width = 0;
+    uint32_t texture_height = 0;
+    uint32_t source_width = 0;
+    uint32_t source_height = 0;
+    uint32_t requested_format = 0;
+    uint32_t image_format = 0;
+};
+
 // result when looking in the surface cache for a texture
 struct TextureLookupResult {
     vk::ImageView view;
     vkutil::ImageLayout layout;
     vk::Format format;
+    TextureLookupDebugInfo debug;
 };
 
 // result when trying to retrieve a surface from the surface cache

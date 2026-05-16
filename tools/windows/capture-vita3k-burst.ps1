@@ -23,10 +23,19 @@ public static class Vita3KCaptureWin32 {
     public static extern bool SetForegroundWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
+    public static extern bool BringWindowToTop(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+    [DllImport("user32.dll")]
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hWnd, out Vita3KCaptureRect lpRect);
+
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -40,6 +49,13 @@ public struct Vita3KCaptureRect {
 }
 
 $SW_RESTORE = 9
+$HWND_TOPMOST = [IntPtr]::new(-1)
+$HWND_NOTOPMOST = [IntPtr]::new(-2)
+$SWP_NOSIZE = 0x0001
+$SWP_NOMOVE = 0x0002
+$SWP_SHOWWINDOW = 0x0040
+$VK_MENU = 0x12
+$KEYEVENTF_KEYUP = 0x0002
 
 function Slug([string]$Value) {
     $slug = ($Value.ToLowerInvariant() -replace "[^a-z0-9]+", "-").Trim("-")
@@ -89,8 +105,16 @@ function Get-CaptureBounds {
 
     if (-not $NoFocus) {
         [Vita3KCaptureWin32]::ShowWindow($proc.MainWindowHandle, $SW_RESTORE) | Out-Null
+        [Vita3KCaptureWin32]::BringWindowToTop($proc.MainWindowHandle) | Out-Null
+        [Vita3KCaptureWin32]::keybd_event([byte]$VK_MENU, 0, 0, [UIntPtr]::Zero)
         [Vita3KCaptureWin32]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
-        Start-Sleep -Milliseconds 120
+        [Vita3KCaptureWin32]::keybd_event([byte]$VK_MENU, 0, $KEYEVENTF_KEYUP, [UIntPtr]::Zero)
+        # Keep the emulator above Codex for the whole burst. Restoring it to
+        # non-topmost before the loop lets the app window contaminate later
+        # frames when Codex receives progress output.
+        [Vita3KCaptureWin32]::SetWindowPos($proc.MainWindowHandle, $HWND_TOPMOST, 0, 0, 0, 0, $SWP_NOMOVE -bor $SWP_NOSIZE -bor $SWP_SHOWWINDOW) | Out-Null
+        Start-Sleep -Milliseconds 80
+        Start-Sleep -Milliseconds 180
     }
 
     $rect = New-Object Vita3KCaptureRect
@@ -121,6 +145,7 @@ function Get-CaptureBounds {
     return @{
         Mode = "window"
         Title = $proc.MainWindowTitle
+        Handle = $proc.MainWindowHandle
         Bounds = [System.Drawing.Rectangle]::FromLTRB($left, $top, $right, $bottom)
     }
 }
@@ -150,13 +175,19 @@ $capture = Get-CaptureBounds
 $bounds = [System.Drawing.Rectangle]$capture.Bounds
 $frames = @()
 
-for ($i = 1; $i -le $Count; $i++) {
-    $framePath = Join-Path $frameDir ("frame_{0:D4}.png" -f $i)
-    Capture-Png $framePath $bounds
-    $frames += $framePath
-    Write-Host ("Captured frame {0}/{1}: {2}" -f $i, $Count, $framePath)
-    if ($i -lt $Count -and $IntervalMs -gt 0) {
-        Start-Sleep -Milliseconds $IntervalMs
+try {
+    for ($i = 1; $i -le $Count; $i++) {
+        $framePath = Join-Path $frameDir ("frame_{0:D4}.png" -f $i)
+        Capture-Png $framePath $bounds
+        $frames += $framePath
+        Write-Host ("Captured frame {0}/{1}: {2}" -f $i, $Count, $framePath)
+        if ($i -lt $Count -and $IntervalMs -gt 0) {
+            Start-Sleep -Milliseconds $IntervalMs
+        }
+    }
+} finally {
+    if (-not $NoFocus -and $capture.Mode -eq "window" -and $capture.Handle) {
+        [Vita3KCaptureWin32]::SetWindowPos([IntPtr]$capture.Handle, $HWND_NOTOPMOST, 0, 0, 0, 0, $SWP_NOMOVE -bor $SWP_NOSIZE -bor $SWP_SHOWWINDOW) | Out-Null
     }
 }
 

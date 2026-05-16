@@ -326,6 +326,8 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
         context.fragment_textures[i].sampler = nullptr;
         context.vertex_gxm_texture_valid[i] = false;
         context.fragment_gxm_texture_valid[i] = false;
+        context.vertex_texture_debug[i] = {};
+        context.fragment_texture_debug[i] = {};
     }
 
     context.is_first_scene_draw = true;

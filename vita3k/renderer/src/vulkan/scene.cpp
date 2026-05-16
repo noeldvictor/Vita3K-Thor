@@ -836,7 +836,48 @@ static std::array<size_t, SCE_GXM_MAX_VERTEX_STREAMS> get_required_vertex_stream
     return required_sizes;
 }
 
-static void log_renderer_debug_textures(VKContext &context, const char *stage, const SceGxmTexture *textures, const bool *valid, uint16_t texture_count, uint32_t debug_draw_index) {
+static const char *renderer_debug_texture_source_name(TextureLookupDebugSource source) {
+    switch (source) {
+    case TextureLookupDebugSource::GuestTexture:
+        return "guest-texture";
+    case TextureLookupDebugSource::ColorSurface:
+        return "color-surface";
+    case TextureLookupDebugSource::DepthStencil:
+        return "depth-stencil";
+    default:
+        return "unknown";
+    }
+}
+
+static const char *renderer_debug_texture_mode_name(TextureLookupDebugMode mode) {
+    switch (mode) {
+    case TextureLookupDebugMode::TextureCache:
+        return "texture-cache";
+    case TextureLookupDebugMode::ViewportDirect:
+        return "viewport-direct";
+    case TextureLookupDebugMode::ViewportAlt:
+        return "viewport-alt";
+    case TextureLookupDebugMode::CastedReuse:
+        return "casted-reuse";
+    case TextureLookupDebugMode::CastedCopy:
+        return "casted-copy";
+    case TextureLookupDebugMode::Direct:
+        return "direct";
+    case TextureLookupDebugMode::DirectAlt:
+        return "direct-alt";
+    case TextureLookupDebugMode::DepthDirect:
+        return "depth-direct";
+    case TextureLookupDebugMode::DepthCopyReuse:
+        return "depth-copy-reuse";
+    case TextureLookupDebugMode::DepthCopy:
+        return "depth-copy";
+    default:
+        return "unknown";
+    }
+}
+
+static void log_renderer_debug_textures(VKContext &context, const char *stage, const SceGxmTexture *textures, const bool *valid,
+    const TextureLookupDebugInfo *lookup_debug, uint16_t texture_count, uint32_t debug_draw_index) {
     for (uint16_t texture_index = 0; texture_index < texture_count && texture_index < SCE_GXM_MAX_TEXTURE_UNITS; texture_index++) {
         if (!valid[texture_index]) {
             LOG_INFO("ThorRenderDump texture frame={} scene={} draw={} stage={} slot={} valid=0",
@@ -852,7 +893,8 @@ static void log_renderer_debug_textures(VKContext &context, const char *stage, c
         const SceGxmTextureFormat format = gxm::get_format(texture);
         const SceGxmTextureBaseFormat base_format = gxm::get_base_format(format);
         const uint32_t stride = texture.texture_type() == SCE_GXM_TEXTURE_LINEAR_STRIDED ? gxm::get_stride_in_bytes(texture) : 0;
-        LOG_INFO("ThorRenderDump texture frame={} scene={} draw={} stage={} slot={} valid=1 addr=0x{:08X} type={} fmt=0x{:08X} base=0x{:08X} size={}x{} stride={} mips={} palette=0x{:08X} filters={}/{} mip_filter={} addr_mode={}/{} gamma={} normalize={}",
+        const TextureLookupDebugInfo &debug = lookup_debug[texture_index];
+        LOG_INFO("ThorRenderDump texture frame={} scene={} draw={} stage={} slot={} valid=1 addr=0x{:08X} type={} fmt=0x{:08X} base=0x{:08X} size={}x{} stride={} mips={} palette=0x{:08X} filters={}/{} mip_filter={} addr_mode={}/{} gamma={} normalize={} lookup_source={} lookup_mode={} lookup_tex=0x{:08X} lookup_surface=0x{:08X} lookup_tex_size={}x{} lookup_source_size={}x{} lookup_requested_fmt=0x{:08X} lookup_image_fmt=0x{:08X}",
             context.frame_timestamp,
             context.scene_timestamp,
             debug_draw_index,
@@ -873,7 +915,17 @@ static void log_renderer_debug_textures(VKContext &context, const char *stage, c
             static_cast<uint32_t>(texture.uaddr_mode),
             static_cast<uint32_t>(texture.vaddr_mode),
             static_cast<uint32_t>(texture.gamma_mode),
-            static_cast<uint32_t>(texture.normalize_mode));
+            static_cast<uint32_t>(texture.normalize_mode),
+            renderer_debug_texture_source_name(debug.source),
+            renderer_debug_texture_mode_name(debug.mode),
+            debug.texture_addr,
+            debug.surface_addr,
+            debug.texture_width,
+            debug.texture_height,
+            debug.source_width,
+            debug.source_height,
+            debug.requested_format,
+            debug.image_format);
     }
 }
 
@@ -1238,8 +1290,8 @@ static void log_renderer_debug_draw_dump(VKContext &context, MemState &mem, SceG
         log_renderer_debug_attribute_values(context, mem, format, indices, count, debug_draw_index, attribute, info, stream, required_sizes[attribute.streamIndex]);
     }
 
-    log_renderer_debug_textures(context, "vertex", context.vertex_gxm_textures, context.vertex_gxm_texture_valid, vertex_data->texture_count, debug_draw_index);
-    log_renderer_debug_textures(context, "fragment", context.fragment_gxm_textures, context.fragment_gxm_texture_valid, fragment_data->texture_count, debug_draw_index);
+    log_renderer_debug_textures(context, "vertex", context.vertex_gxm_textures, context.vertex_gxm_texture_valid, context.vertex_texture_debug, vertex_data->texture_count, debug_draw_index);
+    log_renderer_debug_textures(context, "fragment", context.fragment_gxm_textures, context.fragment_gxm_texture_valid, context.fragment_texture_debug, fragment_data->texture_count, debug_draw_index);
     log_renderer_debug_uniform_buffers(context, mem, "vertex", *vertex_data, context.vertex_uniform_addresses, context.vertex_uniform_sizes, context.vertex_uniform_valid, debug_draw_index);
     log_renderer_debug_uniform_buffers(context, mem, "fragment", *fragment_data, context.fragment_uniform_addresses, context.fragment_uniform_sizes, context.fragment_uniform_valid, debug_draw_index);
 }
@@ -1560,6 +1612,17 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     }
 
     auto &frag_ublock = context.curr_frag_ublock.base_block;
+    const bool both_side_fragment_program_disabled = (context.record.front_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED)
+        && ((context.record.back_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED) || (context.record.two_sided == SCE_GXM_TWO_SIDED_DISABLED));
+    if (both_side_fragment_program_disabled) {
+        frag_ublock.front_disabled = 0.0f;
+        frag_ublock.back_disabled = 0.0f;
+    } else {
+        frag_ublock.front_disabled = (context.record.front_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED) ? 1.0f : 0.0f;
+        frag_ublock.back_disabled = (context.record.two_sided == SCE_GXM_TWO_SIDED_DISABLED)
+            ? frag_ublock.front_disabled
+            : ((context.record.back_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED) ? 1.0f : 0.0f);
+    }
     frag_ublock.writing_mask = context.record.writing_mask;
     frag_ublock.res_multiplier = context.state.res_multiplier;
     const bool has_msaa = context.render_target->multisample_mode;

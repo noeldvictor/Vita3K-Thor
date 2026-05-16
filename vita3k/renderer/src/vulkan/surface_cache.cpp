@@ -82,6 +82,7 @@ struct SurfaceDumpDebugConfig {
     Address address = 0;
     uint32_t limit = 24;
     uint32_t every_scene = 1;
+    uint32_t start_scene = 0;
     fs::path directory = fs_utils::utf8_to_path("tmp/vita3k-surface-dumps");
 };
 
@@ -152,13 +153,14 @@ static SurfaceDumpDebugConfig read_surface_dump_debug_config() {
 
     cfg.limit = std::max<uint32_t>(1, parse_surface_dump_u32(surface_dump_debug_setting("VITA3K_RENDER_DUMP_SURFACE_LIMIT", "debug.vita3k.render_dump_surface_limit"), cfg.limit));
     cfg.every_scene = std::max<uint32_t>(1, parse_surface_dump_u32(surface_dump_debug_setting("VITA3K_RENDER_DUMP_SURFACE_EVERY", "debug.vita3k.render_dump_surface_every"), cfg.every_scene));
+    cfg.start_scene = parse_surface_dump_u32(surface_dump_debug_setting("VITA3K_RENDER_DUMP_SURFACE_START_SCENE", "debug.vita3k.render_dump_surface_start_scene"), cfg.start_scene);
 
     const std::string directory = surface_dump_debug_setting("VITA3K_RENDER_DUMP_SURFACE_DIR", "debug.vita3k.render_dump_surface_dir");
     if (!directory.empty())
         cfg.directory = fs_utils::utf8_to_path(directory);
 
-    LOG_INFO("ThorRenderSurfaceDump enabled addr=0x{:08X} limit={} every_scene={} dir={}",
-        cfg.address, cfg.limit, cfg.every_scene, cfg.directory);
+    LOG_INFO("ThorRenderSurfaceDump enabled addr=0x{:08X} limit={} every_scene={} start_scene={} dir={}",
+        cfg.address, cfg.limit, cfg.every_scene, cfg.start_scene, cfg.directory);
     return cfg;
 }
 
@@ -215,7 +217,7 @@ static void dump_debug_color_surface(VKState &state, const ColorSurfaceCacheInfo
 
     static uint32_t dumped_count = 0;
     static uint64_t last_dumped_scene = std::numeric_limits<uint64_t>::max();
-    if (dumped_count >= cfg.limit || last_dumped_scene == scene_timestamp || (scene_timestamp % cfg.every_scene) != 0)
+    if (scene_timestamp < cfg.start_scene || dumped_count >= cfg.limit || last_dumped_scene == scene_timestamp || (scene_timestamp % cfg.every_scene) != 0)
         return;
 
     const uint32_t bytes_per_pixel = vk::blockSize(info.texture.format) / vk::texelsPerBlock(info.texture.format);
@@ -229,18 +231,9 @@ static void dump_debug_color_surface(VKState &state, const ColorSurfaceCacheInfo
     temp_buffer.init_buffer(vk::BufferUsageFlagBits::eTransferDst, vkutil::vma_mapped_alloc);
 
     vk::CommandBuffer cmd_buffer = vkutil::create_single_time_command(state.device, state.general_command_pool);
-    vk::ImageMemoryBarrier copy_src_barrier{
-        .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
-        .dstAccessMask = vk::AccessFlagBits::eTransferRead,
-        .oldLayout = vk::ImageLayout::eGeneral,
-        .newLayout = vk::ImageLayout::eGeneral,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = info.texture.image,
-        .subresourceRange = vkutil::color_subresource_range
-    };
-    cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::PipelineStageFlagBits::eTransfer,
-        vk::DependencyFlags(), {}, {}, copy_src_barrier);
+    const vkutil::ImageLayout original_layout = info.texture.layout;
+    if (original_layout != vkutil::ImageLayout::TransferSrc)
+        vkutil::transition_image_layout(cmd_buffer, info.texture.image, original_layout, vkutil::ImageLayout::TransferSrc);
 
     vk::BufferImageCopy image_copy{
         .bufferOffset = 0,
@@ -250,7 +243,10 @@ static void dump_debug_color_surface(VKState &state, const ColorSurfaceCacheInfo
         .imageOffset = { 0, 0, 0 },
         .imageExtent = { info.width, info.height, 1 }
     };
-    cmd_buffer.copyImageToBuffer(info.texture.image, vk::ImageLayout::eGeneral, temp_buffer.buffer, image_copy);
+    cmd_buffer.copyImageToBuffer(info.texture.image, vk::ImageLayout::eTransferSrcOptimal, temp_buffer.buffer, image_copy);
+
+    if (original_layout != vkutil::ImageLayout::TransferSrc)
+        vkutil::transition_image_layout(cmd_buffer, info.texture.image, vkutil::ImageLayout::TransferSrc, original_layout);
 
     vkutil::end_single_time_command(state.device, state.general_queue, state.general_command_pool, cmd_buffer);
 
@@ -746,7 +742,19 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
             return TextureLookupResult{
                 info.texture.view,
                 info.texture.layout,
-                info.texture.format
+                info.texture.format,
+                TextureLookupDebugInfo{
+                    .source = TextureLookupDebugSource::ColorSurface,
+                    .mode = TextureLookupDebugMode::ViewportDirect,
+                    .texture_addr = address,
+                    .surface_addr = ite->first,
+                    .texture_width = original_width,
+                    .texture_height = original_height,
+                    .source_width = info.original_width,
+                    .source_height = info.original_height,
+                    .requested_format = static_cast<uint32_t>(base_format),
+                    .image_format = static_cast<uint32_t>(info.texture.format)
+                }
             };
         }
 
@@ -771,7 +779,19 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         return TextureLookupResult{
             info.alternate_view,
             info.texture.layout,
-            info.texture.format
+            info.texture.format,
+            TextureLookupDebugInfo{
+                .source = TextureLookupDebugSource::ColorSurface,
+                .mode = TextureLookupDebugMode::ViewportAlt,
+                .texture_addr = address,
+                .surface_addr = ite->first,
+                .texture_width = original_width,
+                .texture_height = original_height,
+                .source_width = info.original_width,
+                .source_height = info.original_height,
+                .requested_format = static_cast<uint32_t>(base_format),
+                .image_format = static_cast<uint32_t>(info.texture.format)
+            }
         };
     }
 
@@ -797,7 +817,19 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                     return TextureLookupResult{
                         casted->texture.view,
                         casted->texture.layout,
-                        casted->texture.format
+                        casted->texture.format,
+                        TextureLookupDebugInfo{
+                            .source = TextureLookupDebugSource::ColorSurface,
+                            .mode = TextureLookupDebugMode::CastedReuse,
+                            .texture_addr = address,
+                            .surface_addr = ite->first,
+                            .texture_width = original_width,
+                            .texture_height = original_height,
+                            .source_width = info.original_width,
+                            .source_height = info.original_height,
+                            .requested_format = static_cast<uint32_t>(base_format),
+                            .image_format = static_cast<uint32_t>(casted->texture.format)
+                        }
                     };
                 }
 
@@ -917,7 +949,19 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         return TextureLookupResult{
             casted->texture.view,
             casted->texture.layout,
-            casted->texture.format
+            casted->texture.format,
+            TextureLookupDebugInfo{
+                .source = TextureLookupDebugSource::ColorSurface,
+                .mode = TextureLookupDebugMode::CastedCopy,
+                .texture_addr = address,
+                .surface_addr = ite->first,
+                .texture_width = original_width,
+                .texture_height = original_height,
+                .source_width = info.original_width,
+                .source_height = info.original_height,
+                .requested_format = static_cast<uint32_t>(base_format),
+                .image_format = static_cast<uint32_t>(casted->texture.format)
+            }
         };
     } else {
         // the renderpass external dependencies should take care of the barrier
@@ -930,7 +974,19 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
             return TextureLookupResult{
                 info.texture.view,
                 info.texture.layout,
-                info.texture.format
+                info.texture.format,
+                TextureLookupDebugInfo{
+                    .source = TextureLookupDebugSource::ColorSurface,
+                    .mode = TextureLookupDebugMode::Direct,
+                    .texture_addr = address,
+                    .surface_addr = ite->first,
+                    .texture_width = original_width,
+                    .texture_height = original_height,
+                    .source_width = info.original_width,
+                    .source_height = info.original_height,
+                    .requested_format = static_cast<uint32_t>(base_format),
+                    .image_format = static_cast<uint32_t>(info.texture.format)
+                }
             };
         }
 
@@ -954,7 +1010,19 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         return TextureLookupResult{
             info.alternate_view,
             vkutil::ImageLayout::ColorAttachmentReadWrite,
-            vk_format
+            vk_format,
+            TextureLookupDebugInfo{
+                .source = TextureLookupDebugSource::ColorSurface,
+                .mode = TextureLookupDebugMode::DirectAlt,
+                .texture_addr = address,
+                .surface_addr = ite->first,
+                .texture_width = original_width,
+                .texture_height = original_height,
+                .source_width = info.original_width,
+                .source_height = info.original_height,
+                .requested_format = static_cast<uint32_t>(base_format),
+                .image_format = static_cast<uint32_t>(vk_format)
+            }
         };
     }
 }
@@ -1244,7 +1312,19 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
         return TextureLookupResult{
             img_view,
             vkutil::ImageLayout::DepthStencilReadOnly,
-            state.deep_stencil_use
+            state.deep_stencil_use,
+            TextureLookupDebugInfo{
+                .source = TextureLookupDebugSource::DepthStencil,
+                .mode = TextureLookupDebugMode::DepthDirect,
+                .texture_addr = address,
+                .surface_addr = surface_address,
+                .texture_width = static_cast<uint32_t>(memory_width),
+                .texture_height = static_cast<uint32_t>(memory_height),
+                .source_width = static_cast<uint32_t>(cached_info.memory_width),
+                .source_height = static_cast<uint32_t>(cached_info.memory_height),
+                .requested_format = static_cast<uint32_t>(base_format),
+                .image_format = static_cast<uint32_t>(state.deep_stencil_use)
+            }
         };
     }
 
@@ -1328,7 +1408,19 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
         return TextureLookupResult{
             img_view.view,
             img_view.layout,
-            img_view.format
+            img_view.format,
+            TextureLookupDebugInfo{
+                .source = TextureLookupDebugSource::DepthStencil,
+                .mode = TextureLookupDebugMode::DepthCopyReuse,
+                .texture_addr = address,
+                .surface_addr = surface_address,
+                .texture_width = static_cast<uint32_t>(memory_width),
+                .texture_height = static_cast<uint32_t>(memory_height),
+                .source_width = static_cast<uint32_t>(cached_info.memory_width),
+                .source_height = static_cast<uint32_t>(cached_info.memory_height),
+                .requested_format = static_cast<uint32_t>(base_format),
+                .image_format = static_cast<uint32_t>(img_view.format)
+            }
         };
     }
 
@@ -1382,7 +1474,19 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
     return TextureLookupResult{
         img_view.view,
         img_view.layout,
-        img_view.format
+        img_view.format,
+        TextureLookupDebugInfo{
+            .source = TextureLookupDebugSource::DepthStencil,
+            .mode = TextureLookupDebugMode::DepthCopy,
+            .texture_addr = address,
+            .surface_addr = surface_address,
+            .texture_width = static_cast<uint32_t>(memory_width),
+            .texture_height = static_cast<uint32_t>(memory_height),
+            .source_width = static_cast<uint32_t>(cached_info.memory_width),
+            .source_height = static_cast<uint32_t>(cached_info.memory_height),
+            .requested_format = static_cast<uint32_t>(base_format),
+            .image_format = static_cast<uint32_t>(img_view.format)
+        }
     };
 }
 

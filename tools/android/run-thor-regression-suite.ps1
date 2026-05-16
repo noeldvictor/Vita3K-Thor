@@ -5,6 +5,7 @@ param(
     [string]$Serial = "c3ca0370",
     [string]$OutDir = "tmp/regression-runs",
     [string]$KnowledgeDb = "reports/debug_knowledge.sqlite",
+    [string]$DisplayId = "",
     [switch]$NoKnowledgeEntry,
     [switch]$NoAnalyze,
     [switch]$NoForceStop,
@@ -240,8 +241,7 @@ function Add-KnowledgeEntry($GameConfig, [string]$Status, [string]$Commit, [stri
 
     $summary = "Automated Thor regression $Status - $($GameConfig.name)"
     $args = @(
-        "tools/debug_knowledge.py", "entry", "add",
-        "--db", $KnowledgeDb,
+        "tools/debug_knowledge.py", "--db", $KnowledgeDb, "entry", "add",
         "--case", [string]$GameConfig.case,
         "--type", "regression",
         "--platform", "android-thor",
@@ -353,9 +353,14 @@ try {
                         $topic = if ($step.topic) { [string]$step.topic } else { "$gameSlug-burst" }
                         $count = if ($step.count) { [int]$step.count } else { 10 }
                         $intervalMs = if ($step.intervalMs) { [int]$step.intervalMs } else { 350 }
+                        $stepDisplayId = if ($step.displayId) { [string]$step.displayId } elseif ($GameConfig.displayId) { [string]$GameConfig.displayId } else { $DisplayId }
                         $logPath = Join-Path $gameDir ("burst-{0}.txt" -f (Slug $topic))
                         $output = Invoke-ToolCapture -LogPath $logPath -Call {
-                            & $captureBurstScript -Adb $Adb -Serial $Serial -Topic $topic -Count $count -IntervalMs $intervalMs
+                            if ([string]::IsNullOrWhiteSpace($stepDisplayId)) {
+                                & $captureBurstScript -Adb $Adb -Serial $Serial -Topic $topic -Count $count -IntervalMs $intervalMs
+                            } else {
+                                & $captureBurstScript -Adb $Adb -Serial $Serial -Topic $topic -Count $count -IntervalMs $intervalMs -DisplayId $stepDisplayId
+                            }
                         }
                         $burstLine = @($output | Where-Object { $_ -match "Wrote Thor burst:\s*(?<path>.+)$" } | Select-Object -Last 1)
                         if ($burstLine.Count -gt 0) {

@@ -10,6 +10,9 @@ param(
     [string]$DumpSurfaceDir = "",
     [int]$DumpSurfaceLimit = 24,
     [int]$DumpSurfaceEvery = 1,
+    [int]$DumpSurfaceStartScene = 0,
+    [string]$ForceDepthLequalHash = "",
+    [string]$UseBackDepthWriteHash = "",
     [string]$ControlFile = "",
     [ValidateSet("Vulkan", "OpenGL")]
     [string]$BackendRenderer = "Vulkan",
@@ -95,19 +98,17 @@ $env:VITA3K_RENDER_TRACE_LIMIT = [string]$TraceLimit
 $env:VITA3K_RENDER_CONTROL_FILE = $ControlFile
 $env:VITA3K_RUNTIME_CONTROL_FILE = $ControlFile
 
-if (-not (Test-Path -LiteralPath $ControlFile)) {
-    @(
-        "# Edit while Vita3K is running; values update live."
-        "trace=1"
-        "trace_limit=$TraceLimit"
-        "labels=$([int](-not $NoLabels))"
-        "skip="
-        "stop_after="
-        "dump="
-        "action="
-        "action_id="
-    ) | Set-Content -LiteralPath $ControlFile -Encoding UTF8
-}
+@(
+    "# Edit while Vita3K is running; values update live."
+    "trace=1"
+    "trace_limit=$TraceLimit"
+    "labels=$([int](-not $NoLabels))"
+    "skip=$Skip"
+    "stop_after=$StopAfter"
+    "dump=$Dump"
+    "action="
+    "action_id="
+) | Set-Content -LiteralPath $ControlFile -Encoding UTF8
 
 if ($NoLabels) {
     Remove-Item Env:\VITA3K_RENDER_LABELS -ErrorAction SilentlyContinue
@@ -133,6 +134,18 @@ if ($Dump) {
     Remove-Item Env:\VITA3K_RENDER_DUMP -ErrorAction SilentlyContinue
 }
 
+if ($ForceDepthLequalHash) {
+    $env:VITA3K_RENDER_FORCE_DEPTH_LEQUAL_FHASH = $ForceDepthLequalHash
+} else {
+    Remove-Item Env:\VITA3K_RENDER_FORCE_DEPTH_LEQUAL_FHASH -ErrorAction SilentlyContinue
+}
+
+if ($UseBackDepthWriteHash) {
+    $env:VITA3K_RENDER_USE_BACK_DEPTH_WRITE_FHASH = $UseBackDepthWriteHash
+} else {
+    Remove-Item Env:\VITA3K_RENDER_USE_BACK_DEPTH_WRITE_FHASH -ErrorAction SilentlyContinue
+}
+
 if ($DumpSurfaceAddr) {
     if (-not $DumpSurfaceDir) {
         $DumpSurfaceDir = Join-Path $debugRoot "surface-dumps"
@@ -142,14 +155,18 @@ if ($DumpSurfaceAddr) {
     $env:VITA3K_RENDER_DUMP_SURFACE_DIR = $DumpSurfaceDir
     $env:VITA3K_RENDER_DUMP_SURFACE_LIMIT = [string]$DumpSurfaceLimit
     $env:VITA3K_RENDER_DUMP_SURFACE_EVERY = [string]([Math]::Max(1, $DumpSurfaceEvery))
+    $env:VITA3K_RENDER_DUMP_SURFACE_START_SCENE = [string]([Math]::Max(0, $DumpSurfaceStartScene))
 } else {
     Remove-Item Env:\VITA3K_RENDER_DUMP_SURFACE_ADDR -ErrorAction SilentlyContinue
     Remove-Item Env:\VITA3K_RENDER_DUMP_SURFACE_DIR -ErrorAction SilentlyContinue
     Remove-Item Env:\VITA3K_RENDER_DUMP_SURFACE_LIMIT -ErrorAction SilentlyContinue
     Remove-Item Env:\VITA3K_RENDER_DUMP_SURFACE_EVERY -ErrorAction SilentlyContinue
+    Remove-Item Env:\VITA3K_RENDER_DUMP_SURFACE_START_SCENE -ErrorAction SilentlyContinue
 }
 
 $argumentLine = "--config-location `"$LaunchConfigPath`" --cartridge --backend-renderer $BackendRenderer --log-level $LogLevel --thor-render-trace `"$GameZip`""
+$stdoutLog = Join-Path $debugRoot "vita3k.stdout.log"
+$stderrLog = Join-Path $debugRoot "vita3k.stderr.log"
 
 Write-Host "Vita3K Windows render debug:"
 Write-Host "  exe:        $ExePath"
@@ -166,9 +183,14 @@ Write-Host "  labels:     $(-not $NoLabels)"
 Write-Host "  skip:       $Skip"
 Write-Host "  stopAfter:  $StopAfter"
 Write-Host "  dump:       $Dump"
+Write-Host "  depthLEQ:   $ForceDepthLequalHash"
+Write-Host "  backWrite:  $UseBackDepthWriteHash"
 Write-Host "  surface:    $DumpSurfaceAddr"
 Write-Host "  surfaceDir: $DumpSurfaceDir"
+Write-Host "  surfaceStartScene: $DumpSurfaceStartScene"
+Write-Host "  stdout:     $stdoutLog"
+Write-Host "  stderr:     $stderrLog"
 
 if (-not $NoStart) {
-    Start-Process -FilePath $ExePath -ArgumentList $argumentLine -WorkingDirectory (Split-Path $ExePath)
+    Start-Process -FilePath $ExePath -ArgumentList $argumentLine -WorkingDirectory (Split-Path $ExePath) -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
 }
