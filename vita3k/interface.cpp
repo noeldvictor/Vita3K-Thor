@@ -1013,6 +1013,47 @@ struct QuickStateDiskHeader {
     uint32_t allocation_page_count = 0;
 };
 
+struct QuickStateKernelObjectCounts {
+    size_t threads = 0;
+    size_t cpu_threads = 0;
+    size_t timers = 0;
+    size_t semaphores = 0;
+    size_t condvars = 0;
+    size_t lwcondvars = 0;
+    size_t mutexes = 0;
+    size_t lwmutexes = 0;
+    size_t rwlocks = 0;
+    size_t eventflags = 0;
+    size_t msgpipes = 0;
+    size_t callbacks = 0;
+    size_t simple_events = 0;
+    size_t loaded_modules = 0;
+};
+
+struct QuickStateIOCounts {
+    size_t tty_files = 0;
+    size_t std_files = 0;
+    size_t dir_entries = 0;
+    size_t overlays = 0;
+    size_t archive_entries = 0;
+    size_t archive_dirs = 0;
+};
+
+struct QuickStateRestoreManifest {
+    uint32_t format_version = QUICKSTATE_VERSION;
+    uint64_t guest_memory_bytes = 0;
+    size_t memory_pages = 0;
+    size_t allocator_words = 0;
+    size_t allocation_pages = 0;
+    size_t thread_contexts = 0;
+    size_t avplayer_threads = 0;
+    QuickStateKernelObjectCounts kernel;
+    QuickStateIOCounts io;
+    std::vector<std::string> missing_serializers;
+    bool restore_enabled = false;
+    std::string block_reason;
+};
+
 static fs::path quick_state_root(EmuEnvState &emuenv) {
     if (emuenv.cfg.save_state_dir.empty())
         return emuenv.shared_path / "states";
@@ -1689,13 +1730,108 @@ static void reset_quick_state_runtime_render_state(EmuEnvState &emuenv) {
         texture_cache->reset_runtime_cache();
 }
 
+static std::string quick_state_join_strings(const std::vector<std::string> &values) {
+    if (values.empty())
+        return "none";
+
+    std::string joined = values.front();
+    for (size_t i = 1; i < values.size(); i++) {
+        joined += ", ";
+        joined += values[i];
+    }
+    return joined;
+}
+
+static size_t quick_state_count_avplayer_threads(const QuickStateSlot &slot) {
+    return static_cast<size_t>(std::count_if(slot.thread_contexts.begin(), slot.thread_contexts.end(), [](const QuickStateThreadContext &thread) {
+        return thread.name.rfind("avPlayer ", 0) == 0;
+    }));
+}
+
+static QuickStateKernelObjectCounts quick_state_count_kernel_objects(EmuEnvState &emuenv) {
+    QuickStateKernelObjectCounts counts;
+    const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
+
+    counts.threads = emuenv.kernel.threads.size();
+    for (const auto &[_, thread] : emuenv.kernel.threads) {
+        if (thread->cpu)
+            counts.cpu_threads++;
+    }
+    counts.timers = emuenv.kernel.timers.size();
+    counts.semaphores = emuenv.kernel.semaphores.size();
+    counts.condvars = emuenv.kernel.condvars.size();
+    counts.lwcondvars = emuenv.kernel.lwcondvars.size();
+    counts.mutexes = emuenv.kernel.mutexes.size();
+    counts.lwmutexes = emuenv.kernel.lwmutexes.size();
+    counts.rwlocks = emuenv.kernel.rwlocks.size();
+    counts.eventflags = emuenv.kernel.eventflags.size();
+    counts.msgpipes = emuenv.kernel.msgpipes.size();
+    counts.callbacks = emuenv.kernel.callbacks.size();
+    counts.simple_events = emuenv.kernel.simple_events.size();
+    counts.loaded_modules = emuenv.kernel.loaded_modules.size();
+
+    return counts;
+}
+
+static QuickStateIOCounts quick_state_count_io_objects(EmuEnvState &emuenv) {
+    QuickStateIOCounts counts;
+    counts.tty_files = emuenv.io.tty_files.size();
+    counts.std_files = emuenv.io.std_files.size();
+    counts.dir_entries = emuenv.io.dir_entries.size();
+    counts.archive_entries = emuenv.io.app0_archive.entries.size();
+    for (const auto &[_, entry] : emuenv.io.app0_archive.entries) {
+        if (entry.directory)
+            counts.archive_dirs++;
+    }
+    {
+        const std::lock_guard<std::mutex> overlay_lock(emuenv.io.overlay_mutex);
+        counts.overlays = emuenv.io.overlays.size();
+    }
+    return counts;
+}
+
+static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    QuickStateRestoreManifest manifest;
+    manifest.guest_memory_bytes = slot.byte_count;
+    manifest.memory_pages = slot.memory_pages.size();
+    manifest.allocator_words = slot.allocator_words.size();
+    manifest.allocation_pages = slot.allocation_pages.size();
+    manifest.thread_contexts = slot.thread_contexts.size();
+    manifest.avplayer_threads = quick_state_count_avplayer_threads(slot);
+    manifest.kernel = quick_state_count_kernel_objects(emuenv);
+    manifest.io = quick_state_count_io_objects(emuenv);
+
+    manifest.missing_serializers = {
+        "kernel-thread-lifecycle",
+        "kernel-wait-objects",
+        "host-syscall-state",
+        "timing-clocks",
+        "io-vfs-handles",
+        "gpu-display-state",
+        "renderer-resources",
+        "audio-state",
+    };
+    if (manifest.avplayer_threads > 0)
+        manifest.missing_serializers.push_back("avplayer-movie-state");
+
+    manifest.restore_enabled = manifest.missing_serializers.empty() && !slot.restore_requires_same_pause;
+    if (manifest.restore_enabled) {
+        manifest.block_reason = "all mandatory quickstate serializers are present";
+    } else {
+        manifest.block_reason = fmt::format("restore disabled by Windows stability gate; missing serializers: {}",
+            quick_state_join_strings(manifest.missing_serializers));
+    }
+
+    return manifest;
+}
+
 static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     if (!slot.valid || (slot.title_id != emuenv.io.title_id))
         return false;
 
     if (slot.restore_requires_same_pause) {
-        LOG_WARN("Refused quickstate restore for {} because restore is disabled in the Windows stability gate. Current captures are disk-backed diagnostics until kernel wait objects, host syscall state, GPU/display state, audio, IO/VFS handles, and AVPlayer/movie state are serialized.",
-            slot.title_id);
+        const auto manifest = build_quick_state_restore_manifest(emuenv, slot);
+        LOG_WARN("Refused quickstate restore for {} because {}.", slot.title_id, manifest.block_reason);
         return false;
     }
 
@@ -1750,27 +1886,52 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     return true;
 }
 
-static bool quick_state_has_avplayer_threads(const QuickStateSlot &slot) {
-    return std::any_of(slot.thread_contexts.begin(), slot.thread_contexts.end(), [](const QuickStateThreadContext &thread) {
-        return thread.name.rfind("avPlayer ", 0) == 0;
-    });
-}
-
 static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &slot) {
     const fs::path state_dir = quick_state_dir(emuenv, slot.title_id);
     fs::create_directories(state_dir);
+    const auto manifest = build_quick_state_restore_manifest(emuenv, slot);
     fs::ofstream marker(quick_state_marker_file(emuenv, slot.title_id));
-    marker << "Vita3K Thor durable quickstate\n";
+    marker << "Vita3K Thor quickstate capture\n";
     marker << "Title ID: " << slot.title_id << "\n";
     marker << "Title: " << slot.title << "\n";
+    marker << "Format version: " << manifest.format_version << "\n";
     marker << "Guest memory bytes: " << slot.byte_count << "\n";
+    marker << "Guest memory pages: " << manifest.memory_pages << "\n";
     marker << "Thread contexts: " << slot.thread_contexts.size() << "\n";
+    marker << "AVPlayer threads: " << manifest.avplayer_threads << "\n";
+    marker << "Allocator words: " << manifest.allocator_words << "\n";
+    marker << "Allocation pages: " << manifest.allocation_pages << "\n";
     marker << "Compression level: " << std::clamp(emuenv.cfg.save_state_compression_level, 0, 9) << "\n";
     marker << "State file bytes: " << quick_state_file_size(emuenv, slot.title_id) << "\n";
     marker << "State root: " << quick_state_root(emuenv) << "\n";
     marker << "State file: " << quick_state_file(emuenv, slot.title_id) << "\n";
-    marker << "Restore guard: loading is currently disabled by the Windows stability gate.\n";
-    marker << "Note: this is an experimental disk-backed state and still needs full GPU/audio/IO/kernel-object serialization for emulator-perfect resumes.\n";
+    marker << "\nRestore readiness\n";
+    marker << "Restore enabled: " << (manifest.restore_enabled ? "yes" : "no") << "\n";
+    marker << "Block reason: " << manifest.block_reason << "\n";
+    marker << "Missing serializers: " << quick_state_join_strings(manifest.missing_serializers) << "\n";
+    marker << "\nKernel object snapshot at manifest time\n";
+    marker << "Threads: " << manifest.kernel.threads << "\n";
+    marker << "CPU threads: " << manifest.kernel.cpu_threads << "\n";
+    marker << "Timers: " << manifest.kernel.timers << "\n";
+    marker << "Semaphores: " << manifest.kernel.semaphores << "\n";
+    marker << "Condvars: " << manifest.kernel.condvars << "\n";
+    marker << "Lightweight condvars: " << manifest.kernel.lwcondvars << "\n";
+    marker << "Mutexes: " << manifest.kernel.mutexes << "\n";
+    marker << "Lightweight mutexes: " << manifest.kernel.lwmutexes << "\n";
+    marker << "RW locks: " << manifest.kernel.rwlocks << "\n";
+    marker << "Event flags: " << manifest.kernel.eventflags << "\n";
+    marker << "Message pipes: " << manifest.kernel.msgpipes << "\n";
+    marker << "Callbacks: " << manifest.kernel.callbacks << "\n";
+    marker << "Simple events: " << manifest.kernel.simple_events << "\n";
+    marker << "Loaded modules: " << manifest.kernel.loaded_modules << "\n";
+    marker << "\nIO/VFS snapshot at manifest time\n";
+    marker << "TTY files: " << manifest.io.tty_files << "\n";
+    marker << "Open std files: " << manifest.io.std_files << "\n";
+    marker << "Open directories: " << manifest.io.dir_entries << "\n";
+    marker << "Active overlays: " << manifest.io.overlays << "\n";
+    marker << "Archive entries: " << manifest.io.archive_entries << "\n";
+    marker << "Archive directories: " << manifest.io.archive_dirs << "\n";
+    marker << "\nNote: this is an experimental disk-backed capture. It is not PPSSPP-style load reliability yet; restore stays gated until the missing serializer list is actually implemented and proven stable on Windows.\n";
 }
 
 } // namespace
@@ -1794,15 +1955,15 @@ std::string runtime_quick_state_slot_status(EmuEnvState &emuenv) {
         const bool has_disk_state = read_quick_state_disk_header(emuenv, title_id, header);
         if (has_disk_state) {
             const uint64_t disk_size = quick_state_file_size(emuenv, title_id);
-            return fmt::format("disk-backed {} MiB ({} MiB raw)", disk_size / (1024 * 1024), quick_state_slot0.byte_count / (1024 * 1024));
+            return fmt::format("capture {} MiB, load gated ({} MiB raw)", disk_size / (1024 * 1024), quick_state_slot0.byte_count / (1024 * 1024));
         }
-        return fmt::format("RAM {} MiB", quick_state_slot0.byte_count / (1024 * 1024));
+        return fmt::format("RAM capture {} MiB, load gated", quick_state_slot0.byte_count / (1024 * 1024));
     }
 
     QuickStateDiskHeader header;
     if (read_quick_state_disk_header(emuenv, title_id, header)) {
         const uint64_t disk_size = quick_state_file_size(emuenv, title_id);
-        return fmt::format("disk {} MiB ({} MiB raw)", disk_size / (1024 * 1024), header.byte_count / (1024 * 1024));
+        return fmt::format("disk capture {} MiB, load gated ({} MiB raw)", disk_size / (1024 * 1024), header.byte_count / (1024 * 1024));
     }
 
     return "empty";
@@ -1889,8 +2050,34 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
         }
     }
 
-    if (loaded_from_disk && quick_state_has_avplayer_threads(quick_state_slot0)) {
-        LOG_WARN("Refused disk-backed quickstate restore for {} because this state contains AVPlayer movie/audio threads. Restore remains disabled in the Windows stability gate until AVPlayer host object serialization is safe.", title_id);
+    if (!quick_state_slot0.valid || (quick_state_slot0.title_id != title_id)) {
+        LOG_WARN("No quickstate slot 0 is available for {}", title_id);
+        return;
+    }
+
+    const auto manifest = build_quick_state_restore_manifest(emuenv, quick_state_slot0);
+    if (!manifest.restore_enabled) {
+        LOG_WARN("Refused quickstate slot 0 restore for {} because {}.", title_id, manifest.block_reason);
+        LOG_INFO("Quickstate slot 0 manifest for {}: guest={} MiB, pages={}, saved_threads={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
+            title_id,
+            manifest.guest_memory_bytes / (1024 * 1024),
+            manifest.memory_pages,
+            manifest.thread_contexts,
+            manifest.kernel.cpu_threads,
+            manifest.kernel.timers,
+            manifest.kernel.semaphores,
+            manifest.kernel.condvars,
+            manifest.kernel.lwcondvars,
+            manifest.kernel.mutexes,
+            manifest.kernel.lwmutexes,
+            manifest.kernel.eventflags,
+            manifest.kernel.msgpipes,
+            manifest.kernel.callbacks,
+            manifest.io.std_files,
+            manifest.io.dir_entries,
+            manifest.io.overlays,
+            manifest.io.archive_entries,
+            manifest.avplayer_threads);
         return;
     }
 
