@@ -1060,6 +1060,24 @@ struct QuickStateTimingSnapshot {
     uint64_t speed_anchor_guest_process_us = 0;
 };
 
+struct QuickStateThreadMetadata {
+    SceUID id = 0;
+    std::string name;
+    std::string status;
+    Address entry_point = 0;
+    Address stack_address = 0;
+    uint32_t stack_size = 0;
+    Address tls_address = 0;
+    int priority = 0;
+    SceInt32 affinity_mask = 0;
+    uint64_t start_tick = 0;
+    uint64_t last_vblank_waited = 0;
+    uint32_t returned_value = 0;
+    bool is_processing_callbacks = false;
+    uint32_t callback_count = 0;
+    uint32_t waiting_thread_count = 0;
+};
+
 struct QuickStateRestoreManifest {
     uint32_t format_version = QUICKSTATE_VERSION;
     uint64_t guest_memory_bytes = 0;
@@ -1070,6 +1088,7 @@ struct QuickStateRestoreManifest {
     size_t avplayer_threads = 0;
     std::vector<std::string> captured_sections;
     bool timing_restorable = false;
+    bool thread_metadata_restorable = false;
     QuickStateKernelObjectCounts kernel;
     QuickStateIOCounts io;
     std::vector<std::string> missing_serializers;
@@ -1878,6 +1897,81 @@ static bool quick_state_parse_u32(const std::map<std::string, std::string> &valu
     return true;
 }
 
+static bool quick_state_parse_i32_text(const std::string &text, int32_t &out) {
+    if (text.empty())
+        return false;
+
+    size_t consumed = 0;
+    long parsed = 0;
+    try {
+        parsed = std::stol(text, &consumed, 10);
+    } catch (...) {
+        return false;
+    }
+    if (consumed != text.size() || parsed < std::numeric_limits<int32_t>::min() || parsed > std::numeric_limits<int32_t>::max())
+        return false;
+    out = static_cast<int32_t>(parsed);
+    return true;
+}
+
+static bool quick_state_parse_u32_text(const std::string &text, uint32_t &out) {
+    if (text.empty())
+        return false;
+
+    size_t consumed = 0;
+    unsigned long parsed = 0;
+    try {
+        parsed = std::stoul(text, &consumed, 10);
+    } catch (...) {
+        return false;
+    }
+    if (consumed != text.size() || parsed > std::numeric_limits<uint32_t>::max())
+        return false;
+    out = static_cast<uint32_t>(parsed);
+    return true;
+}
+
+static bool quick_state_parse_u64_text(const std::string &text, uint64_t &out, const int base = 10) {
+    if (text.empty())
+        return false;
+
+    size_t consumed = 0;
+    try {
+        out = std::stoull(text, &consumed, base);
+    } catch (...) {
+        return false;
+    }
+    return consumed == text.size();
+}
+
+static bool quick_state_parse_bool_text(const std::string &text, bool &out) {
+    if (text == "1" || text == "true") {
+        out = true;
+        return true;
+    }
+    if (text == "0" || text == "false") {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+static std::map<std::string, std::string> quick_state_parse_semicolon_fields(const std::string &text) {
+    std::map<std::string, std::string> fields;
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t end = text.find(';', start);
+        const std::string item = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        const size_t separator = item.find('=');
+        if (separator != std::string::npos)
+            fields[item.substr(0, separator)] = item.substr(separator + 1);
+        if (end == std::string::npos)
+            break;
+        start = end + 1;
+    }
+    return fields;
+}
+
 static bool quick_state_parse_timing_snapshot(const QuickStateSlot &slot, QuickStateTimingSnapshot &timing) {
     timing = {};
     const QuickStateSection *section = quick_state_find_section(slot, "thor.timing");
@@ -1904,6 +1998,106 @@ static bool quick_state_parse_timing_snapshot(const QuickStateSlot &slot, QuickS
 
     timing.valid = true;
     return true;
+}
+
+static bool quick_state_parse_thread_id_from_key(const std::string &key, SceUID &thread_id) {
+    constexpr std::string_view prefix = "thread.";
+    constexpr std::string_view suffix = ".name";
+    if (key.rfind(prefix, 0) != 0 || key.size() <= prefix.size() + suffix.size())
+        return false;
+    if (key.compare(key.size() - suffix.size(), suffix.size(), suffix) != 0)
+        return false;
+
+    const std::string id_text = key.substr(prefix.size(), key.size() - prefix.size() - suffix.size());
+    int32_t parsed_id = 0;
+    if (!quick_state_parse_i32_text(id_text, parsed_id) || parsed_id <= 0)
+        return false;
+    thread_id = static_cast<SceUID>(parsed_id);
+    return true;
+}
+
+static bool quick_state_parse_thread_metadata(const std::map<std::string, std::string> &values, const std::string &key, const std::string &value, QuickStateThreadMetadata &metadata) {
+    if (!quick_state_parse_thread_id_from_key(key, metadata.id))
+        return false;
+
+    const auto fields = quick_state_parse_semicolon_fields("name=" + value);
+    const auto required_fields = {
+        "name",
+        "status",
+        "entry",
+        "stack",
+        "stack_size",
+        "tls",
+        "priority",
+        "affinity",
+        "start_tick",
+        "last_vblank_waited",
+        "returned_value",
+        "processing_callbacks",
+        "callbacks",
+        "waiting_threads",
+    };
+    for (const auto required : required_fields) {
+        if (!fields.contains(required))
+            return false;
+    }
+
+    metadata.name = fields.at("name");
+    metadata.status = fields.at("status");
+    uint64_t parsed_hex = 0;
+    uint32_t parsed_u32 = 0;
+    int32_t parsed_i32 = 0;
+    if (!quick_state_parse_u64_text(fields.at("entry"), parsed_hex, 0))
+        return false;
+    metadata.entry_point = static_cast<Address>(parsed_hex);
+    if (!quick_state_parse_u64_text(fields.at("stack"), parsed_hex, 0))
+        return false;
+    metadata.stack_address = static_cast<Address>(parsed_hex);
+    if (!quick_state_parse_u32_text(fields.at("stack_size"), metadata.stack_size))
+        return false;
+    if (!quick_state_parse_u64_text(fields.at("tls"), parsed_hex, 0))
+        return false;
+    metadata.tls_address = static_cast<Address>(parsed_hex);
+    if (!quick_state_parse_i32_text(fields.at("priority"), parsed_i32))
+        return false;
+    metadata.priority = parsed_i32;
+    if (!quick_state_parse_i32_text(fields.at("affinity"), parsed_i32))
+        return false;
+    metadata.affinity_mask = parsed_i32;
+    if (!quick_state_parse_u64_text(fields.at("start_tick"), metadata.start_tick)
+        || !quick_state_parse_u64_text(fields.at("last_vblank_waited"), metadata.last_vblank_waited)
+        || !quick_state_parse_u32_text(fields.at("returned_value"), metadata.returned_value)
+        || !quick_state_parse_bool_text(fields.at("processing_callbacks"), metadata.is_processing_callbacks)
+        || !quick_state_parse_u32_text(fields.at("callbacks"), metadata.callback_count)
+        || !quick_state_parse_u32_text(fields.at("waiting_threads"), metadata.waiting_thread_count)) {
+        return false;
+    }
+
+    return true;
+}
+
+static bool quick_state_parse_thread_metadata_section(const QuickStateSlot &slot, std::map<SceUID, QuickStateThreadMetadata> &metadata_by_id) {
+    metadata_by_id.clear();
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.kernel.objects");
+    if (!section || section->version != 1)
+        return false;
+
+    const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    if (schema == values.end() || schema->second != "thor.kernel.objects.v1")
+        return false;
+
+    for (const auto &[key, value] : values) {
+        if (key.rfind("thread.", 0) != 0)
+            continue;
+
+        QuickStateThreadMetadata metadata;
+        if (!quick_state_parse_thread_metadata(values, key, value, metadata))
+            return false;
+        metadata_by_id[metadata.id] = std::move(metadata);
+    }
+
+    return metadata_by_id.size() == slot.thread_contexts.size();
 }
 
 static std::string quick_state_thread_status_name(const ThreadStatus status) {
@@ -1979,6 +2173,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     manifest.captured_sections = quick_state_section_tags(slot);
     QuickStateTimingSnapshot timing;
     manifest.timing_restorable = quick_state_parse_timing_snapshot(slot, timing);
+    std::map<SceUID, QuickStateThreadMetadata> thread_metadata;
+    manifest.thread_metadata_restorable = quick_state_parse_thread_metadata_section(slot, thread_metadata);
     manifest.kernel = quick_state_count_kernel_objects(emuenv);
     manifest.io = quick_state_count_io_objects(emuenv);
 
@@ -1991,6 +2187,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         "renderer-resources",
         "audio-state",
     };
+    if (!manifest.thread_metadata_restorable)
+        manifest.missing_serializers.push_back("kernel-thread-metadata");
     if (!manifest.timing_restorable)
         manifest.missing_serializers.push_back("timing-clocks");
     if (manifest.avplayer_threads > 0)
@@ -2085,6 +2283,10 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";tls=0x" << std::hex << thread->tls.get() << std::dec
                  << ";priority=" << thread->priority
                  << ";affinity=" << thread->affinity_mask
+                 << ";start_tick=" << thread->start_tick
+                 << ";last_vblank_waited=" << thread->last_vblank_waited
+                 << ";returned_value=" << thread->returned_value
+                 << ";processing_callbacks=" << thread->is_processing_callbacks
                  << ";callbacks=" << thread->callbacks.size()
                  << ";waiting_threads=" << thread->waiting_threads.size()
                  << "\n";
@@ -2325,6 +2527,57 @@ static bool restore_quick_state_timing_state(EmuEnvState &emuenv, const QuickSta
     return true;
 }
 
+static bool restore_quick_state_thread_metadata(const QuickStateSlot &slot, const std::vector<ThreadStatePtr> &matched_threads) {
+    std::map<SceUID, QuickStateThreadMetadata> metadata_by_id;
+    if (!quick_state_parse_thread_metadata_section(slot, metadata_by_id)) {
+        LOG_WARN("Refused thread metadata restore for {} because the thor.kernel.objects thread metadata is missing or invalid.", slot.title_id);
+        return false;
+    }
+
+    if (matched_threads.size() != slot.thread_contexts.size()) {
+        LOG_WARN("Refused thread metadata restore for {} because matched thread count {} does not match saved context count {}.",
+            slot.title_id, matched_threads.size(), slot.thread_contexts.size());
+        return false;
+    }
+
+    for (size_t i = 0; i < slot.thread_contexts.size(); i++) {
+        const auto &thread_context = slot.thread_contexts[i];
+        const auto metadata = metadata_by_id.find(thread_context.id);
+        if (metadata == metadata_by_id.end()) {
+            LOG_WARN("Refused thread metadata restore for {} because saved thread {} ({}) has no metadata row.",
+                slot.title_id, thread_context.id, thread_context.name);
+            return false;
+        }
+
+        const QuickStateThreadMetadata &thread_metadata = metadata->second;
+        if ((thread_metadata.name != thread_context.name)
+            || (thread_metadata.entry_point != thread_context.entry_point)
+            || (thread_metadata.stack_address != thread_context.stack_address)
+            || (thread_metadata.stack_size != thread_context.stack_size)
+            || (thread_metadata.tls_address != thread_context.tls_address)) {
+            LOG_WARN("Refused thread metadata restore for {} because saved thread {} metadata does not match its CPU context record.",
+                slot.title_id, thread_context.id);
+            return false;
+        }
+    }
+
+    for (size_t i = 0; i < slot.thread_contexts.size(); i++) {
+        const auto &thread_context = slot.thread_contexts[i];
+        const QuickStateThreadMetadata &thread_metadata = metadata_by_id.at(thread_context.id);
+        const auto &thread = matched_threads[i];
+        const std::lock_guard<std::mutex> thread_lock(thread->mutex);
+        thread->priority = thread_metadata.priority;
+        thread->affinity_mask = thread_metadata.affinity_mask;
+        thread->start_tick = thread_metadata.start_tick;
+        thread->last_vblank_waited = thread_metadata.last_vblank_waited;
+        thread->returned_value = thread_metadata.returned_value;
+        thread->is_processing_callbacks = thread_metadata.is_processing_callbacks;
+    }
+
+    LOG_INFO("Restored thread metadata snapshot for {} ({} matched thread(s)).", slot.title_id, matched_threads.size());
+    return true;
+}
+
 static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     if (!slot.valid || (slot.title_id != emuenv.io.title_id))
         return false;
@@ -2372,6 +2625,11 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         return false;
     }
 
+    if (!restore_quick_state_thread_metadata(slot, matched_threads)) {
+        resume_after_quick_state(emuenv, already_paused);
+        return false;
+    }
+
     for (const auto &page : slot.memory_pages)
         std::memcpy(Ptr<uint8_t>(page.address).get(emuenv.mem), page.bytes.data(), page.bytes.size());
 
@@ -2414,6 +2672,7 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "\nRestore readiness\n";
     marker << "Restore enabled: " << (manifest.restore_enabled ? "yes" : "no") << "\n";
     marker << "Timing restore layer: " << (manifest.timing_restorable ? "ready" : "missing") << "\n";
+    marker << "Thread metadata restore layer: " << (manifest.thread_metadata_restorable ? "ready" : "missing") << "\n";
     marker << "Block reason: " << manifest.block_reason << "\n";
     marker << "Missing serializers: " << quick_state_join_strings(manifest.missing_serializers) << "\n";
     marker << "\nKernel object snapshot at manifest time\n";
@@ -2566,13 +2825,14 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
     const auto manifest = build_quick_state_restore_manifest(emuenv, quick_state_slot0);
     if (!manifest.restore_enabled) {
         LOG_WARN("Refused quickstate slot 0 restore for {} because {}.", title_id, manifest.block_reason);
-        LOG_INFO("Quickstate slot 0 manifest for {}: guest={} MiB, pages={}, saved_threads={}, sections={}, timing_restorable={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
+        LOG_INFO("Quickstate slot 0 manifest for {}: guest={} MiB, pages={}, saved_threads={}, sections={}, timing_restorable={}, thread_metadata_restorable={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
             title_id,
             manifest.guest_memory_bytes / (1024 * 1024),
             manifest.memory_pages,
             manifest.thread_contexts,
             quick_state_join_strings(manifest.captured_sections),
             manifest.timing_restorable,
+            manifest.thread_metadata_restorable,
             manifest.kernel.cpu_threads,
             manifest.kernel.timers,
             manifest.kernel.semaphores,
