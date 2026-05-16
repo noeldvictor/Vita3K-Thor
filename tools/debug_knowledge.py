@@ -25,6 +25,7 @@ DEFAULT_DB = Path("reports/debug_knowledge.sqlite")
 SCHEMA_VERSION = 3
 EMBED_DIM = 256
 TOKEN_RE = re.compile(r"[a-z0-9_]{2,}", re.IGNORECASE)
+FOCUS_CASE_META_KEY = "focus_case_id"
 
 
 def utc_now() -> str:
@@ -347,6 +348,64 @@ def resolve_case(conn: sqlite3.Connection, case_ref: str) -> sqlite3.Row:
     if row is None:
         raise SystemExit(f"Case not found: {case_ref}")
     return row
+
+
+def current_focus_case(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (FOCUS_CASE_META_KEY,)).fetchone()
+    if row is None or not row["value"]:
+        return None
+    focus = conn.execute("SELECT * FROM cases WHERE id = ?", (int(row["value"]),)).fetchone()
+    return focus
+
+
+def focus_case(args: argparse.Namespace) -> None:
+    conn = connect(args.db)
+    init_db(conn)
+    if args.case:
+        case = resolve_case(conn, args.case)
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            (FOCUS_CASE_META_KEY, str(case["id"])),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('focus_case_updated_at', ?)",
+            (utc_now(),),
+        )
+        conn.commit()
+        focus = case
+    else:
+        focus = current_focus_case(conn)
+
+    if args.json:
+        if focus is None:
+            print(json.dumps({"focus": None}))
+            return
+        print(
+            json.dumps(
+                {
+                    "focus": {
+                        "id": focus["id"],
+                        "slug": focus["slug"],
+                        "domain": focus["domain"],
+                        "title_id": focus["title_id"] or "",
+                        "status": focus["status"],
+                        "summary": focus["summary"],
+                        "updated_at": focus["updated_at"],
+                    }
+                },
+                sort_keys=True,
+            )
+        )
+        return
+
+    if focus is None:
+        print("No focused case is set.")
+        return
+    print(
+        f"Focused case {focus['id']}: {focus['slug']} "
+        f"({focus['domain']} {focus['title_id'] or '-'}) status={focus['status']}"
+    )
+    print(f"Summary: {focus['summary']}")
 
 
 def upsert_case(args: argparse.Namespace) -> None:
@@ -881,6 +940,8 @@ def check_attempt(args: argparse.Namespace) -> None:
 def list_cases(args: argparse.Namespace) -> None:
     conn = connect(args.db)
     init_db(conn)
+    focus = current_focus_case(conn)
+    focus_id = focus["id"] if focus else None
     where = []
     params: list[Any] = []
     if args.status:
@@ -897,17 +958,25 @@ def list_cases(args: argparse.Namespace) -> None:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY updated_at DESC"
     for row in conn.execute(sql, params).fetchall():
-        print(f"{row['id']:>3} {row['updated_at']} {row['domain']:<8} {row['title_id'] or '-':<10} {row['status']:<10} {row['slug']} - {row['summary']}")
+        marker = ">" if row["id"] == focus_id else " "
+        print(f"{marker}{row['id']:>3} {row['updated_at']} {row['domain']:<8} {row['title_id'] or '-':<10} {row['status']:<10} {row['slug']} - {row['summary']}")
 
 
 def show_case(args: argparse.Namespace) -> None:
     conn = connect(args.db)
     init_db(conn)
     case = resolve_case(conn, args.case)
+    focus = current_focus_case(conn)
     print(f"Case {case['id']}: {case['slug']}")
     print(f"Domain: {case['domain']}")
     print(f"Title ID: {case['title_id'] or '-'}")
     print(f"Status: {case['status']}")
+    if focus and focus["id"] == case["id"]:
+        print("Focus: yes")
+    elif focus:
+        print(f"Focus: no (current focus: {focus['slug']})")
+    else:
+        print("Focus: unset")
     print(f"Severity: {case['severity']}")
     print(f"Platform scope: {case['platform_scope']}")
     print(f"Updated: {case['updated_at']}")
@@ -1048,6 +1117,11 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("case")
     show.add_argument("--limit", type=int, default=20)
     show.set_defaults(func=show_case)
+
+    focus = case_sub.add_parser("focus", help="Show or set the current lead debug case")
+    focus.add_argument("case", nargs="?")
+    focus.add_argument("--json", action="store_true")
+    focus.set_defaults(func=focus_case)
 
     entry = sub.add_parser("entry", help="Add a case entry")
     entry_sub = entry.add_subparsers(dest="entry_command", required=True)

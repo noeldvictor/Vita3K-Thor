@@ -13,17 +13,18 @@ Pair it with `.agents/skills/vita3k-debug-rag/SKILL.md` for SQLite search/write 
 
 ## Non-Negotiable Order
 
-1. Query `reports/debug_knowledge.sqlite` before touching renderer code.
-2. Check the attempt ledger for the exact hypothesis.
-3. Create a renderer experiment packet with `tools/renderer_experiment.py start`.
-4. Capture a screenshot burst, not a single lucky frame.
-5. Stabilize the scene with pause/runtime control when possible.
-6. Isolate the frame with live renderer controls before rebuilding.
-7. Add instrumentation if evidence is still ambiguous.
-8. Patch the smallest emulator subsystem that explains the evidence.
-9. Verify on Windows first unless the bug is proven Android-only.
-10. Verify on AYN Thor before calling an Android-affecting fix done.
-11. Close the experiment packet with `tools/renderer_experiment.py finish`, record the result in SQLite, then commit and push useful checkpoints.
+1. Check the focused case with `python tools/debug_knowledge.py case focus`; this is the lead bug unless the user or evidence explicitly changes it.
+2. Query `reports/debug_knowledge.sqlite` before touching renderer code.
+3. Check the attempt ledger for the exact hypothesis.
+4. Create a renderer experiment packet with `tools/renderer_experiment.py start`.
+5. Capture a screenshot burst, not a single lucky frame.
+6. Stabilize the scene with pause/runtime control when possible.
+7. Isolate the frame with live renderer controls before rebuilding.
+8. Add instrumentation if evidence is still ambiguous.
+9. Patch the smallest emulator subsystem that explains the evidence.
+10. Verify on Windows first unless the bug is proven Android-only.
+11. Verify on AYN Thor before calling an Android-affecting fix done.
+12. Close the experiment packet with `tools/renderer_experiment.py finish`, record the result in SQLite, then commit and push useful checkpoints.
 
 Do not keep replaying long intros manually. Once the user reaches a bad scene, prefer pause, quickstate/save data, burst capture, surface dumps, draw filters, and input automation.
 
@@ -32,10 +33,11 @@ Do not keep replaying long intros manually. Once the user reaches a bad scene, p
 Before a renderer code edit, global Vulkan state change, Android debug property, shader/texture workaround, or config change that could affect another game, create a packet:
 
 ```powershell
+python tools\debug_knowledge.py case focus
 python tools\renderer_experiment.py start --case doa-venus-render-corruption --title-id PCSH00250 --platform windows --subsystem surface-cache --hypothesis "specific one-variable hypothesis" --expected "what should visibly/logically change" --scene "exact scene and camera/menu state" --baseline-artifact <burst-dir> --regression-target "UPPERS glitch scene" --regression-target "DOA title loop"
 ```
 
-The packet under `tmp/renderer-experiments/` snapshots git status, selected configs, active Vita3K window state, attempt-check output, and writes `outcome.md` plus `commands.ps1`. Treat this packet as the unit of work. If the packet says the tree was dirty, debug props were stale, or no baseline exists, resolve that before patching unless the dirty state is the experiment.
+The packet under `tmp/renderer-experiments/` snapshots git status, selected configs, active Vita3K window state, attempt-check output, and writes `outcome.md` plus `commands.ps1`. Treat this packet as the unit of work. It refuses non-focused cases unless `--regression-guard` or `--allow-non-focus-case` is explicit. If the packet says the tree was dirty, debug props were stale, or no baseline exists, resolve that before patching unless the dirty state is the experiment.
 
 Close the same packet after verification:
 
@@ -209,8 +211,11 @@ Record device model, driver, build commit, title ID, settings, burst path, logca
 For DOA Venus (`PCSH00250`), do not trust memory. Query `case doa-venus-render-corruption` and the recent attempt list first:
 
 ```powershell
+python tools/debug_knowledge.py case focus
 python tools/debug_knowledge.py case show doa-venus-render-corruption
 python tools/debug_knowledge.py attempt list --case doa-venus-render-corruption --limit 20
 ```
 
 SQLite owns active case facts. Do not bake volatile DOA conclusions into this skill unless they are durable workflow lessons.
+
+If the focused case is DOA and another game has a newer artifact, stay on DOA. Use the other game only with `--regression-guard` after the DOA experiment has a result.

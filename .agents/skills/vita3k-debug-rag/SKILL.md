@@ -13,6 +13,7 @@ Use this skill whenever debugging a Vita3K Thor emulator or game issue, especial
 
 - The canonical report store is `reports/debug_knowledge.sqlite`.
 - Use `tools/debug_knowledge.py` to search, read, and write it.
+- The current lead bug is stored with `python tools/debug_knowledge.py case focus`. Check it before choosing a game from recent files, open experiment folders, or memory. Change focus only when the user or evidence explicitly changes priority; otherwise use non-focused games only as regression guards.
 - SQLite keeps raw searchable text in `chunks.text`, plus a repo-local deterministic sparse hashed vector in `chunks.embedding_json`; this is not an external/model embedding. FTS5 is enabled when the local SQLite build supports it.
 - Treat existing Markdown reports as legacy context only. Do not rely on them until the SQLite DB has no relevant recent or long-term answer.
 - Never commit commercial games, saves, firmware, decrypted binaries, ELF dumps, shader caches, APKs, raw log dumps, or screenshots unless the user explicitly asks for a specific proof asset.
@@ -22,6 +23,7 @@ Use this skill whenever debugging a Vita3K Thor emulator or game issue, especial
 Run a recent DB search before editing emulator code:
 
 ```powershell
+python tools/debug_knowledge.py case focus
 python tools/debug_knowledge.py search "<symptom title id shader hash platform>" --recent-days 30
 ```
 
@@ -49,16 +51,17 @@ Prefer recent entries for immediate bug work. Use long-term matches to avoid rep
 ## Bug Resolution Loop
 
 1. Create or update a case in SQLite.
-2. Record the current symptom as an observation with platform, title ID, screenshot/log paths, shader hashes, and draw filters when available.
-3. Run `attempt check` for the next planned hypothesis/change before editing.
-4. Classify the bug before patching: emulator core, shader translator, renderer state, VFS/cartridge, platform driver/presentation, input/OSD, timing/audio, or unknown.
-5. For serious emulator/render bugs, reproduce on Windows first unless the evidence already proves Android-only behavior.
-6. Patch the smallest plausible emulator subsystem.
-7. Verify Windows proof first.
-8. Verify Android/Thor proof second for Android-affecting changes.
-9. Record the attempt as `succeeded`, `failed`, `inconclusive`, or `superseded`, including artifacts and commands.
-10. Record tests, regression risk, final fix, and commit hash in SQLite.
-11. Commit and push small checkpoints.
+2. Set or verify the focused case with `case focus`; do not let the newest screenshot or `tmp/` folder choose the active game.
+3. Record the current symptom as an observation with platform, title ID, screenshot/log paths, shader hashes, and draw filters when available.
+4. Run `attempt check` for the next planned hypothesis/change before editing.
+5. Classify the bug before patching: emulator core, shader translator, renderer state, VFS/cartridge, platform driver/presentation, input/OSD, timing/audio, or unknown.
+6. For serious emulator/render bugs, reproduce on Windows first unless the evidence already proves Android-only behavior.
+7. Patch the smallest plausible emulator subsystem.
+8. Verify Windows proof first.
+9. Verify Android/Thor proof second for Android-affecting changes.
+10. Record the attempt as `succeeded`, `failed`, `inconclusive`, or `superseded`, including artifacts and commands.
+11. Record tests, regression risk, final fix, and commit hash in SQLite.
+12. Commit and push small checkpoints.
 
 ## Compatibility Ledger
 
@@ -168,7 +171,14 @@ python tools/debug_knowledge.py attempt list --case doa-venus-render-corruption 
 Show the current case:
 
 ```powershell
+python tools/debug_knowledge.py case focus
 python tools/debug_knowledge.py case show doa-venus-render-corruption
+```
+
+Set focus when priority intentionally changes:
+
+```powershell
+python tools/debug_knowledge.py case focus doa-venus-render-corruption
 ```
 
 Record an automation step:

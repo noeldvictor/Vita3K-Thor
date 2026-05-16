@@ -132,6 +132,52 @@ def call_knowledge(args: list[str]) -> dict[str, Any]:
     return run([sys.executable, str(DEBUG_KNOWLEDGE), *args], timeout=30)
 
 
+def focus_context() -> dict[str, Any]:
+    result = call_knowledge(["case", "focus", "--json"])
+    if result.get("returncode") != 0:
+        return {"focus": None, "error": result.get("output", "")}
+    try:
+        return json.loads(result.get("output", "") or "{}")
+    except json.JSONDecodeError as exc:
+        return {"focus": None, "error": f"Could not parse focus case JSON: {exc}"}
+
+
+def check_focus_guard(args: argparse.Namespace, focus: dict[str, Any]) -> dict[str, Any]:
+    focused = focus.get("focus") if isinstance(focus, dict) else None
+    if not focused:
+        return {"mode": "unfocused", "message": "No focused case is set."}
+
+    focused_slug = focused.get("slug", "")
+    if args.case == focused_slug:
+        return {"mode": "focused", "message": f"Experiment matches focused case {focused_slug}."}
+
+    if args.regression_guard:
+        return {
+            "mode": "regression-guard",
+            "message": (
+                f"Experiment case {args.case} differs from focused case {focused_slug}, "
+                "but --regression-guard was provided."
+            ),
+        }
+
+    if args.allow_non_focus_case:
+        return {
+            "mode": "override",
+            "message": (
+                f"Experiment case {args.case} differs from focused case {focused_slug}; "
+                "--allow-non-focus-case override was provided."
+            ),
+        }
+
+    raise SystemExit(
+        "Refusing to create renderer experiment for a non-focused case.\n"
+        f"Focused case: {focused_slug} ({focused.get('title_id') or '-'})\n"
+        f"Requested case: {args.case}\n"
+        "Use `python tools/debug_knowledge.py case focus <case>` to change focus, "
+        "or pass `--regression-guard` for a deliberate neighboring-game check."
+    )
+
+
 def write_json(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -209,6 +255,9 @@ python tools\\renderer_experiment.py finish --manifest {rel(exp_dir / "manifest.
 
 
 def start(args: argparse.Namespace) -> None:
+    focus = focus_context()
+    focus_guard = check_focus_guard(args, focus)
+
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = f"{stamp}_{slugify(args.case)}_{slugify(args.subsystem)}"
     exp_root = (REPO_ROOT / args.out_dir).resolve() if args.out_dir else DEFAULT_EXPERIMENT_ROOT
@@ -282,12 +331,15 @@ def start(args: argparse.Namespace) -> None:
         "android": android_context(args.adb, args.serial) if args.android_context else {},
         "attempt_check": check,
         "attempt_add": add,
+        "focus_case": focus,
+        "focus_guard": focus_guard,
         "finish": {},
     }
     write_json(exp_dir / "manifest.json", manifest)
     write_start_templates(exp_dir, manifest, check.get("output", ""))
 
     print(f"created renderer experiment packet: {rel(exp_dir)}")
+    print(focus_guard["message"])
     print((exp_dir / "outcome.md").relative_to(REPO_ROOT))
 
 
@@ -373,6 +425,8 @@ def main() -> None:
     start_parser.add_argument("--adb", default="adb")
     start_parser.add_argument("--serial", default="")
     start_parser.add_argument("--no-db", action="store_true")
+    start_parser.add_argument("--regression-guard", action="store_true", help="Allow a non-focused case only as an explicit regression check")
+    start_parser.add_argument("--allow-non-focus-case", action="store_true", help="Override the focused-case guard for deliberate priority changes")
     start_parser.set_defaults(func=start)
 
     finish_parser = sub.add_parser("finish", help="Close a renderer experiment packet and update its attempt")

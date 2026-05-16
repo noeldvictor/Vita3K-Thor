@@ -14,6 +14,14 @@ Every renderer change must answer five questions before code is trusted:
 
 Use `tools/renderer_experiment.py` to make those answers explicit.
 
+Before choosing a target, ask one more question: what is the focused case?
+
+```powershell
+python tools\debug_knowledge.py case focus
+```
+
+The focused case is the lead bug. A different game can be tested only as an explicit regression guard or after changing focus in SQLite. Do not use newest screenshots, newest `tmp/` directories, or stale open attempts as the priority signal.
+
 ## Start A Packet
 
 ```powershell
@@ -37,6 +45,12 @@ This creates `tmp/renderer-experiments/<timestamp>_<case>_<subsystem>/` with:
 - `commands.ps1`: copyable commands for burst capture, analysis, and packet finish.
 
 It also records a `planned` attempt in `reports/debug_knowledge.sqlite` unless `--no-db` is passed.
+
+If the requested case differs from `case focus`, `start` refuses the packet. Use `--regression-guard` for a deliberate neighboring-game check, or change focus with:
+
+```powershell
+python tools\debug_knowledge.py case focus <case-slug>
+```
 
 ## Finish A Packet
 
