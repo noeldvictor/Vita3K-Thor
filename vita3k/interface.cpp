@@ -1088,6 +1088,137 @@ struct QuickStateIOFilePosition {
     SceOff offset = 0;
 };
 
+struct QuickStateSyncSimpleEvent {
+    SceUID id = 0;
+    std::string name;
+    uint32_t attr = 0;
+    uint32_t pattern = 0;
+    uint64_t last_user_data = 0;
+    bool auto_reset = false;
+    bool cb_wakeup_only = false;
+    uint32_t waiting_count = 0;
+};
+
+struct QuickStateSyncTimer {
+    SceUID id = 0;
+    std::string name;
+    uint32_t attr = 0;
+    bool is_started = false;
+    bool is_repeat = false;
+    bool is_pulse = false;
+    bool event_set = false;
+    uint64_t time = 0;
+    uint64_t next_event = 0;
+    uint64_t next_event_delta_us = std::numeric_limits<uint64_t>::max();
+    uint64_t event_interval = 0;
+    uint32_t waiting_count = 0;
+};
+
+struct QuickStateSyncSemaphore {
+    SceUID id = 0;
+    std::string name;
+    uint32_t attr = 0;
+    int32_t init_val = 0;
+    int32_t value = 0;
+    int32_t max = 0;
+    uint32_t waiting_count = 0;
+};
+
+struct QuickStateSyncMutex {
+    SceUID id = 0;
+    std::string name;
+    uint32_t attr = 0;
+    int32_t init_count = 0;
+    int32_t lock_count = 0;
+    SceUID owner = 0;
+    Address workarea = 0;
+    uint32_t waiting_count = 0;
+    bool lightweight = false;
+};
+
+struct QuickStateSyncEventFlag {
+    SceUID id = 0;
+    std::string name;
+    uint32_t attr = 0;
+    int32_t flags = 0;
+    uint32_t waiting_count = 0;
+};
+
+struct QuickStateSyncCondvar {
+    SceUID id = 0;
+    std::string name;
+    uint32_t attr = 0;
+    SceUID associated_mutex = 0;
+    uint32_t waiting_count = 0;
+    bool lightweight = false;
+};
+
+struct QuickStateSyncRWLock {
+    SceUID id = 0;
+    std::string name;
+    uint32_t attr = 0;
+    RWLockState state = RWLockState::Unlocked;
+    std::map<SceUID, int32_t> owners;
+    uint32_t waiting_count = 0;
+};
+
+struct QuickStateSyncMsgPipe {
+    SceUID id = 0;
+    std::string name;
+    uint32_t attr = 0;
+    uint32_t sender_count = 0;
+    uint32_t receiver_count = 0;
+    uint64_t capacity = 0;
+    uint64_t used = 0;
+    bool being_deleted = false;
+};
+
+struct QuickStateSyncSnapshot {
+    bool valid = false;
+    std::map<SceUID, QuickStateSyncSimpleEvent> simple_events;
+    std::map<SceUID, QuickStateSyncTimer> timers;
+    std::map<SceUID, QuickStateSyncSemaphore> semaphores;
+    std::map<SceUID, QuickStateSyncMutex> mutexes;
+    std::map<SceUID, QuickStateSyncMutex> lwmutexes;
+    std::map<SceUID, QuickStateSyncEventFlag> eventflags;
+    std::map<SceUID, QuickStateSyncCondvar> condvars;
+    std::map<SceUID, QuickStateSyncCondvar> lwcondvars;
+    std::map<SceUID, QuickStateSyncRWLock> rwlocks;
+    std::map<SceUID, QuickStateSyncMsgPipe> msgpipes;
+
+    size_t total_waiting_threads() const {
+        size_t total = 0;
+        for (const auto &[_, item] : simple_events)
+            total += item.waiting_count;
+        for (const auto &[_, item] : timers)
+            total += item.waiting_count;
+        for (const auto &[_, item] : semaphores)
+            total += item.waiting_count;
+        for (const auto &[_, item] : mutexes)
+            total += item.waiting_count;
+        for (const auto &[_, item] : lwmutexes)
+            total += item.waiting_count;
+        for (const auto &[_, item] : eventflags)
+            total += item.waiting_count;
+        for (const auto &[_, item] : condvars)
+            total += item.waiting_count;
+        for (const auto &[_, item] : lwcondvars)
+            total += item.waiting_count;
+        for (const auto &[_, item] : rwlocks)
+            total += item.waiting_count;
+        for (const auto &[_, item] : msgpipes)
+            total += item.sender_count + item.receiver_count;
+        return total;
+    }
+
+    size_t msgpipe_buffer_bytes() const {
+        size_t total = 0;
+        for (const auto &[_, item] : msgpipes)
+            total += static_cast<size_t>(std::min<uint64_t>(item.used, static_cast<uint64_t>(std::numeric_limits<size_t>::max())));
+        return total;
+    }
+};
+
 struct QuickStateRestoreManifest {
     uint32_t format_version = QUICKSTATE_VERSION;
     uint64_t guest_memory_bytes = 0;
@@ -1100,6 +1231,9 @@ struct QuickStateRestoreManifest {
     bool timing_restorable = false;
     bool thread_metadata_restorable = false;
     bool io_file_positions_restorable = false;
+    bool sync_primitives_restorable = false;
+    size_t sync_waiting_threads = 0;
+    size_t msgpipe_buffer_bytes = 0;
     QuickStateKernelObjectCounts kernel;
     QuickStateIOCounts io;
     std::vector<std::string> missing_serializers;
@@ -1967,6 +2101,14 @@ static bool quick_state_parse_bool_text(const std::string &text, bool &out) {
     return false;
 }
 
+static bool quick_state_parse_size(const std::map<std::string, std::string> &values, const std::string &key, size_t &out) {
+    uint64_t parsed = 0;
+    if (!quick_state_parse_u64(values, key, parsed) || parsed > static_cast<uint64_t>(std::numeric_limits<size_t>::max()))
+        return false;
+    out = static_cast<size_t>(parsed);
+    return true;
+}
+
 static std::map<std::string, std::string> quick_state_parse_semicolon_fields(const std::string &text) {
     std::map<std::string, std::string> fields;
     size_t start = 0;
@@ -1981,6 +2123,63 @@ static std::map<std::string, std::string> quick_state_parse_semicolon_fields(con
         start = end + 1;
     }
     return fields;
+}
+
+static bool quick_state_parse_uid_from_key(const std::string &key, const std::string_view prefix, const std::string_view suffix, SceUID &uid) {
+    if (key.rfind(prefix, 0) != 0 || key.size() <= prefix.size() + suffix.size())
+        return false;
+    if (key.compare(key.size() - suffix.size(), suffix.size(), suffix) != 0)
+        return false;
+
+    const std::string id_text = key.substr(prefix.size(), key.size() - prefix.size() - suffix.size());
+    int32_t parsed_id = 0;
+    if (!quick_state_parse_i32_text(id_text, parsed_id) || parsed_id <= 0)
+        return false;
+    uid = static_cast<SceUID>(parsed_id);
+    return true;
+}
+
+static bool quick_state_parse_named_common_fields(const std::map<std::string, std::string> &fields, std::string &name, uint32_t &attr) {
+    if (!fields.contains("name") || !fields.contains("attr"))
+        return false;
+
+    name = fields.at("name");
+    return quick_state_parse_u32_text(fields.at("attr"), attr);
+}
+
+static bool quick_state_parse_waiting_field(const std::map<std::string, std::string> &fields, uint32_t &waiting_count) {
+    return fields.contains("waiting") && quick_state_parse_u32_text(fields.at("waiting"), waiting_count);
+}
+
+static bool quick_state_parse_rwlock_owners_text(const std::string &text, std::map<SceUID, int32_t> &owners) {
+    owners.clear();
+    if (text.empty() || text == "none")
+        return true;
+
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t end = text.find(',', start);
+        const std::string item = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        const size_t separator = item.find(':');
+        if (separator == std::string::npos)
+            return false;
+
+        int32_t parsed_id = 0;
+        int32_t parsed_count = 0;
+        if (!quick_state_parse_i32_text(item.substr(0, separator), parsed_id)
+            || !quick_state_parse_i32_text(item.substr(separator + 1), parsed_count)
+            || parsed_id <= 0
+            || parsed_count <= 0) {
+            return false;
+        }
+        owners[static_cast<SceUID>(parsed_id)] = parsed_count;
+
+        if (end == std::string::npos)
+            break;
+        start = end + 1;
+    }
+
+    return true;
 }
 
 static bool quick_state_parse_timing_snapshot(const QuickStateSlot &slot, QuickStateTimingSnapshot &timing) {
@@ -2191,6 +2390,290 @@ static bool quick_state_parse_io_file_positions_section(const QuickStateSlot &sl
     return positions_by_fd.size() == expected_file_count;
 }
 
+static bool quick_state_parse_sync_simple_event(const std::string &key, const std::string &value, QuickStateSyncSimpleEvent &event) {
+    if (!quick_state_parse_uid_from_key(key, "simple_event.", ".name", event.id))
+        return false;
+
+    const auto fields = quick_state_parse_semicolon_fields("name=" + value);
+    bool parsed_bool = false;
+    if (!quick_state_parse_named_common_fields(fields, event.name, event.attr)
+        || !fields.contains("pattern")
+        || !fields.contains("last_user_data")
+        || !fields.contains("auto_reset")
+        || !fields.contains("cb_wakeup_only")
+        || !quick_state_parse_u32_text(fields.at("pattern"), event.pattern)
+        || !quick_state_parse_u64_text(fields.at("last_user_data"), event.last_user_data)
+        || !quick_state_parse_bool_text(fields.at("auto_reset"), parsed_bool)) {
+        return false;
+    }
+    event.auto_reset = parsed_bool;
+    if (!quick_state_parse_bool_text(fields.at("cb_wakeup_only"), parsed_bool)
+        || !quick_state_parse_waiting_field(fields, event.waiting_count)) {
+        return false;
+    }
+    event.cb_wakeup_only = parsed_bool;
+    return true;
+}
+
+static bool quick_state_parse_sync_timer(const std::string &key, const std::string &value, QuickStateSyncTimer &timer) {
+    if (!quick_state_parse_uid_from_key(key, "timer.", ".name", timer.id))
+        return false;
+
+    const auto fields = quick_state_parse_semicolon_fields("name=" + value);
+    bool parsed_bool = false;
+    if (!quick_state_parse_named_common_fields(fields, timer.name, timer.attr)
+        || !fields.contains("started")
+        || !fields.contains("repeat")
+        || !fields.contains("pulse")
+        || !fields.contains("event_set")
+        || !fields.contains("time")
+        || !fields.contains("next_event")
+        || !fields.contains("next_event_delta_us")
+        || !fields.contains("interval")
+        || !quick_state_parse_bool_text(fields.at("started"), parsed_bool)) {
+        return false;
+    }
+    timer.is_started = parsed_bool;
+    if (!quick_state_parse_bool_text(fields.at("repeat"), parsed_bool))
+        return false;
+    timer.is_repeat = parsed_bool;
+    if (!quick_state_parse_bool_text(fields.at("pulse"), parsed_bool))
+        return false;
+    timer.is_pulse = parsed_bool;
+    if (!quick_state_parse_bool_text(fields.at("event_set"), parsed_bool)
+        || !quick_state_parse_u64_text(fields.at("time"), timer.time)
+        || !quick_state_parse_u64_text(fields.at("next_event"), timer.next_event)
+        || !quick_state_parse_u64_text(fields.at("next_event_delta_us"), timer.next_event_delta_us)
+        || !quick_state_parse_u64_text(fields.at("interval"), timer.event_interval)
+        || !quick_state_parse_waiting_field(fields, timer.waiting_count)) {
+        return false;
+    }
+    timer.event_set = parsed_bool;
+    return true;
+}
+
+static bool quick_state_parse_sync_semaphore(const std::string &key, const std::string &value, QuickStateSyncSemaphore &semaphore) {
+    if (!quick_state_parse_uid_from_key(key, "semaphore.", ".name", semaphore.id))
+        return false;
+
+    const auto fields = quick_state_parse_semicolon_fields("name=" + value);
+    if (!quick_state_parse_named_common_fields(fields, semaphore.name, semaphore.attr)
+        || !fields.contains("init")
+        || !fields.contains("value")
+        || !fields.contains("max")
+        || !quick_state_parse_i32_text(fields.at("init"), semaphore.init_val)
+        || !quick_state_parse_i32_text(fields.at("value"), semaphore.value)
+        || !quick_state_parse_i32_text(fields.at("max"), semaphore.max)
+        || !quick_state_parse_waiting_field(fields, semaphore.waiting_count)) {
+        return false;
+    }
+    return semaphore.max >= 0 && semaphore.init_val >= 0 && semaphore.value >= 0 && semaphore.value <= semaphore.max;
+}
+
+static bool quick_state_parse_sync_mutex(const std::string &key, const std::string &value, const bool lightweight, QuickStateSyncMutex &mutex) {
+    if (!quick_state_parse_uid_from_key(key, lightweight ? "lwmutex." : "mutex.", ".name", mutex.id))
+        return false;
+
+    const auto fields = quick_state_parse_semicolon_fields("name=" + value);
+    int32_t parsed_owner = 0;
+    uint64_t parsed_workarea = 0;
+    if (!quick_state_parse_named_common_fields(fields, mutex.name, mutex.attr)
+        || !fields.contains("init")
+        || !fields.contains("lock_count")
+        || !fields.contains("owner")
+        || !quick_state_parse_i32_text(fields.at("init"), mutex.init_count)
+        || !quick_state_parse_i32_text(fields.at("lock_count"), mutex.lock_count)
+        || !quick_state_parse_i32_text(fields.at("owner"), parsed_owner)
+        || !quick_state_parse_waiting_field(fields, mutex.waiting_count)) {
+        return false;
+    }
+
+    if (lightweight) {
+        if (!fields.contains("workarea") || !quick_state_parse_u64_text(fields.at("workarea"), parsed_workarea, 0))
+            return false;
+        mutex.workarea = static_cast<Address>(parsed_workarea);
+    }
+
+    if (parsed_owner < 0 || mutex.init_count < 0 || mutex.lock_count < 0)
+        return false;
+    mutex.owner = static_cast<SceUID>(parsed_owner);
+    mutex.lightweight = lightweight;
+    return true;
+}
+
+static bool quick_state_parse_sync_eventflag(const std::string &key, const std::string &value, QuickStateSyncEventFlag &eventflag) {
+    if (!quick_state_parse_uid_from_key(key, "eventflag.", ".name", eventflag.id))
+        return false;
+
+    const auto fields = quick_state_parse_semicolon_fields("name=" + value);
+    return quick_state_parse_named_common_fields(fields, eventflag.name, eventflag.attr)
+        && fields.contains("flags")
+        && quick_state_parse_i32_text(fields.at("flags"), eventflag.flags)
+        && quick_state_parse_waiting_field(fields, eventflag.waiting_count);
+}
+
+static bool quick_state_parse_sync_condvar(const std::string &key, const std::string &value, const bool lightweight, QuickStateSyncCondvar &condvar) {
+    if (!quick_state_parse_uid_from_key(key, lightweight ? "lwcondvar." : "condvar.", ".name", condvar.id))
+        return false;
+
+    const auto fields = quick_state_parse_semicolon_fields("name=" + value);
+    int32_t parsed_mutex = 0;
+    if (!quick_state_parse_named_common_fields(fields, condvar.name, condvar.attr)
+        || !fields.contains("associated_mutex")
+        || !quick_state_parse_i32_text(fields.at("associated_mutex"), parsed_mutex)
+        || !quick_state_parse_waiting_field(fields, condvar.waiting_count)
+        || parsed_mutex < 0) {
+        return false;
+    }
+    condvar.associated_mutex = static_cast<SceUID>(parsed_mutex);
+    condvar.lightweight = lightweight;
+    return true;
+}
+
+static bool quick_state_parse_sync_rwlock(const std::string &key, const std::string &value, QuickStateSyncRWLock &rwlock) {
+    if (!quick_state_parse_uid_from_key(key, "rwlock.", ".name", rwlock.id))
+        return false;
+
+    const auto fields = quick_state_parse_semicolon_fields("name=" + value);
+    int32_t parsed_state = 0;
+    if (!quick_state_parse_named_common_fields(fields, rwlock.name, rwlock.attr)
+        || !fields.contains("state")
+        || !fields.contains("owners_detail")
+        || !quick_state_parse_i32_text(fields.at("state"), parsed_state)
+        || parsed_state < static_cast<int32_t>(RWLockState::Unlocked)
+        || parsed_state > static_cast<int32_t>(RWLockState::WriteLocked)
+        || !quick_state_parse_rwlock_owners_text(fields.at("owners_detail"), rwlock.owners)
+        || !quick_state_parse_waiting_field(fields, rwlock.waiting_count)) {
+        return false;
+    }
+    rwlock.state = static_cast<RWLockState>(parsed_state);
+    return true;
+}
+
+static bool quick_state_parse_sync_msgpipe(const std::string &key, const std::string &value, QuickStateSyncMsgPipe &msgpipe) {
+    if (!quick_state_parse_uid_from_key(key, "msgpipe.", ".name", msgpipe.id))
+        return false;
+
+    const auto fields = quick_state_parse_semicolon_fields("name=" + value);
+    bool parsed_bool = false;
+    if (!quick_state_parse_named_common_fields(fields, msgpipe.name, msgpipe.attr)
+        || !fields.contains("senders")
+        || !fields.contains("receivers")
+        || !fields.contains("capacity")
+        || !fields.contains("used")
+        || !fields.contains("being_deleted")
+        || !quick_state_parse_u32_text(fields.at("senders"), msgpipe.sender_count)
+        || !quick_state_parse_u32_text(fields.at("receivers"), msgpipe.receiver_count)
+        || !quick_state_parse_u64_text(fields.at("capacity"), msgpipe.capacity)
+        || !quick_state_parse_u64_text(fields.at("used"), msgpipe.used)
+        || !quick_state_parse_bool_text(fields.at("being_deleted"), parsed_bool)) {
+        return false;
+    }
+    msgpipe.being_deleted = parsed_bool;
+    return msgpipe.used <= msgpipe.capacity;
+}
+
+static bool quick_state_parse_sync_primitives_section(const QuickStateSlot &slot, QuickStateSyncSnapshot &snapshot) {
+    snapshot = {};
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.kernel.objects");
+    if (!section || section->version != 1)
+        return false;
+
+    const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    if (schema == values.end() || schema->second != "thor.kernel.objects.v1")
+        return false;
+
+    size_t expected_simple_events = 0;
+    size_t expected_timers = 0;
+    size_t expected_semaphores = 0;
+    size_t expected_mutexes = 0;
+    size_t expected_lwmutexes = 0;
+    size_t expected_eventflags = 0;
+    size_t expected_condvars = 0;
+    size_t expected_lwcondvars = 0;
+    size_t expected_rwlocks = 0;
+    size_t expected_msgpipes = 0;
+    if (!quick_state_parse_size(values, "simple_events", expected_simple_events)
+        || !quick_state_parse_size(values, "timers", expected_timers)
+        || !quick_state_parse_size(values, "semaphores", expected_semaphores)
+        || !quick_state_parse_size(values, "mutexes", expected_mutexes)
+        || !quick_state_parse_size(values, "lwmutexes", expected_lwmutexes)
+        || !quick_state_parse_size(values, "eventflags", expected_eventflags)
+        || !quick_state_parse_size(values, "condvars", expected_condvars)
+        || !quick_state_parse_size(values, "lwcondvars", expected_lwcondvars)
+        || !quick_state_parse_size(values, "rwlocks", expected_rwlocks)
+        || !quick_state_parse_size(values, "msgpipes", expected_msgpipes)) {
+        return false;
+    }
+
+    for (const auto &[key, value] : values) {
+        if (key.rfind("simple_event.", 0) == 0) {
+            QuickStateSyncSimpleEvent event;
+            if (!quick_state_parse_sync_simple_event(key, value, event))
+                return false;
+            snapshot.simple_events[event.id] = std::move(event);
+        } else if (key.rfind("timer.", 0) == 0) {
+            QuickStateSyncTimer timer;
+            if (!quick_state_parse_sync_timer(key, value, timer))
+                return false;
+            snapshot.timers[timer.id] = std::move(timer);
+        } else if (key.rfind("semaphore.", 0) == 0) {
+            QuickStateSyncSemaphore semaphore;
+            if (!quick_state_parse_sync_semaphore(key, value, semaphore))
+                return false;
+            snapshot.semaphores[semaphore.id] = std::move(semaphore);
+        } else if (key.rfind("mutex.", 0) == 0) {
+            QuickStateSyncMutex mutex;
+            if (!quick_state_parse_sync_mutex(key, value, false, mutex))
+                return false;
+            snapshot.mutexes[mutex.id] = std::move(mutex);
+        } else if (key.rfind("lwmutex.", 0) == 0) {
+            QuickStateSyncMutex mutex;
+            if (!quick_state_parse_sync_mutex(key, value, true, mutex))
+                return false;
+            snapshot.lwmutexes[mutex.id] = std::move(mutex);
+        } else if (key.rfind("eventflag.", 0) == 0) {
+            QuickStateSyncEventFlag eventflag;
+            if (!quick_state_parse_sync_eventflag(key, value, eventflag))
+                return false;
+            snapshot.eventflags[eventflag.id] = std::move(eventflag);
+        } else if (key.rfind("condvar.", 0) == 0) {
+            QuickStateSyncCondvar condvar;
+            if (!quick_state_parse_sync_condvar(key, value, false, condvar))
+                return false;
+            snapshot.condvars[condvar.id] = std::move(condvar);
+        } else if (key.rfind("lwcondvar.", 0) == 0) {
+            QuickStateSyncCondvar condvar;
+            if (!quick_state_parse_sync_condvar(key, value, true, condvar))
+                return false;
+            snapshot.lwcondvars[condvar.id] = std::move(condvar);
+        } else if (key.rfind("rwlock.", 0) == 0) {
+            QuickStateSyncRWLock rwlock;
+            if (!quick_state_parse_sync_rwlock(key, value, rwlock))
+                return false;
+            snapshot.rwlocks[rwlock.id] = std::move(rwlock);
+        } else if (key.rfind("msgpipe.", 0) == 0) {
+            QuickStateSyncMsgPipe msgpipe;
+            if (!quick_state_parse_sync_msgpipe(key, value, msgpipe))
+                return false;
+            snapshot.msgpipes[msgpipe.id] = std::move(msgpipe);
+        }
+    }
+
+    snapshot.valid = snapshot.simple_events.size() == expected_simple_events
+        && snapshot.timers.size() == expected_timers
+        && snapshot.semaphores.size() == expected_semaphores
+        && snapshot.mutexes.size() == expected_mutexes
+        && snapshot.lwmutexes.size() == expected_lwmutexes
+        && snapshot.eventflags.size() == expected_eventflags
+        && snapshot.condvars.size() == expected_condvars
+        && snapshot.lwcondvars.size() == expected_lwcondvars
+        && snapshot.rwlocks.size() == expected_rwlocks
+        && snapshot.msgpipes.size() == expected_msgpipes;
+    return snapshot.valid;
+}
+
 static std::string quick_state_thread_status_name(const ThreadStatus status) {
     switch (status) {
     case ThreadStatus::run:
@@ -2268,18 +2751,31 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     manifest.thread_metadata_restorable = quick_state_parse_thread_metadata_section(slot, thread_metadata);
     std::map<SceUID, QuickStateIOFilePosition> io_file_positions;
     manifest.io_file_positions_restorable = quick_state_parse_io_file_positions_section(slot, io_file_positions);
+    QuickStateSyncSnapshot sync_snapshot;
+    manifest.sync_primitives_restorable = quick_state_parse_sync_primitives_section(slot, sync_snapshot);
+    if (manifest.sync_primitives_restorable) {
+        manifest.sync_waiting_threads = sync_snapshot.total_waiting_threads();
+        manifest.msgpipe_buffer_bytes = sync_snapshot.msgpipe_buffer_bytes();
+    }
     manifest.kernel = quick_state_count_kernel_objects(emuenv);
     manifest.io = quick_state_count_io_objects(emuenv);
 
     manifest.missing_serializers = {
         "kernel-thread-lifecycle",
-        "kernel-wait-objects",
         "host-syscall-state",
         "io-vfs-handles",
         "gpu-display-state",
         "renderer-resources",
         "audio-state",
     };
+    if (!manifest.sync_primitives_restorable) {
+        manifest.missing_serializers.push_back("kernel-sync-primitives");
+    } else {
+        if (manifest.sync_waiting_threads > 0)
+            manifest.missing_serializers.push_back("kernel-wait-queues");
+        if (manifest.msgpipe_buffer_bytes > 0)
+            manifest.missing_serializers.push_back("kernel-msgpipe-buffers");
+    }
     if (!manifest.thread_metadata_restorable)
         manifest.missing_serializers.push_back("kernel-thread-metadata");
     if (!manifest.io_file_positions_restorable)
@@ -2311,6 +2807,37 @@ static QuickStateSection quick_state_make_text_section(std::string tag, std::ost
 
 static size_t quick_state_waiting_count(const WaitingThreadQueuePtr &waiting_threads) {
     return waiting_threads ? waiting_threads->size() : 0;
+}
+
+static uint64_t quick_state_host_time_us() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::high_resolution_clock::now().time_since_epoch())
+            .count());
+}
+
+static uint64_t quick_state_timer_next_event_delta_us(const uint64_t next_event) {
+    if (next_event == std::numeric_limits<uint64_t>::max())
+        return std::numeric_limits<uint64_t>::max();
+
+    const uint64_t now = quick_state_host_time_us();
+    return next_event > now ? next_event - now : 0;
+}
+
+static std::string quick_state_rwlock_owners_detail(const RWLockOwners &owners) {
+    if (owners.empty())
+        return "none";
+
+    std::vector<std::string> entries;
+    entries.reserve(owners.size());
+    for (const auto &[thread, lock_count] : owners)
+        entries.push_back(fmt::format("{}:{}", thread ? thread->id : 0, lock_count));
+
+    std::string joined = entries.front();
+    for (size_t i = 1; i < entries.size(); i++) {
+        joined += ",";
+        joined += entries[i];
+    }
+    return joined;
 }
 
 static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvState &emuenv, const QuickStateSlot &slot) {
@@ -2399,6 +2926,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";event_set=" << timer->event_set
                  << ";time=" << timer->time
                  << ";next_event=" << timer->next_event
+                 << ";next_event_delta_us=" << quick_state_timer_next_event_delta_us(timer->next_event)
                  << ";interval=" << timer->event_interval
                  << ";waiting=" << quick_state_waiting_count(timer->waiting_threads)
                  << "\n";
@@ -2485,6 +3013,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";attr=" << rwlock->attr
                  << ";state=" << static_cast<int>(rwlock->state)
                  << ";owners=" << rwlock->owners.size()
+                 << ";owners_detail=" << quick_state_rwlock_owners_detail(rwlock->owners)
                  << ";waiting=" << quick_state_waiting_count(rwlock->waiting_threads)
                  << "\n";
         }
@@ -2497,12 +3026,26 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";attr=" << msgpipe->attr
                  << ";senders=" << quick_state_waiting_count(msgpipe->senders)
                  << ";receivers=" << quick_state_waiting_count(msgpipe->receivers)
+                 << ";capacity=" << msgpipe->data_buffer.Capacity()
+                 << ";used=" << msgpipe->data_buffer.Used()
                  << ";being_deleted=" << msgpipe->beingDeleted
                  << "\n";
         }
 
         text << "callbacks=" << emuenv.kernel.callbacks.size() << "\n";
         text << "simple_events=" << emuenv.kernel.simple_events.size() << "\n";
+        for (const auto &[uid, event] : emuenv.kernel.simple_events) {
+            const std::lock_guard<std::mutex> event_lock(event->mutex);
+            text << "simple_event." << uid
+                 << ".name=" << event->name
+                 << ";attr=" << event->attr
+                 << ";pattern=" << event->pattern
+                 << ";last_user_data=" << event->last_user_data
+                 << ";auto_reset=" << event->auto_reset
+                 << ";cb_wakeup_only=" << event->cb_wakeup_only
+                 << ";waiting=" << quick_state_waiting_count(event->waiting_threads)
+                 << "\n";
+        }
         text << "loaded_modules=" << emuenv.kernel.loaded_modules.size() << "\n";
         sections.push_back(quick_state_make_text_section("thor.kernel.objects", text));
     }
@@ -2674,6 +3217,283 @@ static bool restore_quick_state_thread_metadata(const QuickStateSlot &slot, cons
     return true;
 }
 
+static std::map<SceUID, ThreadStatePtr> quick_state_matched_threads_by_saved_id(const QuickStateSlot &slot, const std::vector<ThreadStatePtr> &matched_threads) {
+    std::map<SceUID, ThreadStatePtr> threads_by_saved_id;
+    const size_t count = std::min(slot.thread_contexts.size(), matched_threads.size());
+    for (size_t i = 0; i < count; i++)
+        threads_by_saved_id[slot.thread_contexts[i].id] = matched_threads[i];
+    return threads_by_saved_id;
+}
+
+static bool quick_state_sync_identity_matches(const SyncPrimitive &object, const std::string &name, const uint32_t attr) {
+    return std::string(object.name) == name && object.attr == attr;
+}
+
+static uint64_t quick_state_timer_restore_next_event(const QuickStateSyncTimer &saved_timer) {
+    if (saved_timer.next_event_delta_us == std::numeric_limits<uint64_t>::max())
+        return std::numeric_limits<uint64_t>::max();
+    return quick_state_host_time_us() + saved_timer.next_event_delta_us;
+}
+
+static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const QuickStateSlot &slot, const std::vector<ThreadStatePtr> &matched_threads) {
+    QuickStateSyncSnapshot snapshot;
+    if (!quick_state_parse_sync_primitives_section(slot, snapshot)) {
+        LOG_WARN("Refused sync primitive restore for {} because thor.kernel.objects sync metadata is missing or invalid.", slot.title_id);
+        return false;
+    }
+
+    if (snapshot.total_waiting_threads() > 0) {
+        LOG_WARN("Refused sync primitive restore for {} because {} waiting thread queue entry/entries still need queue serialization.",
+            slot.title_id, snapshot.total_waiting_threads());
+        return false;
+    }
+
+    if (snapshot.msgpipe_buffer_bytes() > 0) {
+        LOG_WARN("Refused sync primitive restore for {} because {} message-pipe buffer byte(s) still need payload serialization.",
+            slot.title_id, snapshot.msgpipe_buffer_bytes());
+        return false;
+    }
+
+    const auto threads_by_saved_id = quick_state_matched_threads_by_saved_id(slot, matched_threads);
+    const auto resolve_owner = [&threads_by_saved_id](const SceUID saved_thread_id) -> ThreadStatePtr {
+        if (saved_thread_id == 0)
+            return nullptr;
+        const auto thread = threads_by_saved_id.find(saved_thread_id);
+        return thread == threads_by_saved_id.end() ? nullptr : thread->second;
+    };
+
+    const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
+    if (emuenv.kernel.simple_events.size() != snapshot.simple_events.size()
+        || emuenv.kernel.timers.size() != snapshot.timers.size()
+        || emuenv.kernel.semaphores.size() != snapshot.semaphores.size()
+        || emuenv.kernel.mutexes.size() != snapshot.mutexes.size()
+        || emuenv.kernel.lwmutexes.size() != snapshot.lwmutexes.size()
+        || emuenv.kernel.eventflags.size() != snapshot.eventflags.size()
+        || emuenv.kernel.condvars.size() != snapshot.condvars.size()
+        || emuenv.kernel.lwcondvars.size() != snapshot.lwcondvars.size()
+        || emuenv.kernel.rwlocks.size() != snapshot.rwlocks.size()
+        || emuenv.kernel.msgpipes.size() != snapshot.msgpipes.size()) {
+        LOG_WARN("Refused sync primitive restore for {} because current kernel object counts do not match the saved snapshot.", slot.title_id);
+        return false;
+    }
+
+    for (const auto &[uid, saved_event] : snapshot.simple_events) {
+        const auto current = emuenv.kernel.simple_events.find(uid);
+        if (current == emuenv.kernel.simple_events.end())
+            return false;
+        const std::lock_guard<std::mutex> event_lock(current->second->mutex);
+        if (!quick_state_sync_identity_matches(*current->second, saved_event.name, saved_event.attr)
+            || quick_state_waiting_count(current->second->waiting_threads) != saved_event.waiting_count) {
+            LOG_WARN("Refused sync primitive restore for {} because simple event {} does not match the saved identity.", slot.title_id, uid);
+            return false;
+        }
+    }
+
+    for (const auto &[uid, saved_timer] : snapshot.timers) {
+        const auto current = emuenv.kernel.timers.find(uid);
+        if (current == emuenv.kernel.timers.end())
+            return false;
+        const std::lock_guard<std::mutex> timer_lock(current->second->mutex);
+        if (!quick_state_sync_identity_matches(*current->second, saved_timer.name, saved_timer.attr)
+            || quick_state_waiting_count(current->second->waiting_threads) != saved_timer.waiting_count) {
+            LOG_WARN("Refused sync primitive restore for {} because timer {} does not match the saved identity.", slot.title_id, uid);
+            return false;
+        }
+    }
+
+    for (const auto &[uid, saved_semaphore] : snapshot.semaphores) {
+        const auto current = emuenv.kernel.semaphores.find(uid);
+        if (current == emuenv.kernel.semaphores.end())
+            return false;
+        const std::lock_guard<std::mutex> semaphore_lock(current->second->mutex);
+        if (!quick_state_sync_identity_matches(*current->second, saved_semaphore.name, saved_semaphore.attr)
+            || quick_state_waiting_count(current->second->waiting_threads) != saved_semaphore.waiting_count) {
+            LOG_WARN("Refused sync primitive restore for {} because semaphore {} does not match the saved identity.", slot.title_id, uid);
+            return false;
+        }
+    }
+
+    const auto validate_mutex_map = [&](const MutexPtrs &current_map, const std::map<SceUID, QuickStateSyncMutex> &saved_map, const char *kind) {
+        for (const auto &[uid, saved_mutex] : saved_map) {
+            const auto current = current_map.find(uid);
+            if (current == current_map.end())
+                return false;
+            const std::lock_guard<std::mutex> mutex_lock(current->second->mutex);
+            if (!quick_state_sync_identity_matches(*current->second, saved_mutex.name, saved_mutex.attr)
+                || quick_state_waiting_count(current->second->waiting_threads) != saved_mutex.waiting_count
+                || (saved_mutex.lightweight && current->second->workarea.address() != saved_mutex.workarea)) {
+                LOG_WARN("Refused sync primitive restore for {} because {} {} does not match the saved identity.", slot.title_id, kind, uid);
+                return false;
+            }
+            if (saved_mutex.owner != 0 && !resolve_owner(saved_mutex.owner)) {
+                LOG_WARN("Refused sync primitive restore for {} because {} {} owner thread {} was not matched.", slot.title_id, kind, uid, saved_mutex.owner);
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!validate_mutex_map(emuenv.kernel.mutexes, snapshot.mutexes, "mutex")
+        || !validate_mutex_map(emuenv.kernel.lwmutexes, snapshot.lwmutexes, "lwmutex")) {
+        return false;
+    }
+
+    for (const auto &[uid, saved_eventflag] : snapshot.eventflags) {
+        const auto current = emuenv.kernel.eventflags.find(uid);
+        if (current == emuenv.kernel.eventflags.end())
+            return false;
+        const std::lock_guard<std::mutex> eventflag_lock(current->second->mutex);
+        if (!quick_state_sync_identity_matches(*current->second, saved_eventflag.name, saved_eventflag.attr)
+            || quick_state_waiting_count(current->second->waiting_threads) != saved_eventflag.waiting_count) {
+            LOG_WARN("Refused sync primitive restore for {} because event flag {} does not match the saved identity.", slot.title_id, uid);
+            return false;
+        }
+    }
+
+    const auto validate_condvar_map = [&](const CondvarPtrs &current_map, const MutexPtrs &associated_mutexes, const std::map<SceUID, QuickStateSyncCondvar> &saved_map, const char *kind) {
+        for (const auto &[uid, saved_condvar] : saved_map) {
+            const auto current = current_map.find(uid);
+            if (current == current_map.end())
+                return false;
+            const auto associated = saved_condvar.associated_mutex == 0 ? associated_mutexes.end() : associated_mutexes.find(saved_condvar.associated_mutex);
+            const std::lock_guard<std::mutex> condvar_lock(current->second->mutex);
+            if (!quick_state_sync_identity_matches(*current->second, saved_condvar.name, saved_condvar.attr)
+                || quick_state_waiting_count(current->second->waiting_threads) != saved_condvar.waiting_count
+                || (saved_condvar.associated_mutex != 0 && associated == associated_mutexes.end())
+                || (saved_condvar.associated_mutex == 0 && current->second->associated_mutex)
+                || (saved_condvar.associated_mutex != 0 && !current->second->associated_mutex)
+                || (saved_condvar.associated_mutex != 0 && current->second->associated_mutex && current->second->associated_mutex->uid != saved_condvar.associated_mutex)) {
+                LOG_WARN("Refused sync primitive restore for {} because {} {} does not match the saved identity.", slot.title_id, kind, uid);
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!validate_condvar_map(emuenv.kernel.condvars, emuenv.kernel.mutexes, snapshot.condvars, "condvar")
+        || !validate_condvar_map(emuenv.kernel.lwcondvars, emuenv.kernel.lwmutexes, snapshot.lwcondvars, "lwcondvar")) {
+        return false;
+    }
+
+    for (const auto &[uid, saved_rwlock] : snapshot.rwlocks) {
+        const auto current = emuenv.kernel.rwlocks.find(uid);
+        if (current == emuenv.kernel.rwlocks.end())
+            return false;
+        const std::lock_guard<std::mutex> rwlock_lock(current->second->mutex);
+        if (!quick_state_sync_identity_matches(*current->second, saved_rwlock.name, saved_rwlock.attr)
+            || quick_state_waiting_count(current->second->waiting_threads) != saved_rwlock.waiting_count) {
+            LOG_WARN("Refused sync primitive restore for {} because rwlock {} does not match the saved identity.", slot.title_id, uid);
+            return false;
+        }
+        for (const auto &[owner_id, _] : saved_rwlock.owners) {
+            if (!resolve_owner(owner_id)) {
+                LOG_WARN("Refused sync primitive restore for {} because rwlock {} owner thread {} was not matched.", slot.title_id, uid, owner_id);
+                return false;
+            }
+        }
+    }
+
+    for (const auto &[uid, saved_msgpipe] : snapshot.msgpipes) {
+        const auto current = emuenv.kernel.msgpipes.find(uid);
+        if (current == emuenv.kernel.msgpipes.end())
+            return false;
+        const std::lock_guard<std::mutex> msgpipe_lock(current->second->mutex);
+        if (!quick_state_sync_identity_matches(*current->second, saved_msgpipe.name, saved_msgpipe.attr)
+            || quick_state_waiting_count(current->second->senders) != saved_msgpipe.sender_count
+            || quick_state_waiting_count(current->second->receivers) != saved_msgpipe.receiver_count
+            || current->second->data_buffer.Capacity() != saved_msgpipe.capacity
+            || current->second->data_buffer.Used() != saved_msgpipe.used) {
+            LOG_WARN("Refused sync primitive restore for {} because msgpipe {} does not match the saved identity.", slot.title_id, uid);
+            return false;
+        }
+    }
+
+    for (const auto &[uid, saved_event] : snapshot.simple_events) {
+        auto &event = emuenv.kernel.simple_events.at(uid);
+        const std::lock_guard<std::mutex> event_lock(event->mutex);
+        event->pattern = saved_event.pattern;
+        event->last_user_data = saved_event.last_user_data;
+        event->auto_reset = saved_event.auto_reset;
+        event->cb_wakeup_only = saved_event.cb_wakeup_only;
+    }
+
+    for (const auto &[uid, saved_timer] : snapshot.timers) {
+        auto &timer = emuenv.kernel.timers.at(uid);
+        const std::lock_guard<std::mutex> timer_lock(timer->mutex);
+        timer->is_started = saved_timer.is_started;
+        timer->is_repeat = saved_timer.is_repeat;
+        timer->is_pulse = saved_timer.is_pulse;
+        timer->event_set = saved_timer.event_set;
+        timer->time = saved_timer.time;
+        timer->next_event = quick_state_timer_restore_next_event(saved_timer);
+        timer->event_interval = saved_timer.event_interval;
+        timer->condvar.notify_all();
+    }
+
+    for (const auto &[uid, saved_semaphore] : snapshot.semaphores) {
+        auto &semaphore = emuenv.kernel.semaphores.at(uid);
+        const std::lock_guard<std::mutex> semaphore_lock(semaphore->mutex);
+        semaphore->init_val = saved_semaphore.init_val;
+        semaphore->val = saved_semaphore.value;
+        semaphore->max = saved_semaphore.max;
+    }
+
+    const auto restore_mutex_map = [&](MutexPtrs &current_map, const std::map<SceUID, QuickStateSyncMutex> &saved_map) {
+        for (const auto &[uid, saved_mutex] : saved_map) {
+            auto &mutex = current_map.at(uid);
+            const std::lock_guard<std::mutex> mutex_lock(mutex->mutex);
+            mutex->init_count = saved_mutex.init_count;
+            mutex->lock_count = saved_mutex.lock_count;
+            mutex->owner = resolve_owner(saved_mutex.owner);
+        }
+    };
+    restore_mutex_map(emuenv.kernel.mutexes, snapshot.mutexes);
+    restore_mutex_map(emuenv.kernel.lwmutexes, snapshot.lwmutexes);
+
+    for (const auto &[uid, saved_eventflag] : snapshot.eventflags) {
+        auto &eventflag = emuenv.kernel.eventflags.at(uid);
+        const std::lock_guard<std::mutex> eventflag_lock(eventflag->mutex);
+        eventflag->flags = saved_eventflag.flags;
+    }
+
+    const auto restore_condvar_map = [&](CondvarPtrs &current_map, MutexPtrs &associated_mutexes, const std::map<SceUID, QuickStateSyncCondvar> &saved_map) {
+        for (const auto &[uid, saved_condvar] : saved_map) {
+            auto &condvar = current_map.at(uid);
+            const std::lock_guard<std::mutex> condvar_lock(condvar->mutex);
+            condvar->associated_mutex = saved_condvar.associated_mutex == 0 ? nullptr : associated_mutexes.at(saved_condvar.associated_mutex);
+        }
+    };
+    restore_condvar_map(emuenv.kernel.condvars, emuenv.kernel.mutexes, snapshot.condvars);
+    restore_condvar_map(emuenv.kernel.lwcondvars, emuenv.kernel.lwmutexes, snapshot.lwcondvars);
+
+    for (const auto &[uid, saved_rwlock] : snapshot.rwlocks) {
+        auto &rwlock = emuenv.kernel.rwlocks.at(uid);
+        const std::lock_guard<std::mutex> rwlock_lock(rwlock->mutex);
+        rwlock->state = saved_rwlock.state;
+        rwlock->owners.clear();
+        for (const auto &[owner_id, count] : saved_rwlock.owners)
+            rwlock->owners[threads_by_saved_id.at(owner_id)] = count;
+    }
+
+    for (const auto &[uid, saved_msgpipe] : snapshot.msgpipes) {
+        auto &msgpipe = emuenv.kernel.msgpipes.at(uid);
+        const std::lock_guard<std::mutex> msgpipe_lock(msgpipe->mutex);
+        msgpipe->beingDeleted = saved_msgpipe.being_deleted;
+    }
+
+    LOG_INFO("Restored sync primitive scalar snapshot for {} (timers={}, semaphores={}, mutexes={}, lwmutexes={}, eventflags={}, condvars={}, lwcondvars={}, rwlocks={}, simple_events={}, msgpipes={}).",
+        slot.title_id,
+        snapshot.timers.size(),
+        snapshot.semaphores.size(),
+        snapshot.mutexes.size(),
+        snapshot.lwmutexes.size(),
+        snapshot.eventflags.size(),
+        snapshot.condvars.size(),
+        snapshot.lwcondvars.size(),
+        snapshot.rwlocks.size(),
+        snapshot.simple_events.size(),
+        snapshot.msgpipes.size());
+    return true;
+}
+
 static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const QuickStateSlot &slot) {
     std::map<SceUID, QuickStateIOFilePosition> positions_by_fd;
     if (!quick_state_parse_io_file_positions_section(slot, positions_by_fd)) {
@@ -2769,6 +3589,11 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         return false;
     }
 
+    if (!restore_quick_state_sync_primitives(emuenv, slot, matched_threads)) {
+        resume_after_quick_state(emuenv, already_paused);
+        return false;
+    }
+
     if (!restore_quick_state_io_file_positions(emuenv, slot)) {
         resume_after_quick_state(emuenv, already_paused);
         return false;
@@ -2817,6 +3642,9 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "Restore enabled: " << (manifest.restore_enabled ? "yes" : "no") << "\n";
     marker << "Timing restore layer: " << (manifest.timing_restorable ? "ready" : "missing") << "\n";
     marker << "Thread metadata restore layer: " << (manifest.thread_metadata_restorable ? "ready" : "missing") << "\n";
+    marker << "Sync primitive scalar restore layer: " << (manifest.sync_primitives_restorable ? "ready" : "missing") << "\n";
+    marker << "Sync wait queue entries: " << manifest.sync_waiting_threads << "\n";
+    marker << "Message-pipe buffered bytes: " << manifest.msgpipe_buffer_bytes << "\n";
     marker << "IO file-position restore layer: " << (manifest.io_file_positions_restorable ? "ready" : "missing") << "\n";
     marker << "Block reason: " << manifest.block_reason << "\n";
     marker << "Missing serializers: " << quick_state_join_strings(manifest.missing_serializers) << "\n";
@@ -2970,7 +3798,7 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
     const auto manifest = build_quick_state_restore_manifest(emuenv, quick_state_slot0);
     if (!manifest.restore_enabled) {
         LOG_WARN("Refused quickstate slot 0 restore for {} because {}.", title_id, manifest.block_reason);
-        LOG_INFO("Quickstate slot 0 manifest for {}: guest={} MiB, pages={}, saved_threads={}, sections={}, timing_restorable={}, thread_metadata_restorable={}, io_file_positions_restorable={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
+        LOG_INFO("Quickstate slot 0 manifest for {}: guest={} MiB, pages={}, saved_threads={}, sections={}, timing_restorable={}, thread_metadata_restorable={}, sync_primitives_restorable={}, sync_wait_entries={}, msgpipe_buffer_bytes={}, io_file_positions_restorable={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
             title_id,
             manifest.guest_memory_bytes / (1024 * 1024),
             manifest.memory_pages,
@@ -2978,6 +3806,9 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
             quick_state_join_strings(manifest.captured_sections),
             manifest.timing_restorable,
             manifest.thread_metadata_restorable,
+            manifest.sync_primitives_restorable,
+            manifest.sync_waiting_threads,
+            manifest.msgpipe_buffer_bytes,
             manifest.io_file_positions_restorable,
             manifest.kernel.cpu_threads,
             manifest.kernel.timers,
