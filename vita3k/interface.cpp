@@ -66,6 +66,7 @@
 #include <optional>
 #include <regex>
 #include <set>
+#include <sstream>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -952,6 +953,12 @@ struct QuickStateThreadContext {
     CPUContext context;
 };
 
+struct QuickStateSection {
+    std::string tag;
+    uint32_t version = 1;
+    std::vector<uint8_t> bytes;
+};
+
 struct QuickStateSlot {
     bool valid = false;
     bool restore_requires_same_pause = true;
@@ -961,6 +968,7 @@ struct QuickStateSlot {
     std::vector<QuickStateMemoryPage> memory_pages;
     std::vector<uint32_t> allocator_words;
     std::vector<uint32_t> allocation_pages;
+    std::vector<QuickStateSection> sections;
     uint64_t byte_count = 0;
     uint64_t pause_epoch = 0;
 };
@@ -976,8 +984,10 @@ static bool android_back_long_press_used = false;
 static uint64_t android_back_down_ticks = 0;
 constexpr uint64_t ANDROID_BACK_HOME_LONG_PRESS_MS = 400;
 constexpr char QUICKSTATE_MAGIC[] = { 'V', '3', 'K', 'T', 'H', 'O', 'R', 'S', 'T', 'A', 'T', 'E' };
-constexpr uint32_t QUICKSTATE_VERSION = 4;
+constexpr uint32_t QUICKSTATE_VERSION = 5;
 constexpr uint32_t QUICKSTATE_MAX_STRING_BYTES = 4096;
+constexpr uint32_t QUICKSTATE_MAX_SECTION_COUNT = 64;
+constexpr uint64_t QUICKSTATE_MAX_SECTION_BYTES = 16 * 1024 * 1024;
 constexpr uint32_t QUICKSTATE_COMPRESSION_NONE = 0;
 constexpr uint32_t QUICKSTATE_COMPRESSION_MINIZ = 1;
 constexpr auto QUICKSTATE_PAUSE_TIMEOUT = std::chrono::milliseconds(3000);
@@ -1047,6 +1057,7 @@ struct QuickStateRestoreManifest {
     size_t allocation_pages = 0;
     size_t thread_contexts = 0;
     size_t avplayer_threads = 0;
+    std::vector<std::string> captured_sections;
     QuickStateKernelObjectCounts kernel;
     QuickStateIOCounts io;
     std::vector<std::string> missing_serializers;
@@ -1201,6 +1212,38 @@ static bool quick_state_decompress_page(const std::vector<uint8_t> &input, std::
 
 static uint32_t quick_state_crc32(const std::vector<uint8_t> &input) {
     return static_cast<uint32_t>(mz_crc32(MZ_CRC32_INIT, input.data(), input.size()));
+}
+
+static bool quick_state_write_section(std::ostream &out, const QuickStateSection &section) {
+    if (section.tag.empty() || (section.bytes.size() > QUICKSTATE_MAX_SECTION_BYTES))
+        return false;
+
+    const auto section_size = static_cast<uint64_t>(section.bytes.size());
+    const uint32_t section_crc32 = quick_state_crc32(section.bytes);
+    return quick_state_write_string(out, section.tag)
+        && quick_state_write_value(out, section.version)
+        && quick_state_write_value(out, section_size)
+        && quick_state_write_value(out, section_crc32)
+        && (section.bytes.empty() || quick_state_write_bytes(out, section.bytes.data(), static_cast<std::streamsize>(section.bytes.size())));
+}
+
+static bool quick_state_read_section(std::istream &in, QuickStateSection &section) {
+    uint64_t section_size = 0;
+    uint32_t section_crc32 = 0;
+    if (!quick_state_read_string(in, section.tag)
+        || section.tag.empty()
+        || !quick_state_read_value(in, section.version)
+        || !quick_state_read_value(in, section_size)
+        || (section_size > QUICKSTATE_MAX_SECTION_BYTES)
+        || !quick_state_read_value(in, section_crc32)) {
+        return false;
+    }
+
+    section.bytes.resize(static_cast<size_t>(section_size));
+    if (section_size > 0 && !quick_state_read_bytes(in, section.bytes.data(), static_cast<std::streamsize>(section.bytes.size())))
+        return false;
+
+    return quick_state_crc32(section.bytes) == section_crc32;
 }
 
 static bool memory_page_is_allocated(const MemState &mem, const uint32_t page) {
@@ -1371,6 +1414,9 @@ static bool save_quick_state_to_disk(EmuEnvState &emuenv, const QuickStateSlot &
         const uint64_t memory_page_count = static_cast<uint64_t>(slot.memory_pages.size());
         const uint32_t allocator_word_count = static_cast<uint32_t>(slot.allocator_words.size());
         const uint32_t allocation_page_count = static_cast<uint32_t>(slot.allocation_pages.size());
+        if (slot.sections.size() > QUICKSTATE_MAX_SECTION_COUNT)
+            return false;
+
         if (!quick_state_write_bytes(out, QUICKSTATE_MAGIC, sizeof(QUICKSTATE_MAGIC))
             || !quick_state_write_value(out, QUICKSTATE_VERSION)
             || !quick_state_write_value(out, QUICKSTATE_PAGE_SIZE)
@@ -1429,6 +1475,14 @@ static bool save_quick_state_to_disk(EmuEnvState &emuenv, const QuickStateSlot &
                 || !quick_state_write_bytes(out, page_bytes->data(), stored_page_size)) {
                 return false;
             }
+        }
+
+        const uint32_t section_count = static_cast<uint32_t>(slot.sections.size());
+        if (!quick_state_write_value(out, section_count))
+            return false;
+        for (const auto &section : slot.sections) {
+            if (!quick_state_write_section(out, section))
+                return false;
         }
     }
 
@@ -1572,6 +1626,18 @@ static bool load_quick_state_from_disk(EmuEnvState &emuenv, const std::string &t
 
     if (byte_count != header.byte_count)
         return false;
+    if (header.version >= 5) {
+        uint32_t section_count = 0;
+        if (!quick_state_read_value(in, section_count) || (section_count > QUICKSTATE_MAX_SECTION_COUNT))
+            return false;
+        loaded.sections.reserve(section_count);
+        for (uint32_t i = 0; i < section_count; i++) {
+            QuickStateSection section;
+            if (!quick_state_read_section(in, section))
+                return false;
+            loaded.sections.push_back(std::move(section));
+        }
+    }
     in.peek();
     if (!in.eof())
         return false;
@@ -1742,6 +1808,28 @@ static std::string quick_state_join_strings(const std::vector<std::string> &valu
     return joined;
 }
 
+static std::vector<std::string> quick_state_section_tags(const QuickStateSlot &slot) {
+    std::vector<std::string> tags;
+    tags.reserve(slot.sections.size());
+    for (const auto &section : slot.sections)
+        tags.push_back(fmt::format("{}:v{}:{}B", section.tag, section.version, section.bytes.size()));
+    return tags;
+}
+
+static std::string quick_state_thread_status_name(const ThreadStatus status) {
+    switch (status) {
+    case ThreadStatus::run:
+        return "run";
+    case ThreadStatus::dormant:
+        return "dormant";
+    case ThreadStatus::suspend:
+        return "suspend";
+    case ThreadStatus::wait:
+        return "wait";
+    }
+    return "unknown";
+}
+
 static size_t quick_state_count_avplayer_threads(const QuickStateSlot &slot) {
     return static_cast<size_t>(std::count_if(slot.thread_contexts.begin(), slot.thread_contexts.end(), [](const QuickStateThreadContext &thread) {
         return thread.name.rfind("avPlayer ", 0) == 0;
@@ -1798,6 +1886,7 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     manifest.allocation_pages = slot.allocation_pages.size();
     manifest.thread_contexts = slot.thread_contexts.size();
     manifest.avplayer_threads = quick_state_count_avplayer_threads(slot);
+    manifest.captured_sections = quick_state_section_tags(slot);
     manifest.kernel = quick_state_count_kernel_objects(emuenv);
     manifest.io = quick_state_count_io_objects(emuenv);
 
@@ -1823,6 +1912,298 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     }
 
     return manifest;
+}
+
+static QuickStateSection quick_state_make_text_section(std::string tag, std::ostringstream &text) {
+    const std::string payload = text.str();
+    QuickStateSection section;
+    section.tag = std::move(tag);
+    section.version = 1;
+    section.bytes.assign(payload.begin(), payload.end());
+    return section;
+}
+
+static size_t quick_state_waiting_count(const WaitingThreadQueuePtr &waiting_threads) {
+    return waiting_threads ? waiting_threads->size() : 0;
+}
+
+static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    const std::vector<std::string> planned_sections = {
+        "thor.quickstate.manifest",
+        "thor.timing",
+        "thor.kernel.objects",
+        "thor.io.vfs",
+        "thor.display",
+        "thor.audio",
+    };
+
+    std::vector<QuickStateSection> sections;
+    sections.reserve(planned_sections.size());
+
+    {
+        const auto manifest = build_quick_state_restore_manifest(emuenv, slot);
+        std::ostringstream text;
+        text << "schema=thor.quickstate.manifest.v1\n";
+        text << "format_version=" << QUICKSTATE_VERSION << "\n";
+        text << "title_id=" << slot.title_id << "\n";
+        text << "title=" << slot.title << "\n";
+        text << "guest_memory_bytes=" << slot.byte_count << "\n";
+        text << "guest_memory_pages=" << slot.memory_pages.size() << "\n";
+        text << "thread_contexts=" << slot.thread_contexts.size() << "\n";
+        text << "avplayer_threads=" << manifest.avplayer_threads << "\n";
+        text << "allocator_words=" << slot.allocator_words.size() << "\n";
+        text << "allocation_pages=" << slot.allocation_pages.size() << "\n";
+        text << "capture_sections=" << quick_state_join_strings(planned_sections) << "\n";
+        text << "restore_enabled=0\n";
+        text << "restore_gate=windows-stability\n";
+        text << "missing_serializers=" << quick_state_join_strings(manifest.missing_serializers) << "\n";
+        sections.push_back(quick_state_make_text_section("thor.quickstate.manifest", text));
+    }
+
+    {
+        std::ostringstream text;
+        text << "schema=thor.timing.v1\n";
+        text << "kernel_start_tick=" << emuenv.kernel.start_tick << "\n";
+        text << "kernel_base_tick=" << emuenv.kernel.base_tick.tick << "\n";
+        text << "kernel_guest_tick=" << emuenv.kernel.get_guest_tick() << "\n";
+        text << "kernel_process_time=" << emuenv.kernel.get_process_time() << "\n";
+        text << "kernel_speed_percent=" << emuenv.kernel.speed_percent.load() << "\n";
+        {
+            const std::lock_guard<std::mutex> speed_lock(emuenv.kernel.speed_mutex);
+            text << "speed_anchor_host_process_us=" << emuenv.kernel.speed_anchor_host_process_us << "\n";
+            text << "speed_anchor_guest_process_us=" << emuenv.kernel.speed_anchor_guest_process_us << "\n";
+        }
+        sections.push_back(quick_state_make_text_section("thor.timing", text));
+    }
+
+    {
+        std::ostringstream text;
+        text << "schema=thor.kernel.objects.v1\n";
+        const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
+        text << "threads=" << emuenv.kernel.threads.size() << "\n";
+        for (const auto &[thread_id, thread] : emuenv.kernel.threads) {
+            const std::lock_guard<std::mutex> thread_lock(thread->mutex);
+            text << "thread." << thread_id
+                 << ".name=" << thread->name
+                 << ";status=" << quick_state_thread_status_name(thread->status)
+                 << ";entry=0x" << std::hex << thread->entry_point << std::dec
+                 << ";stack=0x" << std::hex << thread->stack.get() << std::dec
+                 << ";stack_size=" << thread->stack_size
+                 << ";tls=0x" << std::hex << thread->tls.get() << std::dec
+                 << ";priority=" << thread->priority
+                 << ";affinity=" << thread->affinity_mask
+                 << ";callbacks=" << thread->callbacks.size()
+                 << ";waiting_threads=" << thread->waiting_threads.size()
+                 << "\n";
+        }
+
+        text << "timers=" << emuenv.kernel.timers.size() << "\n";
+        for (const auto &[uid, timer] : emuenv.kernel.timers) {
+            const std::lock_guard<std::mutex> timer_lock(timer->mutex);
+            text << "timer." << uid
+                 << ".name=" << timer->name
+                 << ";attr=" << timer->attr
+                 << ";started=" << timer->is_started
+                 << ";repeat=" << timer->is_repeat
+                 << ";pulse=" << timer->is_pulse
+                 << ";event_set=" << timer->event_set
+                 << ";time=" << timer->time
+                 << ";next_event=" << timer->next_event
+                 << ";interval=" << timer->event_interval
+                 << ";waiting=" << quick_state_waiting_count(timer->waiting_threads)
+                 << "\n";
+        }
+
+        text << "semaphores=" << emuenv.kernel.semaphores.size() << "\n";
+        for (const auto &[uid, semaphore] : emuenv.kernel.semaphores) {
+            const std::lock_guard<std::mutex> semaphore_lock(semaphore->mutex);
+            text << "semaphore." << uid
+                 << ".name=" << semaphore->name
+                 << ";attr=" << semaphore->attr
+                 << ";init=" << semaphore->init_val
+                 << ";value=" << semaphore->val
+                 << ";max=" << semaphore->max
+                 << ";waiting=" << quick_state_waiting_count(semaphore->waiting_threads)
+                 << "\n";
+        }
+
+        text << "mutexes=" << emuenv.kernel.mutexes.size() << "\n";
+        for (const auto &[uid, mutex] : emuenv.kernel.mutexes) {
+            const std::lock_guard<std::mutex> mutex_lock(mutex->mutex);
+            text << "mutex." << uid
+                 << ".name=" << mutex->name
+                 << ";attr=" << mutex->attr
+                 << ";init=" << mutex->init_count
+                 << ";lock_count=" << mutex->lock_count
+                 << ";owner=" << (mutex->owner ? mutex->owner->id : 0)
+                 << ";waiting=" << quick_state_waiting_count(mutex->waiting_threads)
+                 << "\n";
+        }
+
+        text << "lwmutexes=" << emuenv.kernel.lwmutexes.size() << "\n";
+        for (const auto &[uid, mutex] : emuenv.kernel.lwmutexes) {
+            const std::lock_guard<std::mutex> mutex_lock(mutex->mutex);
+            text << "lwmutex." << uid
+                 << ".name=" << mutex->name
+                 << ";attr=" << mutex->attr
+                 << ";init=" << mutex->init_count
+                 << ";lock_count=" << mutex->lock_count
+                 << ";owner=" << (mutex->owner ? mutex->owner->id : 0)
+                 << ";workarea=0x" << std::hex << mutex->workarea.address() << std::dec
+                 << ";waiting=" << quick_state_waiting_count(mutex->waiting_threads)
+                 << "\n";
+        }
+
+        text << "eventflags=" << emuenv.kernel.eventflags.size() << "\n";
+        for (const auto &[uid, eventflag] : emuenv.kernel.eventflags) {
+            const std::lock_guard<std::mutex> event_lock(eventflag->mutex);
+            text << "eventflag." << uid
+                 << ".name=" << eventflag->name
+                 << ";attr=" << eventflag->attr
+                 << ";flags=" << eventflag->flags
+                 << ";waiting=" << quick_state_waiting_count(eventflag->waiting_threads)
+                 << "\n";
+        }
+
+        text << "condvars=" << emuenv.kernel.condvars.size() << "\n";
+        for (const auto &[uid, condvar] : emuenv.kernel.condvars) {
+            const std::lock_guard<std::mutex> condvar_lock(condvar->mutex);
+            text << "condvar." << uid
+                 << ".name=" << condvar->name
+                 << ";attr=" << condvar->attr
+                 << ";associated_mutex=" << (condvar->associated_mutex ? condvar->associated_mutex->uid : 0)
+                 << ";waiting=" << quick_state_waiting_count(condvar->waiting_threads)
+                 << "\n";
+        }
+
+        text << "lwcondvars=" << emuenv.kernel.lwcondvars.size() << "\n";
+        for (const auto &[uid, condvar] : emuenv.kernel.lwcondvars) {
+            const std::lock_guard<std::mutex> condvar_lock(condvar->mutex);
+            text << "lwcondvar." << uid
+                 << ".name=" << condvar->name
+                 << ";attr=" << condvar->attr
+                 << ";associated_mutex=" << (condvar->associated_mutex ? condvar->associated_mutex->uid : 0)
+                 << ";waiting=" << quick_state_waiting_count(condvar->waiting_threads)
+                 << "\n";
+        }
+
+        text << "rwlocks=" << emuenv.kernel.rwlocks.size() << "\n";
+        for (const auto &[uid, rwlock] : emuenv.kernel.rwlocks) {
+            const std::lock_guard<std::mutex> rwlock_lock(rwlock->mutex);
+            text << "rwlock." << uid
+                 << ".name=" << rwlock->name
+                 << ";attr=" << rwlock->attr
+                 << ";state=" << static_cast<int>(rwlock->state)
+                 << ";owners=" << rwlock->owners.size()
+                 << ";waiting=" << quick_state_waiting_count(rwlock->waiting_threads)
+                 << "\n";
+        }
+
+        text << "msgpipes=" << emuenv.kernel.msgpipes.size() << "\n";
+        for (const auto &[uid, msgpipe] : emuenv.kernel.msgpipes) {
+            const std::lock_guard<std::mutex> msgpipe_lock(msgpipe->mutex);
+            text << "msgpipe." << uid
+                 << ".name=" << msgpipe->name
+                 << ";attr=" << msgpipe->attr
+                 << ";senders=" << quick_state_waiting_count(msgpipe->senders)
+                 << ";receivers=" << quick_state_waiting_count(msgpipe->receivers)
+                 << ";being_deleted=" << msgpipe->beingDeleted
+                 << "\n";
+        }
+
+        text << "callbacks=" << emuenv.kernel.callbacks.size() << "\n";
+        text << "simple_events=" << emuenv.kernel.simple_events.size() << "\n";
+        text << "loaded_modules=" << emuenv.kernel.loaded_modules.size() << "\n";
+        sections.push_back(quick_state_make_text_section("thor.kernel.objects", text));
+    }
+
+    {
+        std::ostringstream text;
+        text << "schema=thor.io.vfs.v1\n";
+        text << "title_id=" << emuenv.io.title_id << "\n";
+        text << "content_id=" << emuenv.io.content_id << "\n";
+        text << "app_path=" << emuenv.io.app_path << "\n";
+        text << "app0_host_path=" << emuenv.io.app0_host_path << "\n";
+        text << "archive_path=" << emuenv.io.app0_archive.archive_path << "\n";
+        text << "archive_content_root=" << emuenv.io.app0_archive.content_root << "\n";
+        text << "archive_entries=" << emuenv.io.app0_archive.entries.size() << "\n";
+        text << "archive_dirs=" << quick_state_count_io_objects(emuenv).archive_dirs << "\n";
+        text << "next_fd=" << emuenv.io.next_fd << "\n";
+        text << "tty_files=" << emuenv.io.tty_files.size() << "\n";
+        text << "std_files=" << emuenv.io.std_files.size() << "\n";
+        for (const auto &[fd, file] : emuenv.io.std_files) {
+            text << "file." << fd
+                 << ".vita=" << file.get_vita_loc()
+                 << ";translated=" << file.get_translated_path()
+                 << ";host=" << file.get_system_location()
+                 << ";open_mode=" << file.get_open_mode()
+                 << ";memory=" << file.is_memory_file()
+                 << "\n";
+        }
+        text << "dir_entries=" << emuenv.io.dir_entries.size() << "\n";
+        for (const auto &[fd, dir] : emuenv.io.dir_entries) {
+            text << "dir." << fd
+                 << ".vita=" << dir.get_vita_loc()
+                 << ";translated=" << dir.get_translated_path()
+                 << ";host=" << dir.get_system_location()
+                 << ";memory=" << dir.is_memory_directory()
+                 << "\n";
+        }
+        {
+            const std::lock_guard<std::mutex> overlay_lock(emuenv.io.overlay_mutex);
+            text << "overlays=" << emuenv.io.overlays.size() << "\n";
+        }
+        sections.push_back(quick_state_make_text_section("thor.io.vfs", text));
+    }
+
+    {
+        std::ostringstream text;
+        text << "schema=thor.display.v1\n";
+        text << "speed_percent=" << emuenv.display.speed_percent.load() << "\n";
+        text << "vblank_count=" << emuenv.display.vblank_count.load() << "\n";
+        text << "last_setframe_vblank_count=" << emuenv.display.last_setframe_vblank_count.load() << "\n";
+        text << "current_sync_object=0x" << std::hex << emuenv.display.current_sync_object.load() << std::dec << "\n";
+        text << "predicted_frames=" << emuenv.display.predicted_frames.size() << "\n";
+        text << "predicted_frame_position=" << emuenv.display.predicted_frame_position << "\n";
+        text << "predicted_cycles_seen=" << emuenv.display.predicted_cycles_seen << "\n";
+        text << "predicting=" << emuenv.display.predicting.load() << "\n";
+        {
+            const std::lock_guard<std::mutex> display_lock(emuenv.display.mutex);
+            text << "vblank_wait_infos=" << emuenv.display.vblank_wait_infos.size() << "\n";
+            text << "vblank_callbacks=" << emuenv.display.vblank_callbacks.size() << "\n";
+        }
+        sections.push_back(quick_state_make_text_section("thor.display", text));
+    }
+
+    {
+        std::ostringstream text;
+        text << "schema=thor.audio.v1\n";
+        text << "speed_percent=" << emuenv.audio.speed_percent.load() << "\n";
+        text << "backend=" << emuenv.audio.audio_backend << "\n";
+        text << "global_volume=" << emuenv.audio.global_volume << "\n";
+        const std::lock_guard<std::mutex> audio_lock(emuenv.audio.mutex);
+        text << "next_port_id=" << emuenv.audio.next_port_id << "\n";
+        text << "out_ports=" << emuenv.audio.out_ports.size() << "\n";
+        for (const auto &[port_id, port] : emuenv.audio.out_ports) {
+            text << "port." << port_id
+                 << ".type=" << port->type
+                 << ";len=" << port->len
+                 << ";freq=" << port->freq
+                 << ";mode=" << port->mode
+                 << ";len_bytes=" << port->len_bytes
+                 << ";len_us=" << port->len_microseconds
+                 << ";last_output=" << port->last_output
+                 << ";left=" << port->left_channel_volume
+                 << ";right=" << port->right_channel_volume
+                 << ";volume=" << port->volume
+                 << "\n";
+        }
+        text << "audio_in_running=" << emuenv.audio.in_port.running << "\n";
+        text << "audio_in_len_bytes=" << emuenv.audio.in_port.len_bytes << "\n";
+        sections.push_back(quick_state_make_text_section("thor.audio", text));
+    }
+
+    return sections;
 }
 
 static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
@@ -1901,6 +2282,7 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "AVPlayer threads: " << manifest.avplayer_threads << "\n";
     marker << "Allocator words: " << manifest.allocator_words << "\n";
     marker << "Allocation pages: " << manifest.allocation_pages << "\n";
+    marker << "Captured sections: " << quick_state_join_strings(manifest.captured_sections) << "\n";
     marker << "Compression level: " << std::clamp(emuenv.cfg.save_state_compression_level, 0, 9) << "\n";
     marker << "State file bytes: " << quick_state_file_size(emuenv, slot.title_id) << "\n";
     marker << "State root: " << quick_state_root(emuenv) << "\n";
@@ -2020,6 +2402,7 @@ void runtime_request_save_state(EmuEnvState &emuenv) {
     const fs::path state_dir = quick_state_dir(emuenv, title_id);
     fs::create_directories(state_dir);
     if (capture_quick_state(emuenv, quick_state_slot0)) {
+        quick_state_slot0.sections = build_quick_state_capture_sections(emuenv, quick_state_slot0);
         const bool saved_to_disk = save_quick_state_to_disk(emuenv, quick_state_slot0);
         if (saved_to_disk)
             write_quick_state_marker(emuenv, quick_state_slot0);
@@ -2058,11 +2441,12 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
     const auto manifest = build_quick_state_restore_manifest(emuenv, quick_state_slot0);
     if (!manifest.restore_enabled) {
         LOG_WARN("Refused quickstate slot 0 restore for {} because {}.", title_id, manifest.block_reason);
-        LOG_INFO("Quickstate slot 0 manifest for {}: guest={} MiB, pages={}, saved_threads={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
+        LOG_INFO("Quickstate slot 0 manifest for {}: guest={} MiB, pages={}, saved_threads={}, sections={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
             title_id,
             manifest.guest_memory_bytes / (1024 * 1024),
             manifest.memory_pages,
             manifest.thread_contexts,
+            quick_state_join_strings(manifest.captured_sections),
             manifest.kernel.cpu_threads,
             manifest.kernel.timers,
             manifest.kernel.semaphores,
