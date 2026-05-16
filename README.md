@@ -98,29 +98,13 @@ This section is for people changing the emulator code, debugging games, or compa
 - Which performance changes are general Vita3K improvements, and which ones should stay Thor-only?
 - What proof is enough before calling a game or setting working: screenshot, logcat, frame pacing, controller proof, save proof, or all of them?
 
-## UPPERS Working On Thor
+## Renderer Canary Fixes
 
-![UPPERS running on Vita3K-Thor on AYN Thor](docs/screenshots/uppers-thor-android-working-20260512_224811.png)
+These games are local test canaries, not bundled content. They are useful because they exposed real emulator bugs that could affect other titles.
 
-UPPERS (`PCSG00633`) is now rendering on AYN Thor with this fork. The Windows debugging loop needed the core renderer/shader fixes first: vertex trap sizing for register-format attributes, depth clamp behavior, disabled-channel blend translation, and repeat-aware `i32mad2` shader translation.
-
-The Android-specific blocker was different: Vulkan screen-present shaders had to force opaque alpha so Android SurfaceFlinger would not composite a valid game frame as black. Thor should also use an Adreno 7xx-compatible Turnip driver profile, not the old A8xx driver path.
-
-This screenshot is from a local legally owned test copy. No game content, firmware, license files, or commercial content is included in this repository.
-
-## Dead Or Alive Xtreme 3 Venus Runs On Thor
-
-Dead or Alive Xtreme 3 Venus (`PCSH00250`) now reaches gameplay rendering on AYN Thor from direct ZIP cartridge mode. It is one of the main renderer canary games for this fork because it exposed several real emulator bugs after the title screen, not just one broken setting.
-
-ELI5 version of the first custom fix: the game was changing chunks of Vita memory right before the GPU used them. Some chunks crossed the edge of Vita3K's watched memory area, so the emulator sometimes refreshed only part of the data. The GPU then drew with one half new data and one half stale data, which showed up as black scenes, broken island/beach rendering, magenta terrain, or flickering title screens.
-
-The fix was to give the Vulkan double-buffer path a larger guard area and make the sync check copy the whole boundary-crossing chunk before Vulkan renders the frame. In plain English: the emulator now hands the GPU the complete current drawing instructions instead of a half-old, half-new set.
-
-ELI5 version of the second custom fix: later gameplay uses one pass to draw depth information, then another pass reads that depth like a texture. Vita3K was waiting for one kind of depth write, but Vulkan can also do those writes earlier in the pipeline. That meant the next pass could read the depth texture too soon, making room and environment surfaces go black or disappear.
-
-The fix was to include early depth writes in the render-pass dependency, so depth-as-texture passes wait for the data they actually need. This was verified Windows-first from title into deeper gameplay, then on AYN Thor Android with burst captures through the same post-title scenes. The same Android build also keeps the earlier direct ZIP cartridge fixes and the SurfaceFlinger opaque-present fix used for UPPERS.
-
-ELI5 version of the third custom fix: some Vita games store beach, terrain, and background textures in compressed BCn/DXT blocks. Modern GPUs can read those blocks directly, but Vita3K's native Vulkan upload path could turn those textures into giant magenta/black blocks in DOA's title loop. This fork now uses Vita3K's CPU texture decompression path by default for Vulkan BCn/DXT textures, which trades a little startup/upload cost for correct images. Native BCn can still be enabled for controlled debugging with `VITA3K_ALLOW_NATIVE_BCN=1` on Windows or `debug.vita3k.allow_native_bcn=1` on Android.
+- UPPERS (`PCSG00633`) now renders correctly on AYN Thor again. ELI5: the emulator was translating some Vita shader math and depth behavior too loosely, so character parts or foreground slabs could disappear or draw in the wrong place. This fork fixed the shader repeat handling, kept Vita-style depth clipping, and fixed Android present alpha so a valid frame is not composited as black.
+- Dead or Alive Xtreme 3 Venus (`PCSH00250`) now passes the tested title/menu and bedroom scenes on AYN Thor. ELI5: the emulator sometimes handed Vulkan stale or incomplete drawing data, sampled depth textures before they were ready, decoded some compressed textures incorrectly, and picked the wrong alpha/depth side for a few transparent materials. This fork tightens those paths so the island, gold statue, clouds, hair, and room occlusion render correctly in the tested scenes.
+- These fixes were checked Windows-first where possible, then verified on AYN Thor Android with burst screenshots/video and SQLite debug notes.
 
 ## Build Locally
 
