@@ -1177,6 +1177,7 @@ struct QuickStateSyncMsgPipe {
     uint64_t capacity = 0;
     uint64_t used = 0;
     bool being_deleted = false;
+    std::vector<uint8_t> payload;
 };
 
 struct QuickStateSyncWaitQueueEntry {
@@ -2331,6 +2332,43 @@ static bool quick_state_parse_float_text(const std::string &text, float &out) {
     return consumed == text.size() && std::isfinite(out);
 }
 
+static std::string quick_state_bytes_to_hex(const std::vector<uint8_t> &bytes) {
+    static constexpr char digits[] = "0123456789ABCDEF";
+    std::string text;
+    text.reserve(bytes.size() * 2);
+    for (const uint8_t byte : bytes) {
+        text.push_back(digits[byte >> 4]);
+        text.push_back(digits[byte & 0xF]);
+    }
+    return text;
+}
+
+static bool quick_state_parse_hex_bytes(const std::string &text, std::vector<uint8_t> &bytes) {
+    if (text.size() % 2 != 0)
+        return false;
+
+    const auto hex_value = [](const char c) -> int {
+        if (c >= '0' && c <= '9')
+            return c - '0';
+        if (c >= 'a' && c <= 'f')
+            return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F')
+            return c - 'A' + 10;
+        return -1;
+    };
+
+    bytes.clear();
+    bytes.reserve(text.size() / 2);
+    for (size_t i = 0; i < text.size(); i += 2) {
+        const int hi = hex_value(text[i]);
+        const int lo = hex_value(text[i + 1]);
+        if (hi < 0 || lo < 0)
+            return false;
+        bytes.push_back(static_cast<uint8_t>((hi << 4) | lo));
+    }
+    return true;
+}
+
 static bool quick_state_parse_size(const std::map<std::string, std::string> &values, const std::string &key, size_t &out) {
     uint64_t parsed = 0;
     if (!quick_state_parse_u64(values, key, parsed) || parsed > static_cast<uint64_t>(std::numeric_limits<size_t>::max()))
@@ -2802,16 +2840,18 @@ static bool quick_state_parse_sync_msgpipe(const std::string &key, const std::st
         || !fields.contains("receivers")
         || !fields.contains("capacity")
         || !fields.contains("used")
+        || !fields.contains("payload")
         || !fields.contains("being_deleted")
         || !quick_state_parse_u32_text(fields.at("senders"), msgpipe.sender_count)
         || !quick_state_parse_u32_text(fields.at("receivers"), msgpipe.receiver_count)
         || !quick_state_parse_u64_text(fields.at("capacity"), msgpipe.capacity)
         || !quick_state_parse_u64_text(fields.at("used"), msgpipe.used)
+        || !quick_state_parse_hex_bytes(fields.at("payload"), msgpipe.payload)
         || !quick_state_parse_bool_text(fields.at("being_deleted"), parsed_bool)) {
         return false;
     }
     msgpipe.being_deleted = parsed_bool;
-    return msgpipe.used <= msgpipe.capacity;
+    return msgpipe.used <= msgpipe.capacity && msgpipe.payload.size() == msgpipe.used;
 }
 
 static bool quick_state_parse_sync_wait_queue_key(const std::string &key, QuickStateSyncWaitQueueEntry &entry) {
@@ -3395,8 +3435,6 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
                 manifest.missing_serializers.push_back("kernel-wait-queue-metadata");
             manifest.missing_serializers.push_back("kernel-wait-queues");
         }
-        if (manifest.msgpipe_buffer_bytes > 0)
-            manifest.missing_serializers.push_back("kernel-msgpipe-buffers");
     }
     if (!manifest.thread_metadata_restorable)
         manifest.missing_serializers.push_back("kernel-thread-metadata");
@@ -3704,12 +3742,6 @@ static bool quick_state_check_live_wait_queues(EmuEnvState &emuenv, const QuickS
             *detail = "saved wait queue metadata is incomplete";
         return false;
     }
-    if (snapshot.msgpipe_buffer_bytes() > 0) {
-        if (detail)
-            *detail = fmt::format("{} message-pipe buffer byte(s) still need payload serialization for post-resume loads", snapshot.msgpipe_buffer_bytes());
-        return false;
-    }
-
     const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
     if (emuenv.kernel.simple_events.size() != snapshot.simple_events.size()
         || emuenv.kernel.timers.size() != snapshot.timers.size()
@@ -4140,6 +4172,9 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         text << "msgpipes=" << emuenv.kernel.msgpipes.size() << "\n";
         for (const auto &[uid, msgpipe] : emuenv.kernel.msgpipes) {
             const std::lock_guard<std::mutex> msgpipe_lock(msgpipe->mutex);
+            std::vector<uint8_t> payload(msgpipe->data_buffer.Used());
+            if (!payload.empty())
+                msgpipe->data_buffer.Peek(payload.data(), payload.size());
             text << "msgpipe." << uid
                  << ".name=" << msgpipe->name
                  << ";attr=" << msgpipe->attr
@@ -4147,6 +4182,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";receivers=" << quick_state_waiting_count(msgpipe->receivers)
                  << ";capacity=" << msgpipe->data_buffer.Capacity()
                  << ";used=" << msgpipe->data_buffer.Used()
+                 << ";payload=" << quick_state_bytes_to_hex(payload)
                  << ";being_deleted=" << msgpipe->beingDeleted
                  << "\n";
             wait_queue_entries += quick_state_write_wait_queue_entries(text, emuenv.mem, "msgpipe_sender", uid, msgpipe->senders, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
@@ -4420,13 +4456,6 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
         return false;
     }
 
-    if (snapshot.msgpipe_buffer_bytes() > 0 && !allow_live_host_state) {
-        LOG_WARN("Refused sync primitive restore for {} because {} message-pipe buffer byte(s) still need payload serialization.",
-            slot.title_id, snapshot.msgpipe_buffer_bytes());
-        quick_state_last_restore_detail = fmt::format("{} message-pipe buffer byte(s) still need payload serialization", snapshot.msgpipe_buffer_bytes());
-        return false;
-    }
-
     const auto threads_by_saved_id = quick_state_matched_threads_by_saved_id(slot, matched_threads);
     const auto resolve_owner = [&threads_by_saved_id](const SceUID saved_thread_id) -> ThreadStatePtr {
         if (saved_thread_id == 0)
@@ -4629,7 +4658,7 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
             || quick_state_waiting_count(current->second->senders) != saved_msgpipe.sender_count
             || quick_state_waiting_count(current->second->receivers) != saved_msgpipe.receiver_count
             || current->second->data_buffer.Capacity() != saved_msgpipe.capacity
-            || current->second->data_buffer.Used() != saved_msgpipe.used) {
+            || saved_msgpipe.payload.size() != saved_msgpipe.used) {
             LOG_WARN("Refused sync primitive restore for {} because msgpipe {} does not match the saved identity.", slot.title_id, uid);
             quick_state_last_restore_detail = fmt::format("msgpipe {} does not match the saved identity", uid);
             return false;
@@ -4706,6 +4735,17 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
     for (const auto &[uid, saved_msgpipe] : snapshot.msgpipes) {
         auto &msgpipe = emuenv.kernel.msgpipes.at(uid);
         const std::lock_guard<std::mutex> msgpipe_lock(msgpipe->mutex);
+        if (msgpipe->data_buffer.Used() > 0) {
+            std::vector<uint8_t> discard(msgpipe->data_buffer.Used());
+            msgpipe->data_buffer.Remove(discard.data(), discard.size());
+        }
+        if (!saved_msgpipe.payload.empty()) {
+            const size_t inserted = msgpipe->data_buffer.Insert(saved_msgpipe.payload.data(), saved_msgpipe.payload.size());
+            if (inserted != saved_msgpipe.payload.size()) {
+                quick_state_last_restore_detail = fmt::format("msgpipe {} payload restore failed", uid);
+                return false;
+            }
+        }
         msgpipe->beingDeleted = saved_msgpipe.being_deleted;
     }
 
@@ -5220,6 +5260,8 @@ static void write_quick_state_wait_queue_marker(std::ostream &marker, const Quic
     for (const auto &[uid, item] : snapshot.simple_events)
         write_wait("simple_event", uid, item.name, item.waiting_count);
     for (const auto &[uid, item] : snapshot.msgpipes) {
+        if (item.used > 0)
+            marker << "msgpipe " << uid << " (" << item.name << ") buffered bytes: " << item.used << "\n";
         if (item.sender_count > 0) {
             marker << "msgpipe " << uid << " (" << item.name << ") senders: " << item.sender_count << "\n";
             for (const QuickStateSyncWaitQueueEntry &entry : snapshot.wait_queue_entries) {
