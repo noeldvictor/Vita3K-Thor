@@ -1,0 +1,6 @@
+interface:
+  display_name: "Vita3K Ghidra Escalation"
+  short_description: "Static analysis only after concrete Vita evidence"
+  default_prompt: "Use $vita3k-ghidra-escalation when Vita3K runtime evidence asks a concrete Vita API, shader, material, or GXM call-site question."
+policy:
+  allow_implicit_invocation: true

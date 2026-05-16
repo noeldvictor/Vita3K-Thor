@@ -1,0 +1,6 @@
+interface:
+  display_name: "Vita3K Render Experiment Gate"
+  short_description: "Anti-loop gate for renderer experiments"
+  default_prompt: "Use $vita3k-render-experiment-gate before a Vita3K renderer/core experiment, risky debug prop, or code edit."
+policy:
+  allow_implicit_invocation: true

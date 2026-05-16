@@ -1,0 +1,6 @@
+interface:
+  display_name: "Vita3K Regression Ledger"
+  short_description: "Compatibility checkpoints and regression matrix"
+  default_prompt: "Use $vita3k-regression-ledger to prove when a game worked, what commit broke it, or whether a fix preserved other games."
+policy:
+  allow_implicit_invocation: true

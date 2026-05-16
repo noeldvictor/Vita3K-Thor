@@ -1,0 +1,6 @@
+interface:
+  display_name: "Vita3K Thor Android Loop"
+  short_description: "AYN Thor install, launch, capture, and proof"
+  default_prompt: "Use $vita3k-thor-android-loop to install or test Vita3K on AYN Thor with ADB launches, props, burst captures, and logs."
+policy:
+  allow_implicit_invocation: true

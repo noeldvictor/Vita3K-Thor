@@ -1,0 +1,6 @@
+interface:
+  display_name: "Vita3K Windows Render Loop"
+  short_description: "Windows-first renderer repro and proof"
+  default_prompt: "Use $vita3k-windows-render-loop to launch Vita3K on Windows, drive the repro, capture bursts, use live controls, and rebuild quickly."
+policy:
+  allow_implicit_invocation: true

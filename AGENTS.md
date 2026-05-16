@@ -45,6 +45,24 @@ python tools/debug_knowledge.py search "doa venus black terrain android 564cd0" 
 - Local issue ROMs live under ignored `roms/issues/<TITLEID>/`; regression ROMs live under ignored `roms/regression/<TITLEID>/`. Use `tools/sync_issue_rom.ps1` to copy or pull games there as needed. Never commit `roms/`.
 - Current focused lead case is DOA Venus (`PCSH00250`) renderer corruption unless `case focus` says otherwise. UPPERS is currently a regression guard for renderer/depth changes, not the lead case while DOA remains user-visible broken.
 
+## Repo-Local Skills
+
+- Repo workflow skills live under `.agents/skills/` and are committed with this fork. Do not create global/user skills for this repo-specific Vita3K Thor process unless the user explicitly asks.
+- Keep skills decomposable. A skill should be a focused operating card with concrete tools, gates, and outputs; it should not become a god-skill that tries to explain the whole emulator.
+- Prefer loading the smallest skill or pair of skills needed for the current task. Use `vita3k-debug-rag` for SQLite recall, then add a narrow loop skill only when it matches the next action.
+- Current focused skills:
+  - `.agents/skills/vita3k-debug-rag/SKILL.md`: SQLite search/read/write and case focus.
+  - `.agents/skills/vita3k-render-experiment-gate/SKILL.md`: anti-loop preflight before renderer/core experiments.
+  - `.agents/skills/vita3k-windows-render-loop/SKILL.md`: Windows-first launch, input, burst, live-control, and rebuild loop.
+  - `.agents/skills/vita3k-thor-android-loop/SKILL.md`: AYN Thor install, launch, ADB props, burst capture, and Android proof.
+  - `.agents/skills/vita3k-regression-ledger/SKILL.md`: compatibility checkpoints, "worked before" research, and regression matrix discipline.
+  - `.agents/skills/vita3k-perf-profiler/SKILL.md`: measured speed, frame pacing, thermal, and profile work.
+  - `.agents/skills/vita3k-ghidra-escalation/SKILL.md`: static-analysis escalation after renderer evidence asks a concrete Vita-side question.
+  - `.agents/skills/vita3k-input-automation/SKILL.md`: repeatable Windows and Thor button/control sequences.
+  - `.agents/skills/vita3k-render-debug/SKILL.md`: renderer router and deeper graphics reference; use it when a narrow skill is not enough.
+- When adding a new skill, also add its `agents/openai.yaml`, keep it repo-local, and mention the concrete scripts/SQLite commands it owns.
+- If a skill starts accumulating unrelated topics, split it before adding more content. The split should follow action boundaries such as "capture", "profile", "regression ledger", "Ghidra escalation", or "Android proof".
+
 ## Experiment Discipline
 
 - Active-case lock: start every renderer/core turn with `python tools/debug_knowledge.py case focus`. If the next action targets a different case, stop and classify it as either a deliberate focus change or a regression guard. Do not let newest `tmp/` folders, screenshot mtimes, or stale planned attempts choose the active game.

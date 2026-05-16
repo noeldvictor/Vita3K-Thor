@@ -11,6 +11,19 @@ Use this skill for renderer corruption, flicker, missing geometry, black screens
 
 Pair it with `.agents/skills/vita3k-debug-rag/SKILL.md` for SQLite search/write commands and `.agents/skills/vita3k-input-automation/SKILL.md` for repeatable controller/button sequences.
 
+## Focused Companion Skills
+
+This is the renderer router and deep reference. For day-to-day work, load the smallest companion skill that matches the immediate action:
+
+- `.agents/skills/vita3k-render-experiment-gate/SKILL.md` before any renderer/core experiment or risky debug prop.
+- `.agents/skills/vita3k-windows-render-loop/SKILL.md` for Windows launch, burst capture, live controls, and incremental rebuilds.
+- `.agents/skills/vita3k-thor-android-loop/SKILL.md` for AYN Thor APK install, ADB launch, props, bursts, and Android proof.
+- `.agents/skills/vita3k-regression-ledger/SKILL.md` for "this worked before", commit evidence, and not breaking UPPERS/DOA while fixing another game.
+- `.agents/skills/vita3k-perf-profiler/SKILL.md` for measured speed, frame pacing, thermal, and GPU/CPU profile work.
+- `.agents/skills/vita3k-ghidra-escalation/SKILL.md` when renderer evidence asks a concrete Vita API, shader, or material question.
+
+Do not bulk-load every renderer skill by default. Pick the next narrow tool, do the work, and record the outcome in SQLite.
+
 ## Non-Negotiable Order
 
 1. Check the focused case with `python tools/debug_knowledge.py case focus`; this is the lead bug unless the user or evidence explicitly changes it.

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Vita3K Perf Profiler"
+  short_description: "Measured speed and frame pacing work"
+  default_prompt: "Use $vita3k-perf-profiler for Vita3K speed, frame pacing, fast-forward, audio timing, thermal, or CPU/GPU profile work."
+policy:
+  allow_implicit_invocation: true
