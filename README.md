@@ -67,12 +67,12 @@ These are the practical differences you should notice first compared with upstre
 - Offline PSN compatibility: new configs default to Vita3K's local `psn-signed-in` mode and NetCheck PSN dialogs report the signed-in result consistently, avoiding games that show PSN sign-out errors during offline play.
 - Thor testing tools: ADB scripts can capture screenshots, logs, crash info, memory info, frame stats, and renderer trace notes while testing on the real device.
 
-## Experimental Or Unfinished Features
+## Current Maturity Notes
 
-These are useful, but they are not as mature as polished emulator release features yet.
+These features are useful today, but a few are still being hardened toward polished emulator-release reliability.
 
-- Save states are experimental. Same-session save/load is the current focus; app-restart durability is still being expanded toward PPSSPP-style reliability.
-- Direct ZIP cartridge mode does not decrypt games, bypass licenses, or replace proper dumping. If a ZIP contains encrypted/PFS content, this fork should report that clearly and stop.
+- Save states are an active reliability target. The goal is PPSSPP-style durable per-game save/load, while today's implementation is still strongest for same-session quickstates and is expanding app-restart durability safely.
+- Direct ZIP cartridge mode is for legally dumped, already-readable content. Vita3K Thor will not decrypt games, bypass licenses, defeat PFS encryption, or replace proper dumping. If a ZIP contains encrypted/PFS content, this fork should report that clearly and stop.
 - Cheat support handles a useful subset of VitaCheat codes, but not every code type. Unsupported code types are skipped instead of guessed.
 - Renderer trace and profile tools are for debugging broken games or graphics issues. They are not normal-user settings you need to leave on.
 
@@ -81,7 +81,7 @@ These are useful, but they are not as mature as polished emulator release featur
 This section is for people changing the emulator code, debugging games, or comparing this fork with upstream Vita3K internals.
 
 - Android `arm64-v8a` APKs and real AYN Thor testing are the main path. Desktop builds still follow upstream expectations, but desktop packaging is not the priority here.
-- Direct ZIP cartridge mode mounts `app0:` against the archive and applies read-time `patch`/`rePatch` overlays. It does not bypass encryption, licenses, or ownership checks.
+- Direct ZIP cartridge mode mounts `app0:` against the archive and applies read-time `patch`/`rePatch` overlays. It never decrypts content or bypasses encryption, licenses, or ownership checks.
 - Large deflated archive members, including multi-gigabyte `.psarc` files, are cached to app-local storage instead of inflated into RAM.
 - Fast-forward updates display/vblank pacing, guest kernel clock/wait timing, AVPlayer video pacing, and SDL audio tempo together.
 - SDL fast-forward audio keeps SDL's stream frequency ratio at `1.0x`. It uses FFmpeg `atempo` for pitch-preserving tempo changes when possible, with normal-pitch buffer skipping as the fallback.
