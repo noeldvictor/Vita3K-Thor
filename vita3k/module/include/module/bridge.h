@@ -28,6 +28,8 @@
 
 #include <config/state.h>
 #include <emuenv/state.h>
+#include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 
 using ImportFn = void (*)(EmuEnvState &emuenv, CPUState &cpu, SceUID thread_id);
 using ImportVarFactory = std::function<Address(EmuEnvState &emuenv)>;
@@ -61,7 +63,10 @@ ImportFn make_bridge(const char *name, Ret (*)(EmuEnvState &, SceUID, const char
             if constexpr (std::is_void_v<Ret>) {
                 ExportFn(emuenv, thread_id, export_name, read_bridged_arg<arr[Is], vargs_state, Args>(cpu, emuenv.mem)...);
             } else {
-                write_return_value(cpu, ExportFn(emuenv, thread_id, export_name, read_bridged_arg<arr[Is], vargs_state, Args>(cpu, emuenv.mem)...));
+                auto ret = ExportFn(emuenv, thread_id, export_name, read_bridged_arg<arr[Is], vargs_state, Args>(cpu, emuenv.mem)...);
+                const auto thread = emuenv.kernel.get_thread(thread_id);
+                if (!thread || !thread->consume_deferred_import_return())
+                    write_return_value(cpu, ret);
             }
         }(std::index_sequence_for<Args...>{});
     };

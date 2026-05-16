@@ -1198,6 +1198,7 @@ struct QuickStateSyncWaitQueueEntry {
     Address out_bits = 0;
     uint32_t request_size = 0;
     std::string cancel_source;
+    bool deferred_import_wait = false;
 };
 
 struct QuickStateSyncSnapshot {
@@ -2876,6 +2877,8 @@ static bool quick_state_parse_sync_wait_queue_entry(const std::string &key, cons
         || !quick_state_parse_u32_text(fields.at("timeout_value"), entry.timeout_value)) {
         return false;
     }
+    if (fields.contains("deferred") && !quick_state_parse_bool_text(fields.at("deferred"), entry.deferred_import_wait))
+        return false;
 
     if (entry.kind == "simple_event") {
         return fields.contains("pattern")
@@ -3508,19 +3511,22 @@ static bool quick_state_wait_queue_common_matches(const MemState &mem, const Qui
     if (saved.thread_id != current_thread_id
         || saved.priority != current.priority
         || saved.timeout != current_timeout
-        || saved.timeout_value != current.timeout_value) {
+        || saved.timeout_value != current.timeout_value
+        || saved.deferred_import_wait != current.deferred_import_wait) {
         if (detail) {
-            *detail = fmt::format("{} wait entry {} mismatch; saved thread={} priority={} timeout=0x{:X}/{} current thread={} priority={} timeout=0x{:X}/{}",
+            *detail = fmt::format("{} wait entry {} mismatch; saved thread={} priority={} timeout=0x{:X}/{} deferred={} current thread={} priority={} timeout=0x{:X}/{} deferred={}",
                 label,
                 saved.index,
                 saved.thread_id,
                 saved.priority,
                 saved.timeout,
                 saved.timeout_value,
+                saved.deferred_import_wait,
                 current_thread_id,
                 current.priority,
                 current_timeout,
-                current.timeout_value);
+                current.timeout_value,
+                current.deferred_import_wait);
         }
         return false;
     }
@@ -3878,7 +3884,8 @@ static size_t quick_state_write_wait_queue_entries(std::ostringstream &text, con
              << "=thread=" << (data.thread ? data.thread->id : 0)
              << ";priority=" << data.priority
              << ";timeout=0x" << std::hex << quick_state_guest_address_from_host_pointer(mem, data.timeout) << std::dec
-             << ";timeout_value=" << data.timeout_value;
+             << ";timeout_value=" << data.timeout_value
+             << ";deferred=" << data.deferred_import_wait;
         write_fields(text, data);
         text << "\n";
     }
@@ -5152,7 +5159,8 @@ static std::string quick_state_wait_queue_entry_detail(const QuickStateSyncWaitQ
            << " thread=" << entry.thread_id
            << " priority=" << entry.priority
            << " timeout=0x" << std::hex << entry.timeout << std::dec
-           << " timeout_value=" << entry.timeout_value;
+           << " timeout_value=" << entry.timeout_value
+           << " deferred=" << entry.deferred_import_wait;
     if (entry.kind == "simple_event") {
         detail << " pattern=" << entry.pattern
                << " result_pattern=0x" << std::hex << entry.result_pattern

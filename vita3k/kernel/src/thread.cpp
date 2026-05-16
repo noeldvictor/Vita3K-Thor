@@ -135,6 +135,7 @@ int ThreadState::start(SceSize arglen, const Ptr<void> argp, bool run_entry_call
     std::unique_lock<std::mutex> thread_lock(mutex);
 
     deferred_import_wait = false;
+    deferred_import_return = false;
     run_start_callback = run_entry_callback;
     call_level = 1;
     load_context(*cpu, init_cpu_ctx);
@@ -176,6 +177,7 @@ void ThreadState::exit_delete(bool exit) {
 
     run_end_callback = exit;
     deferred_import_wait = false;
+    deferred_import_return = false;
 
     const ThreadToDo last_to_do = to_do;
     to_do = ThreadToDo::remove;
@@ -486,6 +488,7 @@ bool ThreadState::begin_deferred_import_wait() {
         return false;
 
     deferred_import_wait = true;
+    deferred_import_return = true;
     to_do = ThreadToDo::wait;
     update_status(ThreadStatus::wait, ThreadStatus::run);
     return true;
@@ -516,6 +519,13 @@ bool ThreadState::complete_deferred_import_wait(uint32_t return_value) {
         something_to_do.notify_one();
     }
     return true;
+}
+
+bool ThreadState::consume_deferred_import_return() {
+    std::lock_guard<std::mutex> lock(mutex);
+    const bool deferred = deferred_import_return;
+    deferred_import_return = false;
+    return deferred;
 }
 
 bool ThreadState::has_deferred_import_wait() {

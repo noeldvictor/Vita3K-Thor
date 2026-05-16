@@ -1068,9 +1068,6 @@ SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thr
     std::unique_lock<std::mutex> semaphore_lock(semaphore->mutex);
 
     if (semaphore->val < needCount) {
-        std::unique_lock<std::mutex> thread_lock(thread->mutex);
-        thread->update_status(ThreadStatus::wait, ThreadStatus::run);
-
         WaitingThreadData data;
         data.thread = thread;
         data.priority = thread->priority;
@@ -1079,6 +1076,15 @@ SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thr
 
         auto was_canceled = std::make_shared<bool>(false);
         data.was_canceled = was_canceled;
+
+        if (!pTimeout && thread->begin_deferred_import_wait()) {
+            data.deferred_import_wait = true;
+            semaphore->waiting_threads->push(data);
+            return SCE_KERNEL_OK;
+        }
+
+        std::unique_lock<std::mutex> thread_lock(thread->mutex);
+        thread->update_status(ThreadStatus::wait, ThreadStatus::run);
 
         const auto data_it = semaphore->waiting_threads->push(data);
         thread_lock.unlock();
@@ -1124,9 +1130,10 @@ int semaphore_signal(KernelState &kernel, const char *export_name, SceUID thread
         if (semaphore->val < waiting_signal_count)
             break;
 
-        const std::unique_lock<std::mutex> waiting_thread_lock(waiting_thread->mutex);
-
-        waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+        if (!waiting_thread->complete_deferred_import_wait(SCE_KERNEL_OK)) {
+            const std::unique_lock<std::mutex> waiting_thread_lock(waiting_thread->mutex);
+            waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+        }
 
         semaphore->waiting_threads->pop();
         semaphore->val -= waiting_signal_count;
@@ -1182,13 +1189,14 @@ int semaphore_cancel(KernelState &kernel, const char *export_name, SceUID thread
         const auto &waiting_thread_data = *semaphore->waiting_threads->begin();
         const auto waiting_thread = waiting_thread_data.thread;
 
-        const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
-
         if (waiting_thread_data.was_canceled) {
             *waiting_thread_data.was_canceled = true;
         }
 
-        waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+        if (!waiting_thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_CANCEL))) {
+            const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
+            waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+        }
 
         semaphore->waiting_threads->erase(semaphore->waiting_threads->begin());
         nb_threads++;

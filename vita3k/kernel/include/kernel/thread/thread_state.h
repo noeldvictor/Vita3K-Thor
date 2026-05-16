@@ -120,6 +120,7 @@ struct ThreadState {
     bool begin_deferred_import_wait();
     bool restore_deferred_import_wait();
     bool complete_deferred_import_wait(uint32_t return_value);
+    bool consume_deferred_import_return();
     bool has_deferred_import_wait();
     std::string log_stack_traceback() const;
 
@@ -145,6 +146,7 @@ private:
     // when calling sceKernelExitThread or sceKernelExitDeleteThread
     bool run_end_callback = false;
     bool deferred_import_wait = false;
+    bool deferred_import_return = false;
 
     MemState &mem;
 };

@@ -31,6 +31,7 @@ struct WaitingThreadData {
     std::shared_ptr<bool> was_canceled;
     SceUInt32 *timeout = nullptr;
     SceUInt32 timeout_value = 0;
+    bool deferred_import_wait = false;
 
     // additional fields for each primitive
     union {
