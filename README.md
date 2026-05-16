@@ -62,7 +62,7 @@ These are the practical differences you should notice first compared with upstre
 - OSD control help: switch the emulator system confirm button between O/Japan and X/West, and set a per-game X/O swap for Japanese games whose in-game confirm/cancel feels backwards.
 - Thor controller shortcuts: `Select + R1` toggles fast-forward, `Select + right-stick down` saves state, and `Select + right-stick up` loads state.
 - Fast-forward presets: choose Off, 2x, 3x, or 4x from the OSD. Fast-forward avoids high-pitched chipmunk audio by using pitch-preserving tempo filtering when available, or normal-pitch buffer skipping when that filter is missing.
-- Per-game quickstate slot: save/load slot 0 for the current game from the OSD or shortcuts.
+- Per-game quickstate workbench: capture a disk-backed slot 0 for the current game from the OSD or shortcuts. Loading is currently blocked by the Windows stability gate until restore is safe enough to trust.
 - VitaCheat panel: load `.psv` cheat files from supported cheat folders, show available cheats in the OSD, and toggle individual cheats per game.
 - Offline PSN compatibility: new configs default to Vita3K's local `psn-signed-in` mode and NetCheck PSN dialogs report the signed-in result consistently, avoiding games that show PSN sign-out errors during offline play.
 - Thor testing tools: ADB scripts can capture screenshots, logs, crash info, memory info, frame stats, and renderer trace notes while testing on the real device.
@@ -71,7 +71,7 @@ These are the practical differences you should notice first compared with upstre
 
 These features are useful today, but a few are still being hardened toward polished emulator-release reliability.
 
-- Save states are an active reliability target. The goal is PPSSPP-style durable per-game save/load, while today's implementation is still strongest for same-session quickstates and is expanding app-restart durability safely.
+- Save states are an active reliability target. The goal is PPSSPP-style durable per-game save/load, but current builds only write guarded disk-backed captures. Loading is intentionally refused until Windows restores stop corrupting host syscall, kernel wait, GPU/audio, and AVPlayer state.
 - Direct ZIP cartridge mode is for legally dumped, already-readable content. Vita3K Thor will not decrypt games, bypass licenses, defeat PFS encryption, or replace proper dumping. If a ZIP contains encrypted/PFS content, this fork should report that clearly and stop.
 - Cheat support handles a useful subset of VitaCheat codes, but not every code type. Unsupported code types are skipped instead of guessed.
 - Renderer trace and profile tools are for debugging broken games or graphics issues. They are not normal-user settings you need to leave on.
@@ -85,7 +85,7 @@ This section is for people changing the emulator code, debugging games, or compa
 - Large deflated archive members, including multi-gigabyte `.psarc` files, are cached to app-local storage instead of inflated into RAM.
 - Fast-forward updates display/vblank pacing, guest kernel clock/wait timing, AVPlayer video pacing, and SDL audio tempo together.
 - SDL fast-forward audio keeps SDL's stream frequency ratio at `1.0x`. It uses FFmpeg `atempo` for pitch-preserving tempo changes when possible, with normal-pitch buffer skipping as the fallback.
-- Quickstates currently serialize CPU contexts, allocated guest memory pages, and allocator maps. The next durability targets are kernel objects, GPU/display state, audio, AVPlayer/movie state, IO/VFS handles, and renderer cache state.
+- Quickstates currently serialize CPU contexts, allocated guest memory pages, allocator maps, page CRCs, and guarded disk replacement. Restore is disabled in the Windows stability gate because safe loads also need kernel wait objects, host syscall state, GPU/display state, audio, AVPlayer/movie state, IO/VFS handles, and renderer cache state.
 - `--thor-render-trace` adds GXM/Vulkan trace logs, including scene, draw, surface, and texture upload details for renderer debugging.
 - Thor-only behavior should stay behind settings, build flags, device checks, or clearly named code paths.
 - Broad Vita3K fixes should stay clean enough to propose upstream separately.

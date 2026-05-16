@@ -954,6 +954,7 @@ struct QuickStateThreadContext {
 
 struct QuickStateSlot {
     bool valid = false;
+    bool restore_requires_same_pause = true;
     std::string title_id;
     std::string title;
     std::vector<QuickStateThreadContext> thread_contexts;
@@ -961,9 +962,11 @@ struct QuickStateSlot {
     std::vector<uint32_t> allocator_words;
     std::vector<uint32_t> allocation_pages;
     uint64_t byte_count = 0;
+    uint64_t pause_epoch = 0;
 };
 
 static QuickStateSlot quick_state_slot0;
+static uint64_t quick_state_pause_epoch = 1;
 static bool runtime_osd_open = false;
 static bool runtime_osd_auto_paused = false;
 static bool android_back_key_down = false;
@@ -973,10 +976,11 @@ static bool android_back_long_press_used = false;
 static uint64_t android_back_down_ticks = 0;
 constexpr uint64_t ANDROID_BACK_HOME_LONG_PRESS_MS = 400;
 constexpr char QUICKSTATE_MAGIC[] = { 'V', '3', 'K', 'T', 'H', 'O', 'R', 'S', 'T', 'A', 'T', 'E' };
-constexpr uint32_t QUICKSTATE_VERSION = 3;
+constexpr uint32_t QUICKSTATE_VERSION = 4;
 constexpr uint32_t QUICKSTATE_MAX_STRING_BYTES = 4096;
 constexpr uint32_t QUICKSTATE_COMPRESSION_NONE = 0;
 constexpr uint32_t QUICKSTATE_COMPRESSION_MINIZ = 1;
+constexpr auto QUICKSTATE_PAUSE_TIMEOUT = std::chrono::milliseconds(3000);
 
 struct RuntimeControlFileState {
     bool initialized = false;
@@ -1154,6 +1158,10 @@ static bool quick_state_decompress_page(const std::vector<uint8_t> &input, std::
     return result == MZ_OK && output_size == raw_size;
 }
 
+static uint32_t quick_state_crc32(const std::vector<uint8_t> &input) {
+    return static_cast<uint32_t>(mz_crc32(MZ_CRC32_INIT, input.data(), input.size()));
+}
+
 static bool memory_page_is_allocated(const MemState &mem, const uint32_t page) {
     const uint32_t word = mem.allocator.words[page >> 5];
     return (word & (1U << (page & 31))) == 0;
@@ -1166,8 +1174,9 @@ static bool valid_quick_state_page(const MemState &mem, const Address address, c
     return is_valid_addr_range(mem, address, address + size);
 }
 
-static bool wait_for_guest_threads_paused(KernelState &kernel) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(750);
+static bool wait_for_guest_threads_paused(KernelState &kernel, std::string_view operation) {
+    const auto deadline = std::chrono::steady_clock::now() + QUICKSTATE_PAUSE_TIMEOUT;
+    uint32_t stop_pulses = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         bool all_paused = true;
         {
@@ -1176,6 +1185,8 @@ static bool wait_for_guest_threads_paused(KernelState &kernel) {
                 const std::lock_guard<std::mutex> thread_lock(thread->mutex);
                 if (thread->status == ThreadStatus::run) {
                     all_paused = false;
+                    if (thread->cpu)
+                        stop(*thread->cpu);
                     break;
                 }
             }
@@ -1184,31 +1195,68 @@ static bool wait_for_guest_threads_paused(KernelState &kernel) {
         if (all_paused)
             return true;
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        stop_pulses++;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
+    std::vector<std::string> running_threads;
+    {
+        const std::lock_guard<std::mutex> kernel_lock(kernel.mutex);
+        for (const auto &[thread_id, thread] : kernel.threads) {
+            const std::lock_guard<std::mutex> thread_lock(thread->mutex);
+            if (thread->status != ThreadStatus::run)
+                continue;
+
+            running_threads.push_back(fmt::format("{}:{}", thread_id, thread->name));
+            if (running_threads.size() >= 8)
+                break;
+        }
+    }
+
+    LOG_WARN("Quickstate {} timed out after {} ms and {} stop pulse(s); still-running guest threads: {}",
+        operation,
+        QUICKSTATE_PAUSE_TIMEOUT.count(),
+        stop_pulses,
+        running_threads.empty() ? "none listed" : fmt::format("{}", fmt::join(running_threads, ", ")));
     return false;
+}
+
+static bool pause_for_quick_state(EmuEnvState &emuenv, const std::string_view operation, bool &already_paused) {
+    already_paused = emuenv.kernel.is_threads_paused();
+    if (!already_paused)
+        app::switch_state(emuenv, true);
+
+    if (wait_for_guest_threads_paused(emuenv.kernel, operation))
+        return true;
+
+    if (!already_paused)
+        app::switch_state(emuenv, false);
+    return false;
+}
+
+static void resume_after_quick_state(EmuEnvState &emuenv, const bool already_paused) {
+    if (!already_paused) {
+        app::switch_state(emuenv, false);
+        quick_state_pause_epoch++;
+    }
 }
 
 static bool capture_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     if (emuenv.io.title_id.empty())
         return false;
 
-    const bool already_paused = emuenv.kernel.is_threads_paused();
-    if (!already_paused)
-        emuenv.kernel.pause_threads();
-
-    if (!wait_for_guest_threads_paused(emuenv.kernel)) {
-        if (!already_paused)
-            emuenv.kernel.resume_threads();
+    bool already_paused = false;
+    if (!pause_for_quick_state(emuenv, "capture", already_paused)) {
         LOG_WARN("Failed to capture quickstate for {} because guest threads did not pause in time.", emuenv.io.title_id);
         return false;
     }
 
     QuickStateSlot captured;
     captured.valid = true;
+    captured.restore_requires_same_pause = true;
     captured.title_id = emuenv.io.title_id;
     captured.title = emuenv.current_app_title;
+    captured.pause_epoch = quick_state_pause_epoch;
 
     {
         const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
@@ -1257,8 +1305,7 @@ static bool capture_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     }
 
     slot = std::move(captured);
-    if (!already_paused)
-        emuenv.kernel.resume_threads();
+    resume_after_quick_state(emuenv, already_paused);
 
     return true;
 }
@@ -1270,6 +1317,7 @@ static bool save_quick_state_to_disk(EmuEnvState &emuenv, const QuickStateSlot &
     const fs::path state_dir = quick_state_dir(emuenv, slot.title_id);
     const fs::path state_file = quick_state_file(emuenv, slot.title_id);
     const fs::path tmp_file = state_file.string() + ".tmp";
+    const fs::path backup_file = state_file.string() + ".bak";
     fs::create_directories(state_dir);
 
     {
@@ -1325,6 +1373,7 @@ static bool save_quick_state_to_disk(EmuEnvState &emuenv, const QuickStateSlot &
             uint32_t compression_method = QUICKSTATE_COMPRESSION_NONE;
             std::vector<uint8_t> compressed_page;
             const std::vector<uint8_t> *page_bytes = &page.bytes;
+            const uint32_t raw_crc32 = quick_state_crc32(page.bytes);
             if (quick_state_compress_page(page.bytes, compressed_page, static_cast<int>(compression_level))) {
                 compression_method = QUICKSTATE_COMPRESSION_MINIZ;
                 page_bytes = &compressed_page;
@@ -1335,6 +1384,7 @@ static bool save_quick_state_to_disk(EmuEnvState &emuenv, const QuickStateSlot &
                 || !quick_state_write_value(out, raw_page_size)
                 || !quick_state_write_value(out, stored_page_size)
                 || !quick_state_write_value(out, compression_method)
+                || !quick_state_write_value(out, raw_crc32)
                 || !quick_state_write_bytes(out, page_bytes->data(), stored_page_size)) {
                 return false;
             }
@@ -1342,14 +1392,30 @@ static bool save_quick_state_to_disk(EmuEnvState &emuenv, const QuickStateSlot &
     }
 
     boost::system::error_code ec;
-    fs::remove(state_file, ec);
+    fs::remove(backup_file, ec);
+    ec.clear();
+    if (fs::exists(state_file, ec)) {
+        ec.clear();
+        fs::rename(state_file, backup_file, ec);
+        if (ec) {
+            fs::remove(tmp_file);
+            LOG_WARN("Failed to stage old quickstate backup {}: {}", backup_file, ec.message());
+            return false;
+        }
+    }
     ec.clear();
     fs::rename(tmp_file, state_file, ec);
     if (ec) {
         fs::remove(tmp_file);
+        boost::system::error_code restore_ec;
+        if (fs::exists(backup_file, restore_ec)) {
+            restore_ec.clear();
+            fs::rename(backup_file, state_file, restore_ec);
+        }
         LOG_WARN("Failed to finalize durable quickstate {}: {}", state_file, ec.message());
         return false;
     }
+    fs::remove(backup_file, ec);
 
     return true;
 }
@@ -1379,6 +1445,7 @@ static bool load_quick_state_from_disk(EmuEnvState &emuenv, const std::string &t
 
     QuickStateSlot loaded;
     loaded.valid = true;
+    loaded.restore_requires_same_pause = true;
     loaded.title_id = header.title_id;
     loaded.title = header.title;
     loaded.byte_count = header.byte_count;
@@ -1423,6 +1490,7 @@ static bool load_quick_state_from_disk(EmuEnvState &emuenv, const std::string &t
         uint32_t raw_page_size = 0;
         uint32_t stored_page_size = 0;
         uint32_t compression_method = QUICKSTATE_COMPRESSION_NONE;
+        uint32_t raw_crc32 = 0;
         if (!quick_state_read_value(in, page.address) || !quick_state_read_value(in, raw_page_size))
             return false;
         if (header.version >= 2) {
@@ -1433,6 +1501,10 @@ static bool load_quick_state_from_disk(EmuEnvState &emuenv, const std::string &t
         }
 
         if ((page.address % QUICKSTATE_PAGE_SIZE) != 0 || (raw_page_size != QUICKSTATE_PAGE_SIZE) || (stored_page_size == 0))
+            return false;
+        if (header.version >= 4 && !quick_state_read_value(in, raw_crc32))
+            return false;
+        if ((compression_method == QUICKSTATE_COMPRESSION_MINIZ) && (stored_page_size > mz_compressBound(raw_page_size)))
             return false;
 
         std::vector<uint8_t> stored_page(stored_page_size);
@@ -1450,11 +1522,17 @@ static bool load_quick_state_from_disk(EmuEnvState &emuenv, const std::string &t
             return false;
         }
 
+        if (header.version >= 4 && quick_state_crc32(page.bytes) != raw_crc32)
+            return false;
+
         byte_count += raw_page_size;
         loaded.memory_pages.push_back(std::move(page));
     }
 
     if (byte_count != header.byte_count)
+        return false;
+    in.peek();
+    if (!in.eof())
         return false;
 
     slot = std::move(loaded);
@@ -1481,6 +1559,39 @@ static ThreadStatePtr find_quick_state_restore_thread(KernelState &kernel, const
     }
 
     return nullptr;
+}
+
+static bool preflight_quick_state_restore_threads(KernelState &kernel, const QuickStateSlot &slot, std::vector<ThreadStatePtr> &matched_threads) {
+    matched_threads.clear();
+
+    std::set<SceUID> matched_thread_ids;
+    uint32_t current_cpu_thread_count = 0;
+    const std::lock_guard<std::mutex> kernel_lock(kernel.mutex);
+    for (const auto &[_, thread] : kernel.threads) {
+        if (thread->cpu)
+            current_cpu_thread_count++;
+    }
+
+    if (current_cpu_thread_count != slot.thread_contexts.size()) {
+        LOG_WARN("Refused quickstate restore for {} because current CPU thread count {} does not match saved count {}.",
+            slot.title_id, current_cpu_thread_count, slot.thread_contexts.size());
+        return false;
+    }
+
+    matched_threads.reserve(slot.thread_contexts.size());
+    for (const auto &thread_context : slot.thread_contexts) {
+        const auto thread = find_quick_state_restore_thread(kernel, thread_context, matched_thread_ids);
+        if (!thread || !thread->cpu) {
+            LOG_WARN("Refused quickstate restore for {} because saved thread {} ({}) could not be matched before touching guest memory.",
+                slot.title_id, thread_context.id, thread_context.name);
+            return false;
+        }
+
+        matched_thread_ids.insert(thread->id);
+        matched_threads.push_back(thread);
+    }
+
+    return true;
 }
 
 static bool quick_state_alloc_page_is_allocated(const uint32_t packed) {
@@ -1582,35 +1693,39 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     if (!slot.valid || (slot.title_id != emuenv.io.title_id))
         return false;
 
-    const bool already_paused = emuenv.kernel.is_threads_paused();
-    if (!already_paused)
-        emuenv.kernel.pause_threads();
+    if (slot.restore_requires_same_pause) {
+        LOG_WARN("Refused quickstate restore for {} because restore is disabled in the Windows stability gate. Current captures are disk-backed diagnostics until kernel wait objects, host syscall state, GPU/display state, audio, IO/VFS handles, and AVPlayer/movie state are serialized.",
+            slot.title_id);
+        return false;
+    }
 
-    if (!wait_for_guest_threads_paused(emuenv.kernel)) {
-        if (!already_paused)
-            emuenv.kernel.resume_threads();
+    bool already_paused = false;
+    if (!pause_for_quick_state(emuenv, "restore", already_paused)) {
         LOG_WARN("Failed to restore quickstate for {} because guest threads did not pause in time.", slot.title_id);
         return false;
     }
 
+    std::vector<ThreadStatePtr> matched_threads;
+    if (!preflight_quick_state_restore_threads(emuenv.kernel, slot, matched_threads)) {
+        resume_after_quick_state(emuenv, already_paused);
+        return false;
+    }
+
     if (!restore_quick_state_allocation_map(emuenv, slot)) {
-        if (!already_paused)
-            emuenv.kernel.resume_threads();
+        resume_after_quick_state(emuenv, already_paused);
         return false;
     }
 
     uint32_t missing_pages = 0;
     for (const auto &page : slot.memory_pages) {
         if (!quick_state_page_can_restore(emuenv.mem, page, missing_pages)) {
-            if (!already_paused)
-                emuenv.kernel.resume_threads();
+            resume_after_quick_state(emuenv, already_paused);
             return false;
         }
     }
 
     if (missing_pages > 0) {
-        if (!already_paused)
-            emuenv.kernel.resume_threads();
+        resume_after_quick_state(emuenv, already_paused);
         LOG_WARN("Refused quickstate restore for {} because {} guest memory page(s) are not allocated in the current session. Restart/load-state support needs full kernel object and allocation-map serialization before this can be restored safely.",
             slot.title_id, missing_pages);
         return false;
@@ -1620,26 +1735,17 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         std::memcpy(Ptr<uint8_t>(page.address).get(emuenv.mem), page.bytes.data(), page.bytes.size());
 
     {
-        const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
-        std::set<SceUID> matched_threads;
-        for (const auto &thread_context : slot.thread_contexts) {
-            const auto thread = find_quick_state_restore_thread(emuenv.kernel, thread_context, matched_threads);
-            if (!thread || !thread->cpu) {
-                if (!already_paused)
-                    emuenv.kernel.resume_threads();
-                LOG_WARN("Failed to match quickstate thread {} ({}) for restore", thread_context.id, thread_context.name);
-                return false;
-            }
-
-            matched_threads.insert(thread->id);
+        for (size_t i = 0; i < slot.thread_contexts.size(); i++) {
+            const auto &thread_context = slot.thread_contexts[i];
+            const auto &thread = matched_threads[i];
+            const std::lock_guard<std::mutex> thread_lock(thread->mutex);
             load_context(*thread->cpu, thread_context.context);
         }
     }
 
     reset_quick_state_runtime_render_state(emuenv);
     emuenv.kernel.invalidate_jit_cache(0, std::numeric_limits<Address>::max());
-    if (!already_paused)
-        emuenv.kernel.resume_threads();
+    resume_after_quick_state(emuenv, already_paused);
 
     return true;
 }
@@ -1663,7 +1769,8 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "State file bytes: " << quick_state_file_size(emuenv, slot.title_id) << "\n";
     marker << "State root: " << quick_state_root(emuenv) << "\n";
     marker << "State file: " << quick_state_file(emuenv, slot.title_id) << "\n";
-    marker << "Note: this is an experimental durable state and still needs full GPU/audio/IO/kernel-object serialization for emulator-perfect resumes.\n";
+    marker << "Restore guard: loading is currently disabled by the Windows stability gate.\n";
+    marker << "Note: this is an experimental disk-backed state and still needs full GPU/audio/IO/kernel-object serialization for emulator-perfect resumes.\n";
 }
 
 } // namespace
@@ -1687,7 +1794,7 @@ std::string runtime_quick_state_slot_status(EmuEnvState &emuenv) {
         const bool has_disk_state = read_quick_state_disk_header(emuenv, title_id, header);
         if (has_disk_state) {
             const uint64_t disk_size = quick_state_file_size(emuenv, title_id);
-            return fmt::format("durable {} MiB ({} MiB raw)", disk_size / (1024 * 1024), quick_state_slot0.byte_count / (1024 * 1024));
+            return fmt::format("disk-backed {} MiB ({} MiB raw)", disk_size / (1024 * 1024), quick_state_slot0.byte_count / (1024 * 1024));
         }
         return fmt::format("RAM {} MiB", quick_state_slot0.byte_count / (1024 * 1024));
     }
@@ -1718,6 +1825,8 @@ void runtime_osd_set_open(EmuEnvState &emuenv, bool open) {
 
     if (runtime_osd_auto_paused)
         app::switch_state(emuenv, false);
+    if (runtime_osd_auto_paused)
+        quick_state_pause_epoch++;
     runtime_osd_auto_paused = false;
     LOG_INFO("Runtime OSD closed");
 }
@@ -1755,13 +1864,16 @@ void runtime_request_save_state(EmuEnvState &emuenv) {
             write_quick_state_marker(emuenv, quick_state_slot0);
 
         LOG_INFO("Captured {} quickstate slot 0 for {} at {} ({} bytes, {} threads)",
-            saved_to_disk ? "durable" : "RAM-only",
+            saved_to_disk ? "disk-backed" : "RAM-only",
             title_id,
             saved_to_disk ? quick_state_file(emuenv, title_id) : state_dir,
             quick_state_slot0.byte_count,
             quick_state_slot0.thread_contexts.size());
+        if (!emuenv.kernel.is_threads_paused() || (quick_state_slot0.pause_epoch != quick_state_pause_epoch)) {
+            LOG_WARN("Quickstate slot 0 for {} was captured and then emulation resumed; restore is refused until full kernel/GPU/audio state serialization makes post-resume loads safe.", title_id);
+        }
         if (!saved_to_disk)
-            LOG_WARN("Failed to write durable quickstate slot 0 for {}", title_id);
+            LOG_WARN("Failed to write disk-backed quickstate slot 0 for {}", title_id);
     } else {
         LOG_WARN("Failed to capture same-session quickstate slot 0 for {}", title_id);
     }
@@ -1773,12 +1885,12 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
     if (!quick_state_slot0.valid || (quick_state_slot0.title_id != title_id)) {
         loaded_from_disk = load_quick_state_from_disk(emuenv, title_id, quick_state_slot0);
         if (loaded_from_disk) {
-            LOG_INFO("Loaded durable quickstate slot 0 for {} from {}", title_id, quick_state_file(emuenv, title_id));
+            LOG_INFO("Loaded disk-backed quickstate slot 0 for {} from {}", title_id, quick_state_file(emuenv, title_id));
         }
     }
 
     if (loaded_from_disk && quick_state_has_avplayer_threads(quick_state_slot0)) {
-        LOG_WARN("Refused durable quickstate restore for {} because this state contains AVPlayer movie/audio threads. Same-session AVPlayer states can load, but app-restart restores need AVPlayer host object serialization before they are safe.", title_id);
+        LOG_WARN("Refused disk-backed quickstate restore for {} because this state contains AVPlayer movie/audio threads. Restore remains disabled in the Windows stability gate until AVPlayer host object serialization is safe.", title_id);
         return;
     }
 
@@ -1847,8 +1959,10 @@ static void runtime_set_pause_state(EmuEnvState &emuenv, const bool pause) {
     if (pause == already_paused)
         return;
 
-    if (!pause)
+    if (!pause) {
         runtime_osd_auto_paused = false;
+        quick_state_pause_epoch++;
+    }
     app::switch_state(emuenv, pause);
     LOG_INFO("Runtime control {}", pause ? "paused emulation" : "resumed emulation");
 }
