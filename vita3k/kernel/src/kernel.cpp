@@ -222,7 +222,8 @@ void KernelState::exit_delete_all_threads() {
 void KernelState::pause_threads() {
     const std::lock_guard<std::mutex> lock(mutex);
     for (auto &[_, thread] : threads) {
-        paused_threads_status[thread->id] = thread->status;
+        if (!paused_threads_status.contains(thread->id))
+            paused_threads_status[thread->id] = thread->status;
         if (thread->status == ThreadStatus::run)
             thread->suspend();
     }
@@ -231,7 +232,8 @@ void KernelState::pause_threads() {
 void KernelState::resume_threads() {
     const std::lock_guard<std::mutex> lock(mutex);
     for (auto &[_, thread] : threads) {
-        if (paused_threads_status[thread->id] == ThreadStatus::run)
+        const auto paused_status = paused_threads_status.find(thread->id);
+        if (paused_status != paused_threads_status.end() && paused_status->second == ThreadStatus::run)
             thread->resume();
     }
     paused_threads_status.clear();

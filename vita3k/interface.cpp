@@ -977,6 +977,8 @@ struct QuickStateSlot {
 
 static QuickStateSlot quick_state_slot0;
 static uint64_t quick_state_pause_epoch = 1;
+static std::string quick_state_last_capture_detail;
+static std::string quick_state_last_restore_detail;
 static bool runtime_osd_open = false;
 static bool runtime_osd_auto_paused = false;
 static bool android_back_key_down = false;
@@ -993,6 +995,7 @@ constexpr uint64_t QUICKSTATE_MAX_SECTION_BYTES = 16 * 1024 * 1024;
 constexpr uint32_t QUICKSTATE_COMPRESSION_NONE = 0;
 constexpr uint32_t QUICKSTATE_COMPRESSION_MINIZ = 1;
 constexpr auto QUICKSTATE_PAUSE_TIMEOUT = std::chrono::milliseconds(3000);
+constexpr auto QUICKSTATE_MUTEX_LOCK_TIMEOUT = std::chrono::milliseconds(500);
 
 struct RuntimeControlFileState {
     bool initialized = false;
@@ -1375,6 +1378,7 @@ struct QuickStateRestoreManifest {
     bool display_state_restorable = false;
     bool display_vblank_waits_restorable = false;
     bool audio_state_restorable = false;
+    bool same_pause_restore_available = false;
     size_t sync_waiting_threads = 0;
     size_t sync_wait_queue_entries = 0;
     size_t msgpipe_buffer_bytes = 0;
@@ -1387,6 +1391,23 @@ struct QuickStateRestoreManifest {
     bool restore_enabled = false;
     std::string block_reason;
 };
+
+static bool quick_state_same_pause_restore_available(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    return slot.valid
+        && slot.restore_requires_same_pause
+        && emuenv.kernel.is_threads_paused()
+        && slot.pause_epoch == quick_state_pause_epoch;
+}
+
+static bool quick_state_try_lock_mutex(std::mutex &mutex, std::unique_lock<std::mutex> &lock, const std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (lock.try_lock())
+            return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return lock.try_lock();
+}
 
 static fs::path quick_state_root(EmuEnvState &emuenv) {
     if (emuenv.cfg.save_state_dir.empty())
@@ -1409,6 +1430,14 @@ static fs::path quick_state_file(EmuEnvState &emuenv, const std::string &title_i
 
 static fs::path quick_state_marker_file(EmuEnvState &emuenv, const std::string &title_id) {
     return quick_state_dir(emuenv, title_id) / "slot0.thorstate.txt";
+}
+
+static fs::path quick_state_capture_marker_file(EmuEnvState &emuenv, const std::string &title_id) {
+    return quick_state_dir(emuenv, title_id) / "slot0.thorstate.capture.txt";
+}
+
+static fs::path quick_state_restore_marker_file(EmuEnvState &emuenv, const std::string &title_id) {
+    return quick_state_dir(emuenv, title_id) / "slot0.thorstate.restore.txt";
 }
 
 template <typename T>
@@ -1620,17 +1649,28 @@ static bool wait_for_guest_threads_paused(KernelState &kernel, std::string_view 
         }
     }
 
+    const std::string running_thread_detail = running_threads.empty() ? "none listed" : fmt::format("{}", fmt::join(running_threads, ", "));
+    const std::string timeout_detail = fmt::format("guest threads did not pause in time; stop_pulses={}; still-running={}",
+        stop_pulses,
+        running_thread_detail);
+    if (operation == "capture")
+        quick_state_last_capture_detail = timeout_detail;
+    else if (operation == "restore")
+        quick_state_last_restore_detail = timeout_detail;
+
     LOG_WARN("Quickstate {} timed out after {} ms and {} stop pulse(s); still-running guest threads: {}",
         operation,
         QUICKSTATE_PAUSE_TIMEOUT.count(),
         stop_pulses,
-        running_threads.empty() ? "none listed" : fmt::format("{}", fmt::join(running_threads, ", ")));
+        running_thread_detail);
     return false;
 }
 
 static bool pause_for_quick_state(EmuEnvState &emuenv, const std::string_view operation, bool &already_paused) {
     already_paused = emuenv.kernel.is_threads_paused();
-    if (!already_paused)
+    if (already_paused)
+        emuenv.kernel.pause_threads();
+    else
         app::switch_state(emuenv, true);
 
     if (wait_for_guest_threads_paused(emuenv.kernel, operation))
@@ -1649,12 +1689,18 @@ static void resume_after_quick_state(EmuEnvState &emuenv, const bool already_pau
 }
 
 static bool capture_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
-    if (emuenv.io.title_id.empty())
+    quick_state_last_capture_detail.clear();
+
+    if (emuenv.io.title_id.empty()) {
+        quick_state_last_capture_detail = "no title is running";
         return false;
+    }
 
     bool already_paused = false;
     if (!pause_for_quick_state(emuenv, "capture", already_paused)) {
         LOG_WARN("Failed to capture quickstate for {} because guest threads did not pause in time.", emuenv.io.title_id);
+        if (quick_state_last_capture_detail.empty())
+            quick_state_last_capture_detail = "guest threads did not pause in time";
         return false;
     }
 
@@ -1714,6 +1760,7 @@ static bool capture_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     slot = std::move(captured);
     resume_after_quick_state(emuenv, already_paused);
 
+    quick_state_last_capture_detail = "capture completed";
     return true;
 }
 
@@ -2285,6 +2332,12 @@ static std::map<std::string, std::string> quick_state_parse_semicolon_fields(con
     return fields;
 }
 
+static std::string quick_state_unquote_path_field(std::string value) {
+    if (value.size() >= 2 && value.front() == '"' && value.back() == '"')
+        return value.substr(1, value.size() - 2);
+    return value;
+}
+
 static bool quick_state_parse_uid_from_key(const std::string &key, const std::string_view prefix, const std::string_view suffix, SceUID &uid) {
     if (key.rfind(prefix, 0) != 0 || key.size() <= prefix.size() + suffix.size())
         return false;
@@ -2509,7 +2562,7 @@ static bool quick_state_parse_io_file_position(const std::string &key, const std
     bool parsed_bool = false;
     position.vita_path = fields.at("vita");
     position.translated_path = fields.at("translated");
-    position.host_path = fs_utils::utf8_to_path(fields.at("host"));
+    position.host_path = fs_utils::utf8_to_path(quick_state_unquote_path_field(fields.at("host")));
     if (!quick_state_parse_i32_text(fields.at("open_mode"), parsed_i32))
         return false;
     position.open_mode = parsed_i32;
@@ -3297,6 +3350,7 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     manifest.audio_state_restorable = quick_state_parse_audio_snapshot_section(slot, audio_snapshot);
     manifest.kernel = quick_state_count_kernel_objects(emuenv);
     manifest.io = quick_state_count_io_objects(emuenv);
+    manifest.same_pause_restore_available = quick_state_same_pause_restore_available(emuenv, slot);
 
     manifest.missing_serializers = {
         "kernel-thread-lifecycle",
@@ -3339,12 +3393,29 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     if (manifest.avplayer_threads > 0)
         manifest.missing_serializers.push_back("avplayer-movie-state");
 
-    manifest.restore_enabled = manifest.missing_serializers.empty() && !slot.restore_requires_same_pause;
+    const bool same_pause_sections_ready = manifest.same_pause_restore_available
+        && manifest.timing_restorable
+        && manifest.thread_metadata_restorable
+        && manifest.sync_primitives_restorable
+        && manifest.io_file_positions_restorable
+        && manifest.display_state_restorable
+        && manifest.audio_state_restorable;
+    const bool durable_restore_ready = manifest.missing_serializers.empty() && !slot.restore_requires_same_pause;
+    manifest.restore_enabled = durable_restore_ready || same_pause_sections_ready;
     if (manifest.restore_enabled) {
-        manifest.block_reason = "all mandatory quickstate serializers are present";
+        if (same_pause_sections_ready && !durable_restore_ready) {
+            manifest.block_reason = fmt::format("same paused-session restore is enabled; durable restart restore still needs serializers: {}",
+                quick_state_join_strings(manifest.missing_serializers));
+        } else {
+            manifest.block_reason = "all mandatory quickstate serializers are present";
+        }
     } else {
-        manifest.block_reason = fmt::format("restore disabled by Windows stability gate; missing serializers: {}",
-            quick_state_join_strings(manifest.missing_serializers));
+        if (slot.restore_requires_same_pause && !manifest.same_pause_restore_available) {
+            manifest.block_reason = "restore disabled because this capture needs the original paused host state, but emulation has resumed or the state was loaded from disk";
+        } else {
+            manifest.block_reason = fmt::format("restore disabled by Windows stability gate; missing serializers: {}",
+                quick_state_join_strings(manifest.missing_serializers));
+        }
     }
 
     return manifest;
@@ -3704,8 +3775,8 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         text << "title_id=" << emuenv.io.title_id << "\n";
         text << "content_id=" << emuenv.io.content_id << "\n";
         text << "app_path=" << emuenv.io.app_path << "\n";
-        text << "app0_host_path=" << emuenv.io.app0_host_path << "\n";
-        text << "archive_path=" << emuenv.io.app0_archive.archive_path << "\n";
+        text << "app0_host_path=" << fs_utils::path_to_utf8(emuenv.io.app0_host_path) << "\n";
+        text << "archive_path=" << fs_utils::path_to_utf8(emuenv.io.app0_archive.archive_path) << "\n";
         text << "archive_content_root=" << emuenv.io.app0_archive.content_root << "\n";
         text << "archive_entries=" << emuenv.io.app0_archive.entries.size() << "\n";
         text << "archive_dirs=" << quick_state_count_io_objects(emuenv).archive_dirs << "\n";
@@ -3716,7 +3787,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
             text << "file." << fd
                  << ".vita=" << file.get_vita_loc()
                  << ";translated=" << file.get_translated_path()
-                 << ";host=" << file.get_system_location()
+                 << ";host=" << fs_utils::path_to_utf8(file.get_system_location())
                  << ";open_mode=" << file.get_open_mode()
                  << ";memory=" << file.is_memory_file()
                  << ";offset=" << std::max<SceOff>(file.tell(), 0)
@@ -3727,7 +3798,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
             text << "dir." << fd
                  << ".vita=" << dir.get_vita_loc()
                  << ";translated=" << dir.get_translated_path()
-                 << ";host=" << dir.get_system_location()
+                 << ";host=" << fs_utils::path_to_utf8(dir.get_system_location())
                  << ";memory=" << dir.is_memory_directory()
                  << "\n";
         }
@@ -3881,7 +3952,12 @@ static bool restore_quick_state_thread_metadata(EmuEnvState &emuenv, const Quick
         }
 
         {
-            const std::lock_guard<std::mutex> thread_lock(thread->mutex);
+            std::unique_lock<std::mutex> thread_lock(thread->mutex, std::defer_lock);
+            if (!quick_state_try_lock_mutex(thread->mutex, thread_lock, QUICKSTATE_MUTEX_LOCK_TIMEOUT)) {
+                LOG_WARN("Refused thread metadata restore for {} because thread {} ({}) mutex stayed busy.",
+                    slot.title_id, thread_context.id, thread_context.name);
+                return false;
+            }
             thread->priority = thread_metadata.priority;
             thread->affinity_mask = thread_metadata.affinity_mask;
             thread->start_tick = thread_metadata.start_tick;
@@ -3916,22 +3992,25 @@ static uint64_t quick_state_timer_restore_next_event(const QuickStateSyncTimer &
     return quick_state_host_time_us() + saved_timer.next_event_delta_us;
 }
 
-static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const QuickStateSlot &slot, const std::vector<ThreadStatePtr> &matched_threads) {
+static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const QuickStateSlot &slot, const std::vector<ThreadStatePtr> &matched_threads, const bool allow_live_host_state) {
     QuickStateSyncSnapshot snapshot;
     if (!quick_state_parse_sync_primitives_section(slot, snapshot)) {
         LOG_WARN("Refused sync primitive restore for {} because thor.kernel.objects sync metadata is missing or invalid.", slot.title_id);
+        quick_state_last_restore_detail = "sync metadata missing or invalid";
         return false;
     }
 
-    if (snapshot.total_waiting_threads() > 0) {
+    if (snapshot.total_waiting_threads() > 0 && !allow_live_host_state) {
         LOG_WARN("Refused sync primitive restore for {} because {} waiting thread queue entry/entries still need queue serialization.",
             slot.title_id, snapshot.total_waiting_threads());
+        quick_state_last_restore_detail = fmt::format("{} waiting thread queue entry/entries still need queue serialization", snapshot.total_waiting_threads());
         return false;
     }
 
-    if (snapshot.msgpipe_buffer_bytes() > 0) {
+    if (snapshot.msgpipe_buffer_bytes() > 0 && !allow_live_host_state) {
         LOG_WARN("Refused sync primitive restore for {} because {} message-pipe buffer byte(s) still need payload serialization.",
             slot.title_id, snapshot.msgpipe_buffer_bytes());
+        quick_state_last_restore_detail = fmt::format("{} message-pipe buffer byte(s) still need payload serialization", snapshot.msgpipe_buffer_bytes());
         return false;
     }
 
@@ -3955,41 +4034,71 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
         || emuenv.kernel.rwlocks.size() != snapshot.rwlocks.size()
         || emuenv.kernel.msgpipes.size() != snapshot.msgpipes.size()) {
         LOG_WARN("Refused sync primitive restore for {} because current kernel object counts do not match the saved snapshot.", slot.title_id);
+        quick_state_last_restore_detail = fmt::format("sync object counts mismatch current simple_events={} timers={} semaphores={} mutexes={} lwmutexes={} eventflags={} condvars={} lwcondvars={} rwlocks={} msgpipes={} saved simple_events={} timers={} semaphores={} mutexes={} lwmutexes={} eventflags={} condvars={} lwcondvars={} rwlocks={} msgpipes={}",
+            emuenv.kernel.simple_events.size(),
+            emuenv.kernel.timers.size(),
+            emuenv.kernel.semaphores.size(),
+            emuenv.kernel.mutexes.size(),
+            emuenv.kernel.lwmutexes.size(),
+            emuenv.kernel.eventflags.size(),
+            emuenv.kernel.condvars.size(),
+            emuenv.kernel.lwcondvars.size(),
+            emuenv.kernel.rwlocks.size(),
+            emuenv.kernel.msgpipes.size(),
+            snapshot.simple_events.size(),
+            snapshot.timers.size(),
+            snapshot.semaphores.size(),
+            snapshot.mutexes.size(),
+            snapshot.lwmutexes.size(),
+            snapshot.eventflags.size(),
+            snapshot.condvars.size(),
+            snapshot.lwcondvars.size(),
+            snapshot.rwlocks.size(),
+            snapshot.msgpipes.size());
         return false;
     }
 
     for (const auto &[uid, saved_event] : snapshot.simple_events) {
         const auto current = emuenv.kernel.simple_events.find(uid);
-        if (current == emuenv.kernel.simple_events.end())
+        if (current == emuenv.kernel.simple_events.end()) {
+            quick_state_last_restore_detail = fmt::format("simple event {} is missing", uid);
             return false;
+        }
         const std::lock_guard<std::mutex> event_lock(current->second->mutex);
         if (!quick_state_sync_identity_matches(*current->second, saved_event.name, saved_event.attr)
             || quick_state_waiting_count(current->second->waiting_threads) != saved_event.waiting_count) {
             LOG_WARN("Refused sync primitive restore for {} because simple event {} does not match the saved identity.", slot.title_id, uid);
+            quick_state_last_restore_detail = fmt::format("simple event {} does not match the saved identity", uid);
             return false;
         }
     }
 
     for (const auto &[uid, saved_timer] : snapshot.timers) {
         const auto current = emuenv.kernel.timers.find(uid);
-        if (current == emuenv.kernel.timers.end())
+        if (current == emuenv.kernel.timers.end()) {
+            quick_state_last_restore_detail = fmt::format("timer {} is missing", uid);
             return false;
+        }
         const std::lock_guard<std::mutex> timer_lock(current->second->mutex);
         if (!quick_state_sync_identity_matches(*current->second, saved_timer.name, saved_timer.attr)
             || quick_state_waiting_count(current->second->waiting_threads) != saved_timer.waiting_count) {
             LOG_WARN("Refused sync primitive restore for {} because timer {} does not match the saved identity.", slot.title_id, uid);
+            quick_state_last_restore_detail = fmt::format("timer {} does not match the saved identity", uid);
             return false;
         }
     }
 
     for (const auto &[uid, saved_semaphore] : snapshot.semaphores) {
         const auto current = emuenv.kernel.semaphores.find(uid);
-        if (current == emuenv.kernel.semaphores.end())
+        if (current == emuenv.kernel.semaphores.end()) {
+            quick_state_last_restore_detail = fmt::format("semaphore {} is missing", uid);
             return false;
+        }
         const std::lock_guard<std::mutex> semaphore_lock(current->second->mutex);
         if (!quick_state_sync_identity_matches(*current->second, saved_semaphore.name, saved_semaphore.attr)
             || quick_state_waiting_count(current->second->waiting_threads) != saved_semaphore.waiting_count) {
             LOG_WARN("Refused sync primitive restore for {} because semaphore {} does not match the saved identity.", slot.title_id, uid);
+            quick_state_last_restore_detail = fmt::format("semaphore {} does not match the saved identity", uid);
             return false;
         }
     }
@@ -3997,17 +4106,21 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
     const auto validate_mutex_map = [&](const MutexPtrs &current_map, const std::map<SceUID, QuickStateSyncMutex> &saved_map, const char *kind) {
         for (const auto &[uid, saved_mutex] : saved_map) {
             const auto current = current_map.find(uid);
-            if (current == current_map.end())
+            if (current == current_map.end()) {
+                quick_state_last_restore_detail = fmt::format("{} {} is missing", kind, uid);
                 return false;
+            }
             const std::lock_guard<std::mutex> mutex_lock(current->second->mutex);
             if (!quick_state_sync_identity_matches(*current->second, saved_mutex.name, saved_mutex.attr)
                 || quick_state_waiting_count(current->second->waiting_threads) != saved_mutex.waiting_count
                 || (saved_mutex.lightweight && current->second->workarea.address() != saved_mutex.workarea)) {
                 LOG_WARN("Refused sync primitive restore for {} because {} {} does not match the saved identity.", slot.title_id, kind, uid);
+                quick_state_last_restore_detail = fmt::format("{} {} does not match the saved identity", kind, uid);
                 return false;
             }
             if (saved_mutex.owner != 0 && !resolve_owner(saved_mutex.owner)) {
                 LOG_WARN("Refused sync primitive restore for {} because {} {} owner thread {} was not matched.", slot.title_id, kind, uid, saved_mutex.owner);
+                quick_state_last_restore_detail = fmt::format("{} {} owner thread {} was not matched", kind, uid, saved_mutex.owner);
                 return false;
             }
         }
@@ -4020,12 +4133,15 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
 
     for (const auto &[uid, saved_eventflag] : snapshot.eventflags) {
         const auto current = emuenv.kernel.eventflags.find(uid);
-        if (current == emuenv.kernel.eventflags.end())
+        if (current == emuenv.kernel.eventflags.end()) {
+            quick_state_last_restore_detail = fmt::format("event flag {} is missing", uid);
             return false;
+        }
         const std::lock_guard<std::mutex> eventflag_lock(current->second->mutex);
         if (!quick_state_sync_identity_matches(*current->second, saved_eventflag.name, saved_eventflag.attr)
             || quick_state_waiting_count(current->second->waiting_threads) != saved_eventflag.waiting_count) {
             LOG_WARN("Refused sync primitive restore for {} because event flag {} does not match the saved identity.", slot.title_id, uid);
+            quick_state_last_restore_detail = fmt::format("event flag {} does not match the saved identity", uid);
             return false;
         }
     }
@@ -4033,8 +4149,10 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
     const auto validate_condvar_map = [&](const CondvarPtrs &current_map, const MutexPtrs &associated_mutexes, const std::map<SceUID, QuickStateSyncCondvar> &saved_map, const char *kind) {
         for (const auto &[uid, saved_condvar] : saved_map) {
             const auto current = current_map.find(uid);
-            if (current == current_map.end())
+            if (current == current_map.end()) {
+                quick_state_last_restore_detail = fmt::format("{} {} is missing", kind, uid);
                 return false;
+            }
             const auto associated = saved_condvar.associated_mutex == 0 ? associated_mutexes.end() : associated_mutexes.find(saved_condvar.associated_mutex);
             const std::lock_guard<std::mutex> condvar_lock(current->second->mutex);
             if (!quick_state_sync_identity_matches(*current->second, saved_condvar.name, saved_condvar.attr)
@@ -4044,6 +4162,17 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
                 || (saved_condvar.associated_mutex != 0 && !current->second->associated_mutex)
                 || (saved_condvar.associated_mutex != 0 && current->second->associated_mutex && current->second->associated_mutex->uid != saved_condvar.associated_mutex)) {
                 LOG_WARN("Refused sync primitive restore for {} because {} {} does not match the saved identity.", slot.title_id, kind, uid);
+                quick_state_last_restore_detail = fmt::format("{} {} does not match the saved identity; saved name='{}' attr={} waiting={} assoc={} current name='{}' attr={} waiting={} assoc={}",
+                    kind,
+                    uid,
+                    saved_condvar.name,
+                    saved_condvar.attr,
+                    saved_condvar.waiting_count,
+                    saved_condvar.associated_mutex,
+                    current->second->name,
+                    current->second->attr,
+                    quick_state_waiting_count(current->second->waiting_threads),
+                    current->second->associated_mutex ? current->second->associated_mutex->uid : 0);
                 return false;
             }
         }
@@ -4056,17 +4185,21 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
 
     for (const auto &[uid, saved_rwlock] : snapshot.rwlocks) {
         const auto current = emuenv.kernel.rwlocks.find(uid);
-        if (current == emuenv.kernel.rwlocks.end())
+        if (current == emuenv.kernel.rwlocks.end()) {
+            quick_state_last_restore_detail = fmt::format("rwlock {} is missing", uid);
             return false;
+        }
         const std::lock_guard<std::mutex> rwlock_lock(current->second->mutex);
         if (!quick_state_sync_identity_matches(*current->second, saved_rwlock.name, saved_rwlock.attr)
             || quick_state_waiting_count(current->second->waiting_threads) != saved_rwlock.waiting_count) {
             LOG_WARN("Refused sync primitive restore for {} because rwlock {} does not match the saved identity.", slot.title_id, uid);
+            quick_state_last_restore_detail = fmt::format("rwlock {} does not match the saved identity", uid);
             return false;
         }
         for (const auto &[owner_id, _] : saved_rwlock.owners) {
             if (!resolve_owner(owner_id)) {
                 LOG_WARN("Refused sync primitive restore for {} because rwlock {} owner thread {} was not matched.", slot.title_id, uid, owner_id);
+                quick_state_last_restore_detail = fmt::format("rwlock {} owner thread {} was not matched", uid, owner_id);
                 return false;
             }
         }
@@ -4074,8 +4207,10 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
 
     for (const auto &[uid, saved_msgpipe] : snapshot.msgpipes) {
         const auto current = emuenv.kernel.msgpipes.find(uid);
-        if (current == emuenv.kernel.msgpipes.end())
+        if (current == emuenv.kernel.msgpipes.end()) {
+            quick_state_last_restore_detail = fmt::format("msgpipe {} is missing", uid);
             return false;
+        }
         const std::lock_guard<std::mutex> msgpipe_lock(current->second->mutex);
         if (!quick_state_sync_identity_matches(*current->second, saved_msgpipe.name, saved_msgpipe.attr)
             || quick_state_waiting_count(current->second->senders) != saved_msgpipe.sender_count
@@ -4083,6 +4218,7 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
             || current->second->data_buffer.Capacity() != saved_msgpipe.capacity
             || current->second->data_buffer.Used() != saved_msgpipe.used) {
             LOG_WARN("Refused sync primitive restore for {} because msgpipe {} does not match the saved identity.", slot.title_id, uid);
+            quick_state_last_restore_detail = fmt::format("msgpipe {} does not match the saved identity", uid);
             return false;
         }
     }
@@ -4184,20 +4320,20 @@ static DisplayFrameInfo quick_state_to_display_frame_info(const QuickStateDispla
     return frame;
 }
 
-static bool restore_quick_state_display_state(EmuEnvState &emuenv, const QuickStateSlot &slot, const std::vector<ThreadStatePtr> &matched_threads) {
+static bool restore_quick_state_display_state(EmuEnvState &emuenv, const QuickStateSlot &slot, const std::vector<ThreadStatePtr> &matched_threads, const bool allow_live_host_state) {
     QuickStateDisplaySnapshot snapshot;
     if (!quick_state_parse_display_snapshot_section(slot, snapshot)) {
         LOG_WARN("Refused display restore for {} because the thor.display section is missing or invalid.", slot.title_id);
         return false;
     }
 
-    if (!snapshot.vblank_waits_complete) {
+    if (!snapshot.vblank_waits_complete && !allow_live_host_state) {
         LOG_WARN("Refused display restore for {} because vblank wait target metadata is incomplete (waits={}).",
             slot.title_id, snapshot.vblank_wait_info_count);
         return false;
     }
 
-    if (snapshot.vblank_callback_count > 0) {
+    if (snapshot.vblank_callback_count > 0 && !allow_live_host_state) {
         LOG_WARN("Refused display restore for {} because vblank callbacks still need callback lifecycle serialization (callbacks={}).",
             slot.title_id, snapshot.vblank_callback_count);
         return false;
@@ -4205,20 +4341,22 @@ static bool restore_quick_state_display_state(EmuEnvState &emuenv, const QuickSt
 
     const auto threads_by_saved_id = quick_state_matched_threads_by_saved_id(slot, matched_threads);
     std::vector<DisplayStateVBlankWaitInfo> restored_vblank_waits;
-    restored_vblank_waits.reserve(snapshot.vblank_waits.size());
-    for (const auto &saved_wait : snapshot.vblank_waits) {
-        const auto thread = threads_by_saved_id.find(saved_wait.thread_id);
-        if (thread == threads_by_saved_id.end() || !thread->second) {
-            LOG_WARN("Refused display restore for {} because vblank wait thread {} was not matched.",
-                slot.title_id, saved_wait.thread_id);
-            return false;
+    if (snapshot.vblank_waits_complete) {
+        restored_vblank_waits.reserve(snapshot.vblank_waits.size());
+        for (const auto &saved_wait : snapshot.vblank_waits) {
+            const auto thread = threads_by_saved_id.find(saved_wait.thread_id);
+            if (thread == threads_by_saved_id.end() || !thread->second) {
+                LOG_WARN("Refused display restore for {} because vblank wait thread {} was not matched.",
+                    slot.title_id, saved_wait.thread_id);
+                return false;
+            }
+            if (saved_wait.target_vcount <= snapshot.vblank_count) {
+                LOG_WARN("Refused display restore for {} because vblank wait thread {} has stale target vcount {} at saved vblank {}.",
+                    slot.title_id, saved_wait.thread_id, saved_wait.target_vcount, snapshot.vblank_count);
+                return false;
+            }
+            restored_vblank_waits.push_back({ thread->second, saved_wait.target_vcount });
         }
-        if (saved_wait.target_vcount <= snapshot.vblank_count) {
-            LOG_WARN("Refused display restore for {} because vblank wait thread {} has stale target vcount {} at saved vblank {}.",
-                slot.title_id, saved_wait.thread_id, saved_wait.target_vcount, snapshot.vblank_count);
-            return false;
-        }
-        restored_vblank_waits.push_back({ thread->second, saved_wait.target_vcount });
     }
 
     {
@@ -4227,7 +4365,8 @@ static bool restore_quick_state_display_state(EmuEnvState &emuenv, const QuickSt
             LOG_WARN("Refused display restore for {} because current vblank callback count does not match the saved snapshot.", slot.title_id);
             return false;
         }
-        emuenv.display.vblank_wait_infos = std::move(restored_vblank_waits);
+        if (snapshot.vblank_waits_complete)
+            emuenv.display.vblank_wait_infos = std::move(restored_vblank_waits);
     }
 
     emuenv.display.speed_percent.store(snapshot.speed_percent);
@@ -4359,6 +4498,7 @@ static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const Qui
     SceUID saved_next_fd = 0;
     if (!quick_state_parse_io_file_positions_section(slot, positions_by_fd, &saved_next_fd)) {
         LOG_WARN("Refused IO file-position restore for {} because the thor.io.vfs file metadata is missing or invalid.", slot.title_id);
+        quick_state_last_restore_detail = "IO metadata missing or invalid";
         return false;
     }
 
@@ -4367,6 +4507,7 @@ static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const Qui
             if (emuenv.io.tty_files.contains(fd) || emuenv.io.dir_entries.contains(fd)) {
                 LOG_WARN("Refused IO file-handle restore for {} because saved fd {} collides with an existing tty or directory handle.",
                     slot.title_id, fd);
+                quick_state_last_restore_detail = fmt::format("saved fd {} collides with an existing tty or directory handle", fd);
                 return false;
             }
         }
@@ -4379,11 +4520,13 @@ static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const Qui
                 const std::string source = position.memory_file ? std::string("archive memory file") : fs_utils::path_to_utf8(position.host_path);
                 LOG_WARN("Refused IO file-handle restore for {} because saved fd {} could not be recreated from {}.",
                     slot.title_id, fd, source);
+                quick_state_last_restore_detail = fmt::format("saved fd {} could not be recreated from {}", fd, source);
                 return false;
             }
             if (!file->seek(position.offset, SCE_SEEK_SET)) {
                 LOG_WARN("Refused IO file-handle restore for {} because recreated fd {} could not seek to {}.",
                     slot.title_id, fd, position.offset);
+                quick_state_last_restore_detail = fmt::format("recreated fd {} could not seek to {}", fd, position.offset);
                 return false;
             }
             rebuilt_files.emplace(fd, std::move(*file));
@@ -4401,6 +4544,7 @@ static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const Qui
         const auto file = emuenv.io.std_files.find(fd);
         if (file == emuenv.io.std_files.end()) {
             LOG_WARN("Refused IO file-position restore for {} because fd {} is not open in the current session.", slot.title_id, fd);
+            quick_state_last_restore_detail = fmt::format("fd {} is not open in the current session", fd);
             return false;
         }
 
@@ -4411,6 +4555,18 @@ static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const Qui
             || position.open_mode != current_file.get_open_mode()
             || position.memory_file != current_file.is_memory_file()) {
             LOG_WARN("Refused IO file-position restore for {} because fd {} does not match the saved file identity.", slot.title_id, fd);
+            quick_state_last_restore_detail = fmt::format("fd {} does not match the saved file identity; saved vita='{}' translated='{}' host='{}' mode={} memory={} current vita='{}' translated='{}' host='{}' mode={} memory={}",
+                fd,
+                position.vita_path,
+                position.translated_path,
+                fs_utils::path_to_utf8(position.host_path),
+                position.open_mode,
+                position.memory_file,
+                current_file.get_vita_loc(),
+                current_file.get_translated_path(),
+                fs_utils::path_to_utf8(current_file.get_system_location()),
+                current_file.get_open_mode(),
+                current_file.is_memory_file());
             return false;
         }
     }
@@ -4419,6 +4575,7 @@ static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const Qui
         auto &file = emuenv.io.std_files.at(fd);
         if (!file.seek(position.offset, SCE_SEEK_SET)) {
             LOG_WARN("Refused IO file-position restore for {} because fd {} could not seek to {}.", slot.title_id, fd, position.offset);
+            quick_state_last_restore_detail = fmt::format("fd {} could not seek to {}", fd, position.offset);
             return false;
         }
     }
@@ -4429,28 +4586,37 @@ static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const Qui
 }
 
 static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
-    if (!slot.valid || (slot.title_id != emuenv.io.title_id))
-        return false;
+    quick_state_last_restore_detail.clear();
 
-    if (slot.restore_requires_same_pause) {
+    if (!slot.valid || (slot.title_id != emuenv.io.title_id)) {
+        quick_state_last_restore_detail = "slot invalid or title mismatch";
+        return false;
+    }
+
+    const bool allow_live_host_state = quick_state_same_pause_restore_available(emuenv, slot);
+    if (slot.restore_requires_same_pause && !allow_live_host_state) {
         const auto manifest = build_quick_state_restore_manifest(emuenv, slot);
         LOG_WARN("Refused quickstate restore for {} because {}.", slot.title_id, manifest.block_reason);
+        quick_state_last_restore_detail = manifest.block_reason;
         return false;
     }
 
     bool already_paused = false;
     if (!pause_for_quick_state(emuenv, "restore", already_paused)) {
         LOG_WARN("Failed to restore quickstate for {} because guest threads did not pause in time.", slot.title_id);
+        quick_state_last_restore_detail = "guest threads did not pause in time";
         return false;
     }
 
     std::vector<ThreadStatePtr> matched_threads;
     if (!preflight_quick_state_restore_threads(emuenv.kernel, slot, matched_threads)) {
+        quick_state_last_restore_detail = "thread preflight failed";
         resume_after_quick_state(emuenv, already_paused);
         return false;
     }
 
     if (!restore_quick_state_allocation_map(emuenv, slot)) {
+        quick_state_last_restore_detail = "allocation map restore failed";
         resume_after_quick_state(emuenv, already_paused);
         return false;
     }
@@ -4467,35 +4633,44 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         resume_after_quick_state(emuenv, already_paused);
         LOG_WARN("Refused quickstate restore for {} because {} guest memory page(s) are not allocated in the current session. Restart/load-state support needs full kernel object and allocation-map serialization before this can be restored safely.",
             slot.title_id, missing_pages);
+        quick_state_last_restore_detail = fmt::format("{} guest memory page(s) are not allocated in the current session", missing_pages);
         return false;
     }
 
     if (!restore_quick_state_timing_state(emuenv, slot)) {
+        quick_state_last_restore_detail = "timing restore failed";
         resume_after_quick_state(emuenv, already_paused);
         return false;
     }
 
     if (!restore_quick_state_thread_metadata(emuenv, slot, matched_threads)) {
+        quick_state_last_restore_detail = "thread metadata restore failed";
         resume_after_quick_state(emuenv, already_paused);
         return false;
     }
 
-    if (!restore_quick_state_sync_primitives(emuenv, slot, matched_threads)) {
+    if (!restore_quick_state_sync_primitives(emuenv, slot, matched_threads, allow_live_host_state)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "sync primitive restore failed";
         resume_after_quick_state(emuenv, already_paused);
         return false;
     }
 
     if (!restore_quick_state_io_file_positions(emuenv, slot)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "IO file restore failed";
         resume_after_quick_state(emuenv, already_paused);
         return false;
     }
 
-    if (!restore_quick_state_display_state(emuenv, slot, matched_threads)) {
+    if (!restore_quick_state_display_state(emuenv, slot, matched_threads, allow_live_host_state)) {
+        quick_state_last_restore_detail = "display restore failed";
         resume_after_quick_state(emuenv, already_paused);
         return false;
     }
 
     if (!restore_quick_state_audio_state(emuenv, slot)) {
+        quick_state_last_restore_detail = "audio restore failed";
         resume_after_quick_state(emuenv, already_paused);
         return false;
     }
@@ -4507,7 +4682,14 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         for (size_t i = 0; i < slot.thread_contexts.size(); i++) {
             const auto &thread_context = slot.thread_contexts[i];
             const auto &thread = matched_threads[i];
-            const std::lock_guard<std::mutex> thread_lock(thread->mutex);
+            std::unique_lock<std::mutex> thread_lock(thread->mutex, std::defer_lock);
+            if (!quick_state_try_lock_mutex(thread->mutex, thread_lock, QUICKSTATE_MUTEX_LOCK_TIMEOUT)) {
+                LOG_WARN("Refused quickstate restore for {} because thread {} ({}) mutex stayed busy before CPU context load.",
+                    slot.title_id, thread_context.id, thread_context.name);
+                quick_state_last_restore_detail = fmt::format("thread {} ({}) mutex stayed busy before CPU context load", thread_context.id, thread_context.name);
+                resume_after_quick_state(emuenv, already_paused);
+                return false;
+            }
             load_context(*thread->cpu, thread_context.context);
         }
     }
@@ -4516,6 +4698,7 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     emuenv.kernel.invalidate_jit_cache(0, std::numeric_limits<Address>::max());
     resume_after_quick_state(emuenv, already_paused);
 
+    quick_state_last_restore_detail = "restore completed";
     return true;
 }
 
@@ -4624,6 +4807,7 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "State file: " << quick_state_file(emuenv, slot.title_id) << "\n";
     marker << "\nRestore readiness\n";
     marker << "Restore enabled: " << (manifest.restore_enabled ? "yes" : "no") << "\n";
+    marker << "Same paused-session restore: " << (manifest.same_pause_restore_available ? "available" : "not available") << "\n";
     marker << "Timing restore layer: " << (manifest.timing_restorable ? "ready" : "missing") << "\n";
     marker << "Thread metadata restore layer: " << (manifest.thread_metadata_restorable ? "ready" : "missing") << "\n";
     marker << "Sync primitive scalar restore layer: " << (manifest.sync_primitives_restorable ? "ready" : "missing") << "\n";
@@ -4667,6 +4851,54 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "\nNote: this is an experimental disk-backed capture. It is not PPSSPP-style load reliability yet; restore stays gated until the missing serializer list is actually implemented and proven stable on Windows.\n";
 }
 
+static void write_quick_state_capture_marker(EmuEnvState &emuenv, const std::string &title_id, const std::string &title, const bool success, const std::string_view detail) {
+    if (title_id.empty())
+        return;
+
+    const fs::path state_dir = quick_state_dir(emuenv, title_id);
+    fs::create_directories(state_dir);
+    fs::ofstream marker(quick_state_capture_marker_file(emuenv, title_id));
+    marker << "Vita3K Thor quickstate capture attempt\n";
+    marker << "Title ID: " << title_id << "\n";
+    marker << "Title: " << title << "\n";
+    marker << "Result: " << (success ? "success" : "failure") << "\n";
+    marker << "Detail: " << detail << "\n";
+    marker << "State file: " << quick_state_file(emuenv, title_id) << "\n";
+    marker << "Same paused-session restore: " << (quick_state_same_pause_restore_available(emuenv, quick_state_slot0) ? "available" : "not available") << "\n";
+}
+
+static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickStateSlot &slot, const bool success, const bool loaded_from_disk, const std::string_view detail) {
+    if (slot.title_id.empty())
+        return;
+
+    const fs::path state_dir = quick_state_dir(emuenv, slot.title_id);
+    fs::create_directories(state_dir);
+    const auto manifest = build_quick_state_restore_manifest(emuenv, slot);
+    fs::ofstream marker(quick_state_restore_marker_file(emuenv, slot.title_id));
+    marker << "Vita3K Thor quickstate restore attempt\n";
+    marker << "Title ID: " << slot.title_id << "\n";
+    marker << "Title: " << slot.title << "\n";
+    marker << "Result: " << (success ? "success" : "failure") << "\n";
+    marker << "Mode: " << (loaded_from_disk ? "durable-disk" : "same-session") << "\n";
+    marker << "Detail: " << detail << "\n";
+    marker << "State file: " << quick_state_file(emuenv, slot.title_id) << "\n";
+    marker << "\nRestore readiness at attempt time\n";
+    marker << "Restore enabled: " << (manifest.restore_enabled ? "yes" : "no") << "\n";
+    marker << "Same paused-session restore: " << (manifest.same_pause_restore_available ? "available" : "not available") << "\n";
+    marker << "Timing restore layer: " << (manifest.timing_restorable ? "ready" : "missing") << "\n";
+    marker << "Thread metadata restore layer: " << (manifest.thread_metadata_restorable ? "ready" : "missing") << "\n";
+    marker << "Sync primitive scalar restore layer: " << (manifest.sync_primitives_restorable ? "ready" : "missing") << "\n";
+    marker << "Sync wait queue entries: " << manifest.sync_waiting_threads << "\n";
+    marker << "Sync wait queue metadata: " << (manifest.sync_wait_queue_metadata_complete ? "ready" : "missing")
+           << " (" << manifest.sync_wait_queue_entries << " serialized)\n";
+    marker << "IO file-position restore layer: " << (manifest.io_file_positions_restorable ? "ready" : "missing") << "\n";
+    marker << "Display scalar restore layer: " << (manifest.display_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Display vblank wait restore layer: " << (manifest.display_vblank_waits_restorable ? "ready" : "missing") << "\n";
+    marker << "Audio scalar restore layer: " << (manifest.audio_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Block reason: " << manifest.block_reason << "\n";
+    marker << "Missing serializers: " << quick_state_join_strings(manifest.missing_serializers) << "\n";
+}
+
 } // namespace
 
 bool runtime_osd_is_open() {
@@ -4686,11 +4918,15 @@ std::string runtime_quick_state_slot_status(EmuEnvState &emuenv) {
     if (quick_state_slot0.valid && (quick_state_slot0.title_id == title_id)) {
         QuickStateDiskHeader header;
         const bool has_disk_state = read_quick_state_disk_header(emuenv, title_id, header);
+        const bool same_pause_ready = quick_state_same_pause_restore_available(emuenv, quick_state_slot0);
         if (has_disk_state) {
             const uint64_t disk_size = quick_state_file_size(emuenv, title_id);
-            return fmt::format("capture {} MiB, load gated ({} MiB raw)", disk_size / (1024 * 1024), quick_state_slot0.byte_count / (1024 * 1024));
+            return fmt::format("capture {} MiB, {} ({} MiB raw)",
+                disk_size / (1024 * 1024),
+                same_pause_ready ? "same-pause load ready" : "durable load gated",
+                quick_state_slot0.byte_count / (1024 * 1024));
         }
-        return fmt::format("RAM capture {} MiB, load gated", quick_state_slot0.byte_count / (1024 * 1024));
+        return fmt::format("RAM capture {} MiB, {}", quick_state_slot0.byte_count / (1024 * 1024), same_pause_ready ? "same-pause load ready" : "load gated");
     }
 
     QuickStateDiskHeader header;
@@ -4757,6 +4993,7 @@ void runtime_request_save_state(EmuEnvState &emuenv) {
         const bool saved_to_disk = save_quick_state_to_disk(emuenv, quick_state_slot0);
         if (saved_to_disk)
             write_quick_state_marker(emuenv, quick_state_slot0);
+        write_quick_state_capture_marker(emuenv, title_id, emuenv.current_app_title, saved_to_disk, saved_to_disk ? quick_state_last_capture_detail : "capture completed but disk write failed");
 
         LOG_INFO("Captured {} quickstate slot 0 for {} at {} ({} bytes, {} threads)",
             saved_to_disk ? "disk-backed" : "RAM-only",
@@ -4770,6 +5007,8 @@ void runtime_request_save_state(EmuEnvState &emuenv) {
         if (!saved_to_disk)
             LOG_WARN("Failed to write disk-backed quickstate slot 0 for {}", title_id);
     } else {
+        const std::string detail = quick_state_last_capture_detail.empty() ? "capture failed" : quick_state_last_capture_detail;
+        write_quick_state_capture_marker(emuenv, title_id, emuenv.current_app_title, false, detail);
         LOG_WARN("Failed to capture same-session quickstate slot 0 for {}", title_id);
     }
 }
@@ -4792,6 +5031,7 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
     const auto manifest = build_quick_state_restore_manifest(emuenv, quick_state_slot0);
     if (!manifest.restore_enabled) {
         LOG_WARN("Refused quickstate slot 0 restore for {} because {}.", title_id, manifest.block_reason);
+        write_quick_state_restore_marker(emuenv, quick_state_slot0, false, loaded_from_disk, fmt::format("refused: {}", manifest.block_reason));
         LOG_INFO("Quickstate slot 0 manifest for {}: guest={} MiB, pages={}, saved_threads={}, sections={}, timing_restorable={}, thread_metadata_restorable={}, sync_primitives_restorable={}, sync_wait_entries={}, msgpipe_buffer_bytes={}, io_file_positions_restorable={}, io_file_handles_restorable={}, io_memory_file_handles={}, display_state_restorable={}, display_vblank_waits_restorable={}, display_wait_entries={}, display_callback_entries={}, audio_state_restorable={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
             title_id,
             manifest.guest_memory_bytes / (1024 * 1024),
@@ -4829,7 +5069,12 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
         return;
     }
 
-    if (restore_quick_state(emuenv, quick_state_slot0)) {
+    const bool restored = restore_quick_state(emuenv, quick_state_slot0);
+    const std::string restore_detail = quick_state_last_restore_detail.empty()
+        ? (restored ? "restore completed" : "restore failed after readiness gate")
+        : quick_state_last_restore_detail;
+    write_quick_state_restore_marker(emuenv, quick_state_slot0, restored, loaded_from_disk, restore_detail);
+    if (restored) {
         LOG_INFO("Restored {} quickstate slot 0 for {} from {}",
             loaded_from_disk ? "durable" : "same-session",
             title_id,
@@ -4891,8 +5136,11 @@ static std::map<std::string, std::string> read_runtime_control_file(const fs::pa
 
 static void runtime_set_pause_state(EmuEnvState &emuenv, const bool pause) {
     const bool already_paused = emuenv.kernel.is_threads_paused();
-    if (pause == already_paused)
+    if (pause == already_paused) {
+        if (pause)
+            emuenv.kernel.pause_threads();
         return;
+    }
 
     if (!pause) {
         runtime_osd_auto_paused = false;
