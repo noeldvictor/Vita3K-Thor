@@ -168,6 +168,7 @@ struct KernelState {
     void load_process_param(MemState &mem, Ptr<uint32_t> ptr);
     ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point = Ptr<const void>(0));
     ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option);
+    ThreadStatePtr create_thread_for_restore(MemState &mem, SceUID uid, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size);
 
     ThreadStatePtr get_thread(SceUID thread_id);
     Ptr<Ptr<void>> get_thread_tls_addr(MemState &mem, SceUID thread_id, int key);
@@ -175,7 +176,7 @@ struct KernelState {
     void set_paused_thread_status_for_restore(SceUID thread_id, ThreadStatus status);
 
     void exit_delete_all_threads();
-    bool is_threads_paused() { return !paused_threads_status.empty(); }
+    bool is_threads_paused() const { return threads_pause_active.load(); }
     void pause_threads();
     void resume_threads();
 
@@ -185,5 +186,6 @@ struct KernelState {
 
 private:
     std::atomic<SceUID> next_uid{ 1 };
+    std::atomic<bool> threads_pause_active{ false };
     std::map<SceUID, ThreadStatus> paused_threads_status;
 };

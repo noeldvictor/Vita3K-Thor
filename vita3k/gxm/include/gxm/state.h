@@ -21,9 +21,12 @@
 #include <mem/ptr.h>
 #include <threads/queue.h>
 
+#include <deque>
 #include <map>
 #include <mutex>
 #include <vector>
+
+struct DisplayFrameInfo;
 
 struct SceGxmInitializeParams {
     uint32_t flags = 0;
@@ -42,6 +45,13 @@ struct DisplayCallback {
     bool frame_predicted;
 };
 
+struct PendingDisplayCallback {
+    SceUID thread_id = 0;
+    DisplayCallback callback;
+    DisplayFrameInfo *frame = nullptr;
+    bool wait_until_empty_after_push = false;
+};
+
 struct MemoryMapInfo {
     Address offset;
     std::uint32_t size;
@@ -55,6 +65,7 @@ struct GxmState {
     SceUID display_queue_thread;
     std::mutex display_queue_waiters_mutex;
     std::vector<SceUID> display_queue_waiters;
+    std::deque<PendingDisplayCallback> pending_display_callbacks;
 
     // global timestamp used by sync objects
     std::atomic<uint32_t> global_timestamp{ 1 };

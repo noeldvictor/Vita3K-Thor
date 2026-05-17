@@ -19,6 +19,7 @@
 #include <kernel/thread/thread_state.h>
 
 #include <kernel/state.h>
+#include <mem/functions.h>
 #include <mem/ptr.h>
 #include <nids/functions.h>
 #include <util/align.h>
@@ -137,6 +138,7 @@ int ThreadState::start(SceSize arglen, const Ptr<void> argp, bool run_entry_call
 
     deferred_import_wait = false;
     deferred_import_return = false;
+    deferred_resume_after_pause = false;
     run_start_callback = run_entry_callback;
     call_level = 1;
     load_context(*cpu, init_cpu_ctx);
@@ -179,6 +181,7 @@ void ThreadState::exit_delete(bool exit) {
     run_end_callback = exit;
     deferred_import_wait = false;
     deferred_import_return = false;
+    deferred_resume_after_pause = false;
 
     const ThreadToDo last_to_do = to_do;
     to_do = ThreadToDo::remove;
@@ -287,10 +290,12 @@ bool ThreadState::run_loop() {
                 if (cpu->svc_called) {
                     const uint32_t nid = *Ptr<uint32_t>(read_pc(*cpu) + 4).get(mem);
                     active_import_pc.store(read_pc(*cpu), std::memory_order_relaxed);
+                    active_import_detail.store(0, std::memory_order_relaxed);
                     active_import_nid.store(nid, std::memory_order_relaxed);
                     kernel.call_import(*cpu, nid, id);
                     active_import_nid.store(0, std::memory_order_relaxed);
                     active_import_pc.store(0, std::memory_order_relaxed);
+                    active_import_detail.store(0, std::memory_order_relaxed);
                     clear_exclusive(*cpu);
                 }
 
@@ -489,23 +494,51 @@ void ThreadState::resume(bool step) {
 
 bool ThreadState::begin_deferred_import_wait() {
     std::lock_guard<std::mutex> lock(mutex);
-    if (to_do != ThreadToDo::run && to_do != ThreadToDo::step)
+    if (to_do != ThreadToDo::run && to_do != ThreadToDo::step && to_do != ThreadToDo::suspend)
         return false;
 
     deferred_import_wait = true;
     deferred_import_return = true;
     to_do = ThreadToDo::wait;
-    update_status(ThreadStatus::wait, ThreadStatus::run);
+    if (status == ThreadStatus::run)
+        update_status(ThreadStatus::wait, ThreadStatus::run);
+    else
+        update_status(ThreadStatus::wait);
     return true;
 }
 
 bool ThreadState::restore_deferred_import_wait() {
     std::lock_guard<std::mutex> lock(mutex);
     deferred_import_wait = true;
+    deferred_import_return = false;
+    deferred_resume_after_pause = false;
     to_do = ThreadToDo::wait;
     status = ThreadStatus::wait;
     status_cond.notify_all();
     return true;
+}
+
+void ThreadState::clear_deferred_import_wait_for_restore() {
+    std::lock_guard<std::mutex> lock(mutex);
+    deferred_import_wait = false;
+    deferred_import_return = false;
+    deferred_resume_after_pause = false;
+    active_import_nid.store(0, std::memory_order_relaxed);
+    active_import_pc.store(0, std::memory_order_relaxed);
+    active_import_detail.store(0, std::memory_order_relaxed);
+}
+
+void ThreadState::restore_memory_blocks_for_quick_state(const Address stack_address, const int saved_stack_size, const Address tls_address) {
+    std::lock_guard<std::mutex> lock(mutex);
+    stack = Block(stack_address, [this](Address address) {
+        ::free(mem, address);
+    });
+    stack_size = saved_stack_size;
+    tls = Block(tls_address, [this](Address address) {
+        ::free(mem, address);
+    });
+    if (cpu)
+        write_tpidruro(*cpu, tls_address + 0x800);
 }
 
 bool ThreadState::complete_deferred_import_wait(uint32_t return_value) {
@@ -515,6 +548,18 @@ bool ThreadState::complete_deferred_import_wait(uint32_t return_value) {
 
     deferred_import_wait = false;
     write_reg(*cpu, 0, return_value);
+
+    if (kernel.is_threads_paused()) {
+        deferred_resume_after_pause = true;
+        if (status == ThreadStatus::wait || status == ThreadStatus::run) {
+            status = ThreadStatus::suspend;
+            status_cond.notify_all();
+        }
+        if (to_do == ThreadToDo::wait || to_do == ThreadToDo::run)
+            to_do = ThreadToDo::suspend;
+        return true;
+    }
+
     if (status == ThreadStatus::wait) {
         status = ThreadStatus::run;
         status_cond.notify_all();
@@ -533,9 +578,26 @@ bool ThreadState::consume_deferred_import_return() {
     return deferred;
 }
 
+void ThreadState::resume_after_pause_if_needed(bool saved_running_before_pause) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    const bool should_resume = saved_running_before_pause || deferred_resume_after_pause;
+    deferred_resume_after_pause = false;
+    if (!should_resume)
+        return;
+
+    if (to_do == ThreadToDo::wait || to_do == ThreadToDo::suspend) {
+        to_do = ThreadToDo::run;
+        something_to_do.notify_one();
+    }
+}
+
 bool ThreadState::has_deferred_import_wait() {
     std::lock_guard<std::mutex> lock(mutex);
     return deferred_import_wait;
+}
+
+void ThreadState::set_active_import_detail(uint32_t detail) {
+    active_import_detail.store(detail, std::memory_order_relaxed);
 }
 
 static const char *thread_status_name(const ThreadStatus status) {
@@ -595,6 +657,7 @@ std::string ThreadState::quick_state_debug_summary() const {
         out << " active_import=0x" << std::hex << import_nid
             << "(" << import_name(import_nid) << ")"
             << " import_pc=0x" << active_import_pc.load(std::memory_order_relaxed)
+            << " import_detail=0x" << active_import_detail.load(std::memory_order_relaxed)
             << std::dec;
     }
 

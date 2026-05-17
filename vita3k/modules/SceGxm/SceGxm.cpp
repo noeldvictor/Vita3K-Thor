@@ -926,6 +926,62 @@ static bool defer_display_queue_empty_wait(EmuEnvState &emuenv, const SceUID thr
     return true;
 }
 
+static void submit_display_queue_new_frame(EmuEnvState &emuenv, DisplayFrameInfo *frame) {
+    // TODO: I do this because the sync function does not have access to the display state, but this is not great
+    renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::NewFrame, false, frame, &emuenv.display);
+}
+
+static void pump_deferred_display_queue_add_entries(EmuEnvState &emuenv) {
+    while (true) {
+        PendingDisplayCallback pending;
+        {
+            const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
+            if (emuenv.gxm.pending_display_callbacks.empty())
+                return;
+            pending = emuenv.gxm.pending_display_callbacks.front();
+        }
+
+        if (!emuenv.gxm.display_queue.try_push(pending.callback))
+            return;
+
+        {
+            const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
+            if (!emuenv.gxm.pending_display_callbacks.empty())
+                emuenv.gxm.pending_display_callbacks.pop_front();
+        }
+
+        submit_display_queue_new_frame(emuenv, pending.frame);
+
+        if (pending.wait_until_empty_after_push) {
+            {
+                const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
+                emuenv.gxm.display_queue_waiters.push_back(pending.thread_id);
+            }
+            complete_display_queue_waiters(emuenv);
+            continue;
+        }
+
+        const ThreadStatePtr waiter = emuenv.kernel.get_thread(pending.thread_id);
+        if (waiter)
+            waiter->complete_deferred_import_wait(0);
+    }
+}
+
+static bool defer_display_queue_full_push(EmuEnvState &emuenv, const SceUID thread_id, const DisplayCallback &display_callback, DisplayFrameInfo *frame) {
+    const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread || !thread->begin_deferred_import_wait())
+        return false;
+
+    const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
+    emuenv.gxm.pending_display_callbacks.push_back({
+        .thread_id = thread_id,
+        .callback = display_callback,
+        .frame = frame,
+        .wait_until_empty_after_push = emuenv.gxm.params.displayQueueMaxPendingCount == 1
+    });
+    return true;
+}
+
 static void display_entry_thread(EmuEnvState &emuenv) {
     auto &display_queue = emuenv.gxm.display_queue;
     const Address callback_address = emuenv.gxm.params.displayQueueCallback.address();
@@ -951,6 +1007,7 @@ static void display_entry_thread(EmuEnvState &emuenv) {
         // now we can remove the thread from the display queue
         display_queue.pop();
         complete_display_queue_waiters(emuenv);
+        pump_deferred_display_queue_add_entries(emuenv);
 
         // specify whether the call to SceDisplaySetFrameBuf is expected to do something
         emuenv.display.predicting = display_callback->frame_predicted;
@@ -2131,16 +2188,25 @@ EXPORT(int, sceGxmDestroyRenderTarget, Ptr<SceGxmRenderTarget> renderTarget) {
 
 EXPORT(int, sceGxmDisplayQueueAddEntry, Ptr<SceGxmSyncObject> oldBuffer, Ptr<SceGxmSyncObject> newBuffer, Ptr<const void> callbackData) {
     TRACY_FUNC(sceGxmDisplayQueueAddEntry, oldBuffer, newBuffer, callbackData);
+    const ThreadStatePtr current_thread = emuenv.kernel.get_thread(thread_id);
+    if (current_thread)
+        current_thread->set_active_import_detail(0xAD00);
     if (!oldBuffer || !newBuffer)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 
+    if (current_thread)
+        current_thread->set_active_import_detail(0xAD01);
     const Address address = alloc(emuenv.mem, emuenv.gxm.params.displayQueueCallbackDataSize, __FUNCTION__);
     const Ptr<void> ptr(address);
     memcpy(ptr.get(emuenv.mem), callbackData.get(emuenv.mem), emuenv.gxm.params.displayQueueCallbackDataSize);
 
+    if (current_thread)
+        current_thread->set_active_import_detail(0xAD02);
     DisplayFrameInfo *frame = predict_next_image(emuenv, newBuffer.address());
 
     // Block future rendering by setting values of sync object
+    if (current_thread)
+        current_thread->set_active_import_detail(0xAD03);
     SceGxmSyncObject *oldBufferSync = oldBuffer.get(emuenv.mem);
     SceGxmSyncObject *newBufferSync = newBuffer.get(emuenv.mem);
 
@@ -2159,19 +2225,39 @@ EXPORT(int, sceGxmDisplayQueueAddEntry, Ptr<SceGxmSyncObject> oldBuffer, Ptr<Sce
     emuenv.gxm.last_display_global = emuenv.gxm.global_timestamp.fetch_add(1, std::memory_order_relaxed);
 
     // function may be blocking here (expected behavior)
-    emuenv.gxm.display_queue.push(display_callback);
+    if (current_thread)
+        current_thread->set_active_import_detail(0xAD04);
+    if (!emuenv.gxm.display_queue.try_push(display_callback)) {
+        if (current_thread)
+            current_thread->set_active_import_detail(0xAD05);
+        if (defer_display_queue_full_push(emuenv, thread_id, display_callback, frame)) {
+            pump_deferred_display_queue_add_entries(emuenv);
+            return 0;
+        }
 
-    // TODO: I do this because the sync function does not have access to the display state, but this is not great
-    renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::NewFrame, false, frame, &emuenv.display);
+        if (current_thread)
+            current_thread->set_active_import_detail(0xAD06);
+        emuenv.gxm.display_queue.push(display_callback);
+    }
+
+    if (current_thread)
+        current_thread->set_active_import_detail(0xAD07);
+    submit_display_queue_new_frame(emuenv, frame);
 
     if (emuenv.gxm.params.displayQueueMaxPendingCount == 1) {
+        if (current_thread)
+            current_thread->set_active_import_detail(0xAD08);
         if (defer_display_queue_empty_wait(emuenv, thread_id))
             return 0;
 
         // double buffering, not handled by the queue configuration
+        if (current_thread)
+            current_thread->set_active_import_detail(0xAD09);
         emuenv.gxm.display_queue.wait_empty();
     }
 
+    if (current_thread)
+        current_thread->set_active_import_detail(0);
     return 0;
 }
 
@@ -2779,6 +2865,7 @@ EXPORT(int, sceGxmInitialize, const SceGxmInitializeParams *params) {
     {
         const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
         emuenv.gxm.display_queue_waiters.clear();
+        emuenv.gxm.pending_display_callbacks.clear();
     }
     std::thread display_host_thread(display_entry_thread, std::ref(emuenv));
     display_host_thread.detach();
@@ -4805,6 +4892,11 @@ EXPORT(int, sceGxmTerminate) {
     TRACY_FUNC(sceGxmTerminate);
     // Make sure everything is done in SDL side before killing Vita thread
     emuenv.gxm.display_queue.wait_empty();
+    {
+        const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
+        emuenv.gxm.display_queue_waiters.clear();
+        emuenv.gxm.pending_display_callbacks.clear();
+    }
     emuenv.gxm.display_queue.abort();
     emuenv.kernel.get_thread(emuenv.gxm.display_queue_thread)->exit_delete();
     return 0;

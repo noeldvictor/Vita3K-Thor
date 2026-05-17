@@ -91,6 +91,18 @@ public:
         condempty_.notify_one();
     }
 
+    bool try_push(const T &item) {
+        {
+            std::unique_lock<std::mutex> mlock(mutex_);
+            if (aborted || queue_.size() == maxPendingCount_) {
+                return false;
+            }
+            queue_.push(item);
+        }
+        condempty_.notify_one();
+        return true;
+    }
+
     size_t size() {
         std::unique_lock<std::mutex> mlock(mutex_);
         return queue_.size();

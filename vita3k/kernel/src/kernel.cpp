@@ -171,15 +171,19 @@ ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<c
     return create_thread(mem, name, entry_point, SCE_KERNEL_DEFAULT_PRIORITY, SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT, SCE_KERNEL_STACK_SIZE_USER_MAIN, nullptr);
 }
 
-ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option) {
-    ThreadStatePtr thread = std::make_shared<ThreadState>(get_next_uid(), *this, mem);
+static ThreadStatePtr create_thread_with_uid(KernelState &kernel, MemState &mem, const SceUID uid, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option) {
+    ThreadStatePtr thread = std::make_shared<ThreadState>(uid, kernel, mem);
     if (thread->init(name, entry_point, init_priority, affinity_mask, stack_size, option) < 0)
         return nullptr;
-    const auto lock = std::lock_guard(mutex);
-    threads.emplace(thread->id, thread);
+    {
+        const auto lock = std::lock_guard(kernel.mutex);
+        if (kernel.threads.contains(thread->id))
+            return nullptr;
+        kernel.threads.emplace(thread->id, thread);
+    }
 
     ThreadParams params;
-    params.kernel = this;
+    params.kernel = &kernel;
     params.thid = thread->id;
 
     params.host_may_destroy_params = SDL_CreateSemaphore(0);
@@ -187,6 +191,17 @@ ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<c
     SDL_WaitSemaphore(params.host_may_destroy_params);
     SDL_DestroySemaphore(params.host_may_destroy_params);
     return thread;
+}
+
+ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option) {
+    return create_thread_with_uid(*this, mem, get_next_uid(), name, entry_point, init_priority, affinity_mask, stack_size, option);
+}
+
+ThreadStatePtr KernelState::create_thread_for_restore(MemState &mem, const SceUID uid, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size) {
+    SceUID next = next_uid.load();
+    while (next <= uid && !next_uid.compare_exchange_weak(next, uid + 1)) {
+    }
+    return create_thread_with_uid(*this, mem, uid, name, entry_point, init_priority, affinity_mask, stack_size, nullptr);
 }
 
 Ptr<Ptr<void>> KernelState::get_thread_tls_addr(MemState &mem, SceUID thread_id, int key) {
@@ -208,7 +223,7 @@ ThreadStatus KernelState::snapshot_thread_status_unlocked(const SceUID thread_id
 
 void KernelState::set_paused_thread_status_for_restore(const SceUID thread_id, const ThreadStatus status) {
     const std::lock_guard<std::mutex> lock(mutex);
-    if (!paused_threads_status.empty())
+    if (threads_pause_active.load())
         paused_threads_status[thread_id] = status;
 }
 
@@ -221,6 +236,7 @@ void KernelState::exit_delete_all_threads() {
 
 void KernelState::pause_threads() {
     const std::lock_guard<std::mutex> lock(mutex);
+    threads_pause_active.store(true);
     for (auto &[_, thread] : threads) {
         if (!paused_threads_status.contains(thread->id))
             paused_threads_status[thread->id] = thread->status;
@@ -231,10 +247,10 @@ void KernelState::pause_threads() {
 
 void KernelState::resume_threads() {
     const std::lock_guard<std::mutex> lock(mutex);
+    threads_pause_active.store(false);
     for (auto &[_, thread] : threads) {
         const auto paused_status = paused_threads_status.find(thread->id);
-        if (paused_status != paused_threads_status.end() && paused_status->second == ThreadStatus::run)
-            thread->resume();
+        thread->resume_after_pause_if_needed(paused_status != paused_threads_status.end() && paused_status->second == ThreadStatus::run);
     }
     paused_threads_status.clear();
 }

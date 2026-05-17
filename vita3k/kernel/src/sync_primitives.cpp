@@ -672,6 +672,18 @@ SceUID mutex_find(KernelState &kernel, const char *export_name, const char *pNam
     return RET_ERROR(SCE_KERNEL_ERROR_UID_CANNOT_FIND_BY_NAME);
 }
 
+inline static void update_lwmutex_workarea(MemState &mem, const MutexPtr &mutex, const SyncWeight weight) {
+    if (weight != SyncWeight::Light || !mutex || !mutex->workarea)
+        return;
+
+    SceKernelLwMutexWork *workarea = mutex->workarea.get(mem);
+    if (!workarea)
+        return;
+
+    workarea->lockCount = mutex->lock_count;
+    workarea->owner = mutex->owner ? mutex->owner->id : 0;
+}
+
 inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, int lock_count, MutexPtr &mutex, SyncWeight weight, SceUInt *timeout, bool only_try) {
     if (LOG_SYNC_PRIMITIVES) {
         LOG_DEBUG("{}: uid: {} thread_id: {} name: \"{}\" attr: {} lock_count: {} timeout: {} waiting_threads: {}",
@@ -691,8 +703,7 @@ inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char
         if (mutex->owner == thread) {
             if (is_recursive) {
                 mutex->lock_count += lock_count;
-                if (weight == SyncWeight::Light)
-                    mutex->workarea.get(mem)->lockCount += lock_count;
+                update_lwmutex_workarea(mem, mutex, weight);
 
                 return SCE_KERNEL_OK;
             }
@@ -726,12 +737,7 @@ inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char
 
         int res = handle_timeout(kernel, thread, thread_lock, mutex_lock, mutex->waiting_threads, data_it, export_name, timeout);
 
-        if (weight == SyncWeight::Light) {
-            mutex->workarea.get(mem)->lockCount = mutex->lock_count;
-            if (mutex->owner == thread) {
-                mutex->workarea.get(mem)->owner = thread_id;
-            }
-        }
+        update_lwmutex_workarea(mem, mutex, weight);
 
         return res;
     }
@@ -741,12 +747,7 @@ inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char
     mutex->lock_count += lock_count;
     mutex->owner = thread;
 
-    if (weight == SyncWeight::Light) {
-        mutex->workarea.get(mem)->lockCount = mutex->lock_count;
-        if (mutex->owner == thread) {
-            mutex->workarea.get(mem)->owner = thread_id;
-        }
-    }
+    update_lwmutex_workarea(mem, mutex, weight);
 
     return SCE_KERNEL_OK;
 }
@@ -771,7 +772,7 @@ int mutex_try_lock(KernelState &kernel, MemState &mem, const char *export_name, 
     return mutex_lock_impl(kernel, mem, export_name, thread_id, lock_count, mutex, weight, nullptr, true);
 }
 
-inline static int mutex_unlock_impl(KernelState &kernel, const char *export_name, SceUID thread_id, int unlock_count, MutexPtr &mutex) {
+inline static int mutex_unlock_impl(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, int unlock_count, MutexPtr &mutex, SyncWeight weight) {
     const ThreadStatePtr current_thread = kernel.get_thread(thread_id);
 
     const std::lock_guard<std::mutex> mutex_lock(mutex->mutex);
@@ -791,20 +792,23 @@ inline static int mutex_unlock_impl(KernelState &kernel, const char *export_name
                 const auto waiting_thread = waiting_thread_data.thread;
                 const auto waiting_lock_count = waiting_thread_data.lock_count;
 
-                const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
-                waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
-
                 mutex->waiting_threads->pop();
                 mutex->lock_count += waiting_lock_count;
                 mutex->owner = waiting_thread;
+
+                if (!waiting_thread->complete_deferred_import_wait(SCE_KERNEL_OK)) {
+                    const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
+                    waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+                }
             }
         }
+        update_lwmutex_workarea(mem, mutex, weight);
     }
 
     return SCE_KERNEL_OK;
 }
 
-int mutex_unlock(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID mutexid, int unlock_count, SyncWeight weight) {
+int mutex_unlock(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID mutexid, int unlock_count, SyncWeight weight) {
     assert(mutexid >= 0);
 
     MutexPtr mutex;
@@ -817,7 +821,7 @@ int mutex_unlock(KernelState &kernel, const char *export_name, SceUID thread_id,
             mutex->waiting_threads->size());
     }
 
-    return mutex_unlock_impl(kernel, export_name, thread_id, unlock_count, mutex);
+    return mutex_unlock_impl(kernel, mem, export_name, thread_id, unlock_count, mutex, weight);
 }
 
 int mutex_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID mutexid, SyncWeight weight) {
@@ -1322,16 +1326,22 @@ int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, Sc
 
     std::unique_lock<std::mutex> condition_variable_lock(condvar->mutex);
 
-    if (auto error = mutex_unlock_impl(kernel, export_name, thread_id, 1, condvar->associated_mutex))
+    if (auto error = mutex_unlock_impl(kernel, mem, export_name, thread_id, 1, condvar->associated_mutex, weight))
         return error;
-
-    std::unique_lock<std::mutex> thread_lock(thread->mutex);
-    thread->update_status(ThreadStatus::wait, ThreadStatus::run);
 
     WaitingThreadData data;
     data.thread = thread;
     data.priority = thread->priority;
     capture_wait_timeout(data, timeout);
+
+    if (!timeout && thread->begin_deferred_import_wait()) {
+        data.deferred_import_wait = true;
+        condvar->waiting_threads->push(data);
+        return SCE_KERNEL_OK;
+    }
+
+    std::unique_lock<std::mutex> thread_lock(thread->mutex);
+    thread->update_status(ThreadStatus::wait, ThreadStatus::run);
 
     const auto data_it = condvar->waiting_threads->push(data);
     thread_lock.unlock();
@@ -1343,7 +1353,48 @@ int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, Sc
     return mutex_lock_impl(kernel, mem, export_name, thread_id, 1, condvar->associated_mutex, weight, timeout, false);
 }
 
-int condvar_signal(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID condid, Condvar::SignalTarget signal_target, SyncWeight weight) {
+static void condvar_finish_wait(KernelState &kernel, MemState &mem, const char *export_name, const CondvarPtr &condvar, const WaitingThreadData &waiting_thread_data, const SyncWeight weight) {
+    const auto waiting_thread = waiting_thread_data.thread;
+    if (!waiting_thread)
+        return;
+
+    if (!waiting_thread_data.deferred_import_wait) {
+        const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
+        waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+        return;
+    }
+
+    MutexPtr &mutex = condvar->associated_mutex;
+    if (!mutex) {
+        waiting_thread->complete_deferred_import_wait(SCE_KERNEL_OK);
+        return;
+    }
+
+    const std::lock_guard<std::mutex> mutex_lock(mutex->mutex);
+    const bool is_recursive = (mutex->attr & SCE_KERNEL_MUTEX_ATTR_RECURSIVE) != 0;
+    if (mutex->lock_count == 0 || (mutex->owner == waiting_thread && is_recursive)) {
+        mutex->lock_count += 1;
+        mutex->owner = waiting_thread;
+        update_lwmutex_workarea(mem, mutex, weight);
+        waiting_thread->complete_deferred_import_wait(SCE_KERNEL_OK);
+        return;
+    }
+
+    if (mutex->owner == waiting_thread) {
+        waiting_thread->complete_deferred_import_wait(static_cast<uint32_t>(
+            weight == SyncWeight::Light ? SCE_KERNEL_ERROR_LW_MUTEX_RECURSIVE : SCE_KERNEL_ERROR_MUTEX_RECURSIVE));
+        return;
+    }
+
+    WaitingThreadData mutex_wait;
+    mutex_wait.thread = waiting_thread;
+    mutex_wait.lock_count = 1;
+    mutex_wait.priority = waiting_thread_data.priority;
+    mutex_wait.deferred_import_wait = true;
+    mutex->waiting_threads->push(mutex_wait);
+}
+
+int condvar_signal(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID condid, Condvar::SignalTarget signal_target, SyncWeight weight) {
     assert(condid >= 0);
 
     CondvarPtr condvar;
@@ -1367,10 +1418,9 @@ int condvar_signal(KernelState &kernel, const char *export_name, SceUID thread_i
         // Search for specified waiting thread
         auto waiting_thread_iter = waiting_threads->find(waiting_thread);
         if (waiting_thread_iter != waiting_threads->end()) {
-            const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
-
-            waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+            const WaitingThreadData waiting_thread_data = *waiting_thread_iter;
             waiting_threads->erase(waiting_thread_iter);
+            condvar_finish_wait(kernel, mem, export_name, condvar, waiting_thread_data, weight);
         } else {
             LOG_ERROR("{}: Target thread {} not found", export_name, waiting_thread->name);
         }
@@ -1378,12 +1428,17 @@ int condvar_signal(KernelState &kernel, const char *export_name, SceUID thread_i
         while (!waiting_threads->empty()) {
             const auto waiting_thread_data = *waiting_threads->begin();
             auto waiting_thread = waiting_thread_data.thread;
-            const std::unique_lock<std::mutex> waiting_thread_lock(waiting_thread->mutex, std::try_to_lock);
-            if (!waiting_thread_lock)
-                continue;
+            if (!waiting_thread_data.deferred_import_wait && waiting_thread) {
+                const std::unique_lock<std::mutex> waiting_thread_lock(waiting_thread->mutex, std::try_to_lock);
+                if (!waiting_thread_lock)
+                    continue;
+            }
 
-            waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
             waiting_threads->pop();
+            condvar_finish_wait(kernel, mem, export_name, condvar, waiting_thread_data, weight);
+
+            if (target_type == Condvar::SignalTarget::Type::Any)
+                break;
         }
     }
 

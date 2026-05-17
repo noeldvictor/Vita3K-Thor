@@ -120,9 +120,13 @@ struct ThreadState {
     void resume(bool step = false);
     bool begin_deferred_import_wait();
     bool restore_deferred_import_wait();
+    void clear_deferred_import_wait_for_restore();
     bool complete_deferred_import_wait(uint32_t return_value);
     bool consume_deferred_import_return();
+    void resume_after_pause_if_needed(bool saved_running_before_pause);
     bool has_deferred_import_wait();
+    void set_active_import_detail(uint32_t detail);
+    void restore_memory_blocks_for_quick_state(Address stack_address, int stack_size, Address tls_address);
     std::string quick_state_debug_summary() const;
     std::string log_stack_traceback() const;
 
@@ -149,8 +153,10 @@ private:
     bool run_end_callback = false;
     bool deferred_import_wait = false;
     bool deferred_import_return = false;
+    bool deferred_resume_after_pause = false;
     std::atomic<uint32_t> active_import_nid{ 0 };
     std::atomic<Address> active_import_pc{ 0 };
+    std::atomic<uint32_t> active_import_detail{ 0 };
 
     MemState &mem;
 };

@@ -37,6 +37,8 @@
 #include <kernel/state.h>
 #include <mem/functions.h>
 #include <mem/ptr.h>
+#include <ngs/state.h>
+#include <ngs/system.h>
 #include <packages/functions.h>
 #include <packages/license.h>
 #include <packages/pkg.h>
@@ -66,6 +68,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <queue>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -1384,6 +1387,7 @@ struct QuickStateRestoreManifest {
     bool display_state_restorable = false;
     bool display_vblank_waits_restorable = false;
     bool audio_state_restorable = false;
+    bool ngs_state_restorable = false;
     bool same_pause_restore_available = false;
     bool live_host_restore_available = false;
     size_t sync_waiting_threads = 0;
@@ -1936,7 +1940,7 @@ static bool load_quick_state_from_disk(EmuEnvState &emuenv, const std::string &t
 
     QuickStateSlot loaded;
     loaded.valid = true;
-    loaded.restore_requires_same_pause = true;
+    loaded.restore_requires_same_pause = false;
     loaded.has_live_host_state = false;
     loaded.title_id = header.title_id;
     loaded.title = header.title;
@@ -2043,10 +2047,14 @@ static bool load_quick_state_from_disk(EmuEnvState &emuenv, const std::string &t
     return true;
 }
 
-static ThreadStatePtr find_quick_state_restore_thread(KernelState &kernel, const QuickStateThreadContext &saved_thread, std::set<SceUID> &matched_threads) {
+static ThreadStatePtr find_quick_state_restore_thread(KernelState &kernel, const QuickStateThreadContext &saved_thread, const std::set<SceUID> &matched_threads, const bool require_saved_thread_id) {
     const auto exact_thread = kernel.threads.find(saved_thread.id);
-    if ((exact_thread != kernel.threads.end()) && exact_thread->second->cpu && !matched_threads.contains(exact_thread->first))
+    if ((exact_thread != kernel.threads.end()) && exact_thread->second->cpu && !matched_threads.contains(exact_thread->first)
+        && (exact_thread->second->name == saved_thread.name || exact_thread->second->entry_point == saved_thread.entry_point)) {
         return exact_thread->second;
+    }
+    if (require_saved_thread_id)
+        return nullptr;
 
     for (const auto &[thread_id, thread] : kernel.threads) {
         if (matched_threads.contains(thread_id) || !thread->cpu)
@@ -2065,26 +2073,94 @@ static ThreadStatePtr find_quick_state_restore_thread(KernelState &kernel, const
     return nullptr;
 }
 
-static bool preflight_quick_state_restore_threads(KernelState &kernel, const QuickStateSlot &slot, std::vector<ThreadStatePtr> &matched_threads) {
+static std::string quick_state_thread_list_detail(const std::vector<ThreadStatePtr> &threads) {
+    if (threads.empty())
+        return "none";
+
+    std::vector<std::string> details;
+    details.reserve(threads.size());
+    for (const auto &thread : threads) {
+        if (thread)
+            details.push_back(fmt::format("{} ({})", thread->id, thread->name));
+    }
+    if (details.empty())
+        return "none";
+
+    std::string joined = details.front();
+    for (size_t i = 1; i < details.size(); i++) {
+        joined += ", ";
+        joined += details[i];
+    }
+    return joined;
+}
+
+static bool wait_for_quick_state_extra_threads_removed(KernelState &kernel, const std::set<SceUID> &thread_ids);
+
+static bool preflight_quick_state_restore_threads(EmuEnvState &emuenv, const QuickStateSlot &slot, const bool require_saved_thread_ids, std::vector<ThreadStatePtr> &matched_threads, std::vector<ThreadStatePtr> *extra_threads = nullptr) {
     matched_threads.clear();
+    if (extra_threads)
+        extra_threads->clear();
 
     std::set<SceUID> matched_thread_ids;
     uint32_t current_cpu_thread_count = 0;
-    const std::lock_guard<std::mutex> kernel_lock(kernel.mutex);
-    for (const auto &[_, thread] : kernel.threads) {
-        if (thread->cpu)
-            current_cpu_thread_count++;
+    {
+        const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
+        for (const auto &[_, thread] : emuenv.kernel.threads) {
+            if (thread->cpu)
+                current_cpu_thread_count++;
+        }
     }
 
     if (current_cpu_thread_count != slot.thread_contexts.size()) {
-        LOG_WARN("Refused quickstate restore for {} because current CPU thread count {} does not match saved count {}.",
+        LOG_INFO("Quickstate restore for {} found current CPU thread count {} and saved count {}; matching by thread identity.",
             slot.title_id, current_cpu_thread_count, slot.thread_contexts.size());
-        return false;
     }
 
     matched_threads.reserve(slot.thread_contexts.size());
     for (const auto &thread_context : slot.thread_contexts) {
-        const auto thread = find_quick_state_restore_thread(kernel, thread_context, matched_thread_ids);
+        ThreadStatePtr thread;
+        {
+            const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
+            thread = find_quick_state_restore_thread(emuenv.kernel, thread_context, matched_thread_ids, require_saved_thread_ids);
+        }
+        if (!thread) {
+            ThreadStatePtr colliding_thread;
+            {
+                const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
+                const auto collision = emuenv.kernel.threads.find(thread_context.id);
+                if (collision != emuenv.kernel.threads.end() && collision->second->cpu && !matched_thread_ids.contains(collision->first))
+                    colliding_thread = collision->second;
+            }
+            if (colliding_thread) {
+                LOG_INFO("Removing colliding current thread {} ({}) before recreating saved thread {} ({}) for durable quickstate restore.",
+                    colliding_thread->id,
+                    colliding_thread->name,
+                    thread_context.id,
+                    thread_context.name);
+                colliding_thread->exit_delete(false);
+                if (!wait_for_quick_state_extra_threads_removed(emuenv.kernel, { thread_context.id })) {
+                    LOG_WARN("Refused quickstate restore for {} because colliding current thread {} ({}) did not exit.",
+                        slot.title_id,
+                        colliding_thread->id,
+                        colliding_thread->name);
+                    return false;
+                }
+            }
+            thread = emuenv.kernel.create_thread_for_restore(
+                emuenv.mem,
+                thread_context.id,
+                thread_context.name.c_str(),
+                Ptr<const void>(thread_context.entry_point),
+                thread_context.priority,
+                thread_context.affinity_mask,
+                thread_context.stack_size);
+            if (thread) {
+                LOG_INFO("Created missing current thread {} ({}) before durable quickstate restore for {}.",
+                    thread_context.id,
+                    thread_context.name,
+                    slot.title_id);
+            }
+        }
         if (!thread || !thread->cpu) {
             LOG_WARN("Refused quickstate restore for {} because saved thread {} ({}) could not be matched before touching guest memory.",
                 slot.title_id, thread_context.id, thread_context.name);
@@ -2095,7 +2171,100 @@ static bool preflight_quick_state_restore_threads(KernelState &kernel, const Qui
         matched_threads.push_back(thread);
     }
 
+    if (extra_threads) {
+        const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
+        for (const auto &[thread_id, thread] : emuenv.kernel.threads) {
+            if (!thread->cpu || matched_thread_ids.contains(thread_id))
+                continue;
+            extra_threads->push_back(thread);
+        }
+    }
+
     return true;
+}
+
+static bool prepare_quick_state_restore_thread_blocks(const QuickStateSlot &slot, const std::vector<ThreadStatePtr> &matched_threads) {
+    if (matched_threads.size() != slot.thread_contexts.size())
+        return false;
+
+    for (size_t i = 0; i < slot.thread_contexts.size(); i++) {
+        const auto &thread_context = slot.thread_contexts[i];
+        const auto &thread = matched_threads[i];
+        if (!thread)
+            return false;
+        thread->restore_memory_blocks_for_quick_state(thread_context.stack_address, thread_context.stack_size, thread_context.tls_address);
+    }
+
+    return true;
+}
+
+static bool validate_quick_state_restore_thread_ids(const QuickStateSlot &slot, const std::vector<ThreadStatePtr> &matched_threads) {
+    if (matched_threads.size() != slot.thread_contexts.size())
+        return false;
+
+    for (size_t i = 0; i < slot.thread_contexts.size(); i++) {
+        const auto &thread_context = slot.thread_contexts[i];
+        const auto &thread = matched_threads[i];
+        if (!thread)
+            return false;
+        if (thread->id != thread_context.id) {
+            quick_state_last_restore_detail = fmt::format("thread {} ({}) matched current id {}; durable thread-id remap is not supported",
+                thread_context.id,
+                thread_context.name,
+                thread->id);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool wait_for_quick_state_extra_threads_removed(KernelState &kernel, const std::set<SceUID> &thread_ids) {
+    if (thread_ids.empty())
+        return true;
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    while (std::chrono::steady_clock::now() < deadline) {
+        bool all_removed = true;
+        {
+            const std::lock_guard<std::mutex> kernel_lock(kernel.mutex);
+            for (const SceUID thread_id : thread_ids) {
+                if (kernel.threads.contains(thread_id)) {
+                    all_removed = false;
+                    break;
+                }
+            }
+        }
+        if (all_removed)
+            return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    return false;
+}
+
+static bool remove_quick_state_extra_restore_threads(KernelState &kernel, const std::string &title_id, const std::vector<ThreadStatePtr> &extra_threads) {
+    if (extra_threads.empty())
+        return true;
+
+    std::set<SceUID> thread_ids;
+    for (const auto &thread : extra_threads) {
+        if (!thread)
+            continue;
+        thread_ids.insert(thread->id);
+        LOG_INFO("Removing extra current thread {} ({}) before durable quickstate restore for {}.",
+            thread->id,
+            thread->name,
+            title_id);
+        thread->exit_delete(false);
+    }
+
+    if (wait_for_quick_state_extra_threads_removed(kernel, thread_ids))
+        return true;
+
+    quick_state_last_restore_detail = fmt::format("extra current restore threads did not exit: {}", quick_state_thread_list_detail(extra_threads));
+    LOG_WARN("Refused quickstate restore for {} because {}.", title_id, quick_state_last_restore_detail);
+    return false;
 }
 
 static bool quick_state_alloc_page_is_allocated(const uint32_t packed) {
@@ -2182,6 +2351,11 @@ static bool quick_state_page_can_restore(const MemState &mem, const QuickStateMe
 
 static void reset_quick_state_runtime_render_state(EmuEnvState &emuenv) {
     emuenv.gxm.display_queue.reset();
+    {
+        const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
+        emuenv.gxm.display_queue_waiters.clear();
+        emuenv.gxm.pending_display_callbacks.clear();
+    }
 
     if (!emuenv.renderer)
         return;
@@ -2370,6 +2544,90 @@ static bool quick_state_parse_hex_bytes(const std::string &text, std::vector<uin
         bytes.push_back(static_cast<uint8_t>((hi << 4) | lo));
     }
     return true;
+}
+
+static std::vector<uint8_t> quick_state_bytes_from_raw(const void *data, const size_t size) {
+    const auto *bytes = static_cast<const uint8_t *>(data);
+    return std::vector<uint8_t>(bytes, bytes + size);
+}
+
+static std::string quick_state_address_list_text(const std::vector<Address> &addresses) {
+    std::ostringstream text;
+    for (size_t i = 0; i < addresses.size(); i++) {
+        if (i > 0)
+            text << ",";
+        text << "0x" << std::hex << addresses[i] << std::dec;
+    }
+    return text.str();
+}
+
+static bool quick_state_parse_address_list(const std::string &text, std::vector<Address> &addresses) {
+    addresses.clear();
+    if (text.empty())
+        return true;
+
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t end = text.find(',', start);
+        const std::string item = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        uint64_t parsed = 0;
+        if (!quick_state_parse_u64_text(item, parsed, 0) || parsed > std::numeric_limits<Address>::max())
+            return false;
+        addresses.push_back(static_cast<Address>(parsed));
+        if (end == std::string::npos)
+            break;
+        start = end + 1;
+    }
+    return true;
+}
+
+static std::string quick_state_mempool_blocks_text(const MemspaceBlockAllocator &allocator) {
+    std::ostringstream text;
+    for (size_t i = 0; i < allocator.blocks.size(); i++) {
+        const auto &block = allocator.blocks[i];
+        if (i > 0)
+            text << ",";
+        text << block.offset << ":" << block.size << ":" << (block.free ? 1 : 0);
+    }
+    return text.str();
+}
+
+static bool quick_state_parse_mempool_blocks(const std::string &text, std::vector<MemspaceBlockAllocator::Block> &blocks) {
+    blocks.clear();
+    if (text.empty())
+        return false;
+
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t end = text.find(',', start);
+        const std::string item = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        const size_t first = item.find(':');
+        const size_t second = first == std::string::npos ? std::string::npos : item.find(':', first + 1);
+        if (first == std::string::npos || second == std::string::npos)
+            return false;
+
+        uint32_t offset = 0;
+        uint32_t size = 0;
+        uint32_t free = 0;
+        if (!quick_state_parse_u32_text(item.substr(0, first), offset)
+            || !quick_state_parse_u32_text(item.substr(first + 1, second - first - 1), size)
+            || !quick_state_parse_u32_text(item.substr(second + 1), free)) {
+            return false;
+        }
+        blocks.push_back({ .size = size, .offset = offset, .free = free != 0 });
+
+        if (end == std::string::npos)
+            break;
+        start = end + 1;
+    }
+    return !blocks.empty();
+}
+
+static uint32_t quick_state_mempool_size_from_blocks(const std::vector<MemspaceBlockAllocator::Block> &blocks) {
+    uint32_t size = 0;
+    for (const auto &block : blocks)
+        size = std::max<uint32_t>(size, block.offset + block.size);
+    return size;
 }
 
 static bool quick_state_parse_size(const std::map<std::string, std::string> &values, const std::string &key, size_t &out) {
@@ -3382,6 +3640,42 @@ static QuickStateIOCounts quick_state_count_io_objects(EmuEnvState &emuenv) {
     return counts;
 }
 
+static bool quick_state_parse_ngs_snapshot_header(const QuickStateSlot &slot, size_t *system_count = nullptr, std::string *detail = nullptr) {
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.ngs");
+    if (!section || section->version != 1) {
+        if (detail)
+            *detail = "NGS host-state section is missing";
+        return false;
+    }
+
+    const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    if (schema == values.end() || schema->second != "thor.ngs.v1") {
+        if (detail)
+            *detail = "NGS host-state section schema is invalid";
+        return false;
+    }
+
+    size_t parsed_system_count = 0;
+    uint64_t definitions = 0;
+    if (!quick_state_parse_size(values, "systems", parsed_system_count)
+        || !values.contains("definitions")
+        || !quick_state_parse_u64_text(values.at("definitions"), definitions, 0)
+        || definitions > std::numeric_limits<Address>::max()) {
+        if (detail)
+            *detail = "NGS host-state section header is invalid";
+        return false;
+    }
+
+    if (system_count)
+        *system_count = parsed_system_count;
+    return true;
+}
+
+static bool quick_state_needs_ngs_durable_restore(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    return !slot.has_live_host_state && !emuenv.ngs.systems.empty();
+}
+
 static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState &emuenv, const QuickStateSlot &slot) {
     QuickStateRestoreManifest manifest;
     manifest.guest_memory_bytes = slot.byte_count;
@@ -3420,23 +3714,34 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     }
     QuickStateAudioSnapshot audio_snapshot;
     manifest.audio_state_restorable = quick_state_parse_audio_snapshot_section(slot, audio_snapshot);
+    manifest.ngs_state_restorable = quick_state_parse_ngs_snapshot_header(slot);
     manifest.kernel = quick_state_count_kernel_objects(emuenv);
     manifest.io = quick_state_count_io_objects(emuenv);
     manifest.same_pause_restore_available = quick_state_same_pause_restore_available(emuenv, slot);
     manifest.live_host_restore_available = quick_state_live_host_restore_available(emuenv, slot);
 
-    manifest.missing_serializers = {
-        "kernel-thread-lifecycle",
-        "host-syscall-state",
-        "renderer-resources",
-    };
     if (!manifest.sync_primitives_restorable) {
         manifest.missing_serializers.push_back("kernel-sync-primitives");
     } else {
         if (manifest.sync_waiting_threads > 0) {
             if (!manifest.sync_wait_queue_metadata_complete)
                 manifest.missing_serializers.push_back("kernel-wait-queue-metadata");
-            manifest.missing_serializers.push_back("kernel-wait-queues");
+            const bool has_live_host_only_wait = std::any_of(sync_snapshot.wait_queue_entries.begin(), sync_snapshot.wait_queue_entries.end(), [](const QuickStateSyncWaitQueueEntry &entry) {
+                if (entry.deferred_import_wait)
+                    return false;
+                return !((entry.kind == "condvar" || entry.kind == "lwcondvar") && entry.timeout == 0);
+            });
+            const bool has_unsupported_deferred_wait = std::any_of(sync_snapshot.wait_queue_entries.begin(), sync_snapshot.wait_queue_entries.end(), [](const QuickStateSyncWaitQueueEntry &entry) {
+                return entry.deferred_import_wait
+                    && entry.kind != "semaphore"
+                    && entry.kind != "eventflag"
+                    && entry.kind != "condvar"
+                    && entry.kind != "lwcondvar";
+            });
+            if (has_live_host_only_wait)
+                manifest.missing_serializers.push_back("host-syscall-state");
+            if (has_unsupported_deferred_wait)
+                manifest.missing_serializers.push_back("kernel-wait-queues");
         }
     }
     if (!manifest.thread_metadata_restorable)
@@ -3451,6 +3756,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     }
     if (!manifest.audio_state_restorable)
         manifest.missing_serializers.push_back("audio-state");
+    if (!manifest.ngs_state_restorable && quick_state_needs_ngs_durable_restore(emuenv, slot))
+        manifest.missing_serializers.push_back("ngs-host-state");
     if (!manifest.io_file_positions_restorable) {
         manifest.missing_serializers.push_back("io-file-positions");
     } else {
@@ -3508,6 +3815,14 @@ static QuickStateSection quick_state_make_text_section(std::string tag, std::ost
     return section;
 }
 
+static QuickStateSection quick_state_make_text_section(std::string tag, const std::string &payload) {
+    QuickStateSection section;
+    section.tag = std::move(tag);
+    section.version = 1;
+    section.bytes.assign(payload.begin(), payload.end());
+    return section;
+}
+
 static size_t quick_state_waiting_count(const WaitingThreadQueuePtr &waiting_threads) {
     return waiting_threads ? waiting_threads->size() : 0;
 }
@@ -3555,9 +3870,29 @@ static bool quick_state_wait_queue_entries_all_deferred(const QuickStateSyncSnap
     return true;
 }
 
-static bool quick_state_wait_queue_has_nondeferred_entries(const QuickStateSyncSnapshot &snapshot) {
+static bool quick_state_wait_queue_entry_restorable_without_live_host(const QuickStateSyncWaitQueueEntry &entry) {
+    if (entry.deferred_import_wait) {
+        return entry.kind == "semaphore"
+            || entry.kind == "eventflag"
+            || entry.kind == "condvar"
+            || entry.kind == "lwcondvar";
+    }
+
+    return (entry.kind == "condvar" || entry.kind == "lwcondvar") && entry.timeout == 0;
+}
+
+static bool quick_state_wait_queue_entries_restorable_without_live_host(const QuickStateSyncSnapshot &snapshot, const std::string_view kind, const SceUID object_id, const uint32_t expected_count) {
+    for (uint32_t index = 0; index < expected_count; index++) {
+        const QuickStateSyncWaitQueueEntry *entry = quick_state_find_wait_queue_entry(snapshot, kind, object_id, index);
+        if (!entry || !quick_state_wait_queue_entry_restorable_without_live_host(*entry))
+            return false;
+    }
+    return true;
+}
+
+static bool quick_state_wait_queue_has_live_host_only_entries(const QuickStateSyncSnapshot &snapshot) {
     return std::any_of(snapshot.wait_queue_entries.begin(), snapshot.wait_queue_entries.end(), [](const QuickStateSyncWaitQueueEntry &entry) {
-        return !entry.deferred_import_wait;
+        return !quick_state_wait_queue_entry_restorable_without_live_host(entry);
     });
 }
 
@@ -3698,7 +4033,7 @@ static bool quick_state_is_drainable_extra_waiter(const std::map<SceUID, ThreadS
 }
 
 static bool quick_state_wait_queue_matches_live(const QuickStateSyncSnapshot &snapshot, const MemState &mem, const std::map<SceUID, ThreadStatus> &saved_statuses, const std::string_view kind, const SceUID object_id, const uint32_t expected_count, const WaitingThreadQueuePtr &queue, std::vector<ThreadStatePtr> *drained_threads, std::string *detail) {
-    if (expected_count > 0 && quick_state_wait_queue_entries_all_deferred(snapshot, kind, object_id, expected_count)) {
+    if (expected_count > 0 && quick_state_wait_queue_entries_restorable_without_live_host(snapshot, kind, object_id, expected_count)) {
         if (!quick_state_wait_queue_contains_only_deferred_current_waiters(queue)) {
             if (detail)
                 *detail = fmt::format("{} {} has non-deferred current waiters and cannot be rebuilt from deferred metadata", kind, object_id);
@@ -4008,6 +4343,403 @@ static std::string quick_state_rwlock_owners_detail(const RWLockOwners &owners) 
     return joined;
 }
 
+static void quick_state_write_ngs_module_data(std::ostringstream &text, const Address voice_address, const size_t index, const ngs::ModuleData &data) {
+    text << "voice.0x" << std::hex << voice_address << std::dec << ".data." << index
+         << "=callback=0x" << std::hex << data.callback.address()
+         << ";user_data=0x" << data.user_data.address()
+         << ";info=0x" << data.info.data.address() << std::dec
+         << ";info_size=" << data.info.size
+         << ";bypassed=" << data.is_bypassed
+         << ";flags=" << static_cast<uint32_t>(data.flags)
+         << "\n";
+    text << "voice.0x" << std::hex << voice_address << std::dec << ".data." << index << ".voice_state=" << quick_state_bytes_to_hex(data.voice_state_data) << "\n";
+    text << "voice.0x" << std::hex << voice_address << std::dec << ".data." << index << ".extra=" << quick_state_bytes_to_hex(data.extra_storage) << "\n";
+    text << "voice.0x" << std::hex << voice_address << std::dec << ".data." << index << ".last_info=" << quick_state_bytes_to_hex(data.last_info) << "\n";
+}
+
+static std::string quick_state_ngs_snapshot_text(EmuEnvState &emuenv) {
+    std::ostringstream text;
+    text << "schema=thor.ngs.v1\n";
+    text << "systems=" << emuenv.ngs.systems.size() << "\n";
+    text << "definitions=0x" << std::hex << emuenv.ngs.definitions.address() << std::dec << "\n";
+
+    std::set<Address> written_patches;
+    for (size_t system_index = 0; system_index < emuenv.ngs.systems.size(); system_index++) {
+        ngs::System *system = emuenv.ngs.systems[system_index];
+        if (!system)
+            continue;
+
+        const Address system_address = Ptr<ngs::System>(system, emuenv.mem).address();
+        std::vector<Address> rack_addresses;
+        for (ngs::Rack *rack : system->racks)
+            rack_addresses.push_back(rack ? Ptr<ngs::Rack>(rack, emuenv.mem).address() : 0);
+
+        std::vector<Address> queue_addresses;
+        {
+            const std::lock_guard<std::recursive_mutex> scheduler_lock(system->voice_scheduler.mutex);
+            for (ngs::Voice *voice : system->voice_scheduler.queue)
+                queue_addresses.push_back(voice ? Ptr<ngs::Voice>(voice, emuenv.mem).address() : 0);
+        }
+
+        text << "system." << system_index
+             << "=addr=0x" << std::hex << system_address
+             << ";memspace=0x" << system->memspace.address() << std::dec
+             << ";max_voices=" << system->max_voices
+             << ";granularity=" << system->granularity
+             << ";sample_rate=" << system->sample_rate
+             << "\n";
+        text << "system." << system_index << ".blocks=" << quick_state_mempool_blocks_text(system->allocator) << "\n";
+        text << "system." << system_index << ".racks=" << quick_state_address_list_text(rack_addresses) << "\n";
+        text << "system." << system_index << ".queue=" << quick_state_address_list_text(queue_addresses) << "\n";
+
+        for (ngs::Rack *rack : system->racks) {
+            if (!rack)
+                continue;
+
+            const Address rack_address = Ptr<ngs::Rack>(rack, emuenv.mem).address();
+            std::vector<Address> voice_addresses;
+            for (const auto &voice : rack->voices)
+                voice_addresses.push_back(voice.address());
+
+            text << "rack.0x" << std::hex << rack_address
+                 << "=system=0x" << system_address
+                 << ";memspace=0x" << rack->memspace.address()
+                 << ";vdef=0x" << (rack->vdef ? Ptr<ngs::VoiceDefinition>(rack->vdef, emuenv.mem).address() : 0) << std::dec
+                 << ";channels=" << rack->channels_per_voice
+                 << ";max_patches_per_input=" << rack->max_patches_per_input
+                 << ";patches_per_output=" << rack->patches_per_output
+                 << ";modules=" << rack->modules.size()
+                 << "\n";
+            text << "rack.0x" << std::hex << rack_address << std::dec << ".blocks=" << quick_state_mempool_blocks_text(rack->allocator) << "\n";
+            text << "rack.0x" << std::hex << rack_address << std::dec << ".voices=" << quick_state_address_list_text(voice_addresses) << "\n";
+
+            for (const auto &voice_ptr : rack->voices) {
+                ngs::Voice *voice = voice_ptr.get(emuenv.mem);
+                if (!voice)
+                    continue;
+
+                const Address voice_address = voice_ptr.address();
+                text << "voice.0x" << std::hex << voice_address
+                     << "=rack=0x" << rack_address
+                     << ";finished_callback=0x" << voice->finished_callback.address()
+                     << ";finished_user_data=0x" << voice->finished_callback_user_data.address() << std::dec
+                     << ";state=" << static_cast<int>(voice->state)
+                     << ";pending=" << voice->is_pending
+                     << ";paused=" << voice->is_paused
+                     << ";keyed_off=" << voice->is_keyed_off
+                     << ";frame_count=" << voice->frame_count
+                     << ";data_count=" << voice->datas.size()
+                     << "\n";
+
+                for (size_t index = 0; index < voice->datas.size(); index++)
+                    quick_state_write_ngs_module_data(text, voice_address, index, voice->datas[index]);
+
+                for (size_t port = 0; port < voice->patches.size(); port++) {
+                    std::vector<Address> patch_addresses;
+                    for (const auto &patch : voice->patches[port]) {
+                        patch_addresses.push_back(patch.address());
+                        ngs::Patch *patch_ptr = patch.get(emuenv.mem);
+                        if (!patch_ptr || written_patches.contains(patch.address()))
+                            continue;
+
+                        written_patches.insert(patch.address());
+                        text << "patch.0x" << std::hex << patch.address()
+                             << "=source=0x" << (patch_ptr->source ? Ptr<ngs::Voice>(patch_ptr->source, emuenv.mem).address() : 0)
+                             << ";dest=0x" << (patch_ptr->dest ? Ptr<ngs::Voice>(patch_ptr->dest, emuenv.mem).address() : 0) << std::dec
+                             << ";output_index=" << patch_ptr->output_index
+                             << ";output_sub_index=" << patch_ptr->output_sub_index
+                             << ";dest_index=" << patch_ptr->dest_index
+                             << ";matrix=" << quick_state_bytes_to_hex(quick_state_bytes_from_raw(patch_ptr->volume_matrix, sizeof(patch_ptr->volume_matrix)))
+                             << "\n";
+                    }
+                    text << "voice.0x" << std::hex << voice_address << std::dec << ".patches." << port << "=" << quick_state_address_list_text(patch_addresses) << "\n";
+                }
+            }
+        }
+    }
+
+    return text.str();
+}
+
+static bool quick_state_parse_ngs_addr_key(const std::string &key, const std::string_view prefix, Address &address, std::string *suffix = nullptr) {
+    if (key.rfind(prefix, 0) != 0 || key.size() <= prefix.size())
+        return false;
+
+    const size_t dot = key.find('.', prefix.size());
+    const std::string address_text = key.substr(prefix.size(), dot == std::string::npos ? std::string::npos : dot - prefix.size());
+    uint64_t parsed = 0;
+    if (!quick_state_parse_u64_text(address_text, parsed, 0) || parsed > std::numeric_limits<Address>::max())
+        return false;
+
+    address = static_cast<Address>(parsed);
+    if (suffix)
+        *suffix = dot == std::string::npos ? std::string() : key.substr(dot + 1);
+    return true;
+}
+
+static bool quick_state_restore_ngs_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.ngs");
+    if (!section || section->version != 1) {
+        quick_state_last_restore_detail = "NGS host-state section is missing";
+        return false;
+    }
+
+    const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    if (schema == values.end() || schema->second != "thor.ngs.v1") {
+        quick_state_last_restore_detail = "NGS restore section schema is invalid";
+        return false;
+    }
+
+    size_t system_count = 0;
+    uint64_t parsed_hex = 0;
+    if (!quick_state_parse_size(values, "systems", system_count)
+        || !values.contains("definitions")
+        || !quick_state_parse_u64_text(values.at("definitions"), parsed_hex, 0)) {
+        quick_state_last_restore_detail = "NGS restore section header is invalid";
+        return false;
+    }
+    emuenv.ngs.definitions = Ptr<ngs::VoiceDefinition>(static_cast<Address>(parsed_hex));
+
+    std::map<Address, ngs::System *> systems_by_address;
+    std::map<Address, ngs::Rack *> racks_by_address;
+    std::map<Address, ngs::Voice *> voices_by_address;
+
+    emuenv.ngs.systems.clear();
+    for (size_t system_index = 0; system_index < system_count; system_index++) {
+        const std::string prefix = fmt::format("system.{}", system_index);
+        if (!values.contains(prefix) || !values.contains(prefix + ".blocks"))
+            return false;
+
+        const auto fields = quick_state_parse_semicolon_fields(values.at(prefix));
+        std::vector<MemspaceBlockAllocator::Block> blocks;
+        uint64_t address = 0;
+        uint64_t memspace = 0;
+        int32_t parsed_i32 = 0;
+        if (!fields.contains("addr") || !fields.contains("memspace")
+            || !quick_state_parse_u64_text(fields.at("addr"), address, 0)
+            || !quick_state_parse_u64_text(fields.at("memspace"), memspace, 0)
+            || !quick_state_parse_mempool_blocks(values.at(prefix + ".blocks"), blocks)) {
+            return false;
+        }
+
+        ngs::System *system = Ptr<ngs::System>(static_cast<Address>(address)).get(emuenv.mem);
+        new (system) ngs::System(Ptr<void>(static_cast<Address>(memspace)), quick_state_mempool_size_from_blocks(blocks));
+        system->allocator.blocks = blocks;
+        if (!quick_state_parse_i32_text(fields.at("max_voices"), system->max_voices)
+            || !quick_state_parse_i32_text(fields.at("granularity"), system->granularity)
+            || !quick_state_parse_i32_text(fields.at("sample_rate"), system->sample_rate)) {
+            return false;
+        }
+        systems_by_address[static_cast<Address>(address)] = system;
+        emuenv.ngs.systems.push_back(system);
+    }
+
+    for (const auto &[key, value] : values) {
+        Address rack_address = 0;
+        std::string suffix;
+        if (!quick_state_parse_ngs_addr_key(key, "rack.", rack_address, &suffix) || !suffix.empty())
+            continue;
+
+        const auto fields = quick_state_parse_semicolon_fields(value);
+        std::vector<MemspaceBlockAllocator::Block> blocks;
+        uint64_t system_address = 0;
+        uint64_t memspace = 0;
+        uint64_t vdef = 0;
+        const std::string blocks_key = fmt::format("rack.0x{:x}.blocks", rack_address);
+        if (!fields.contains("system") || !fields.contains("memspace") || !fields.contains("vdef")
+            || !quick_state_parse_u64_text(fields.at("system"), system_address, 0)
+            || !quick_state_parse_u64_text(fields.at("memspace"), memspace, 0)
+            || !quick_state_parse_u64_text(fields.at("vdef"), vdef, 0)
+            || !values.contains(blocks_key)
+            || !quick_state_parse_mempool_blocks(values.at(blocks_key), blocks)
+            || !systems_by_address.contains(static_cast<Address>(system_address))) {
+            return false;
+        }
+
+        ngs::System *system = systems_by_address[static_cast<Address>(system_address)];
+        ngs::Rack *rack = Ptr<ngs::Rack>(rack_address).get(emuenv.mem);
+        new (rack) ngs::Rack(system, Ptr<void>(static_cast<Address>(memspace)), quick_state_mempool_size_from_blocks(blocks));
+        rack->allocator.blocks = blocks;
+        rack->vdef = Ptr<ngs::VoiceDefinition>(static_cast<Address>(vdef)).get(emuenv.mem);
+        if (!quick_state_parse_i32_text(fields.at("channels"), rack->channels_per_voice)
+            || !quick_state_parse_i32_text(fields.at("max_patches_per_input"), rack->max_patches_per_input)
+            || !quick_state_parse_i32_text(fields.at("patches_per_output"), rack->patches_per_output)) {
+            return false;
+        }
+        if (rack->vdef)
+            ngs::apply_voice_definition(rack->vdef, rack->modules);
+        racks_by_address[rack_address] = rack;
+    }
+
+    for (const auto &[rack_address, rack] : racks_by_address) {
+        const std::string voices_key = fmt::format("rack.0x{:x}.voices", rack_address);
+        std::vector<Address> voice_addresses;
+        if (!values.contains(voices_key) || !quick_state_parse_address_list(values.at(voices_key), voice_addresses))
+            return false;
+
+        rack->voices.clear();
+        for (const Address voice_address : voice_addresses) {
+            if (voice_address == 0) {
+                rack->voices.push_back(Ptr<ngs::Voice>());
+                continue;
+            }
+
+            ngs::Voice *voice = Ptr<ngs::Voice>(voice_address).get(emuenv.mem);
+            new (voice) ngs::Voice();
+            voice->init(rack);
+            std::memset(voice->products, 0, sizeof(voice->products));
+            voices_by_address[voice_address] = voice;
+            rack->voices.push_back(Ptr<ngs::Voice>(voice_address));
+        }
+    }
+
+    for (const auto &[key, value] : values) {
+        Address voice_address = 0;
+        std::string suffix;
+        if (!quick_state_parse_ngs_addr_key(key, "voice.", voice_address, &suffix) || !suffix.empty())
+            continue;
+        if (!voices_by_address.contains(voice_address))
+            return false;
+
+        ngs::Voice *voice = voices_by_address[voice_address];
+        const auto fields = quick_state_parse_semicolon_fields(value);
+        uint64_t rack_address = 0;
+        uint64_t finished_callback = 0;
+        uint64_t finished_user_data = 0;
+        int32_t parsed_i32 = 0;
+        uint32_t parsed_u32 = 0;
+        bool parsed_bool = false;
+        if (!fields.contains("rack") || !quick_state_parse_u64_text(fields.at("rack"), rack_address, 0) || !racks_by_address.contains(static_cast<Address>(rack_address)))
+            return false;
+        voice->rack = racks_by_address[static_cast<Address>(rack_address)];
+        if (!quick_state_parse_i32_text(fields.at("state"), parsed_i32))
+            return false;
+        voice->state = static_cast<ngs::VoiceState>(parsed_i32);
+        if (!quick_state_parse_bool_text(fields.at("pending"), parsed_bool))
+            return false;
+        voice->is_pending = parsed_bool;
+        if (!quick_state_parse_bool_text(fields.at("paused"), parsed_bool))
+            return false;
+        voice->is_paused = parsed_bool;
+        if (!quick_state_parse_bool_text(fields.at("keyed_off"), parsed_bool))
+            return false;
+        voice->is_keyed_off = parsed_bool;
+        if (!quick_state_parse_u32_text(fields.at("frame_count"), voice->frame_count)
+            || !quick_state_parse_u64_text(fields.at("finished_callback"), finished_callback, 0)
+            || !quick_state_parse_u64_text(fields.at("finished_user_data"), finished_user_data, 0)
+            || !quick_state_parse_u32_text(fields.at("data_count"), parsed_u32)) {
+            return false;
+        }
+        voice->finished_callback = Ptr<void>(static_cast<Address>(finished_callback));
+        voice->finished_callback_user_data = Ptr<void>(static_cast<Address>(finished_user_data));
+        voice->datas.resize(parsed_u32);
+
+        for (uint32_t index = 0; index < parsed_u32; index++) {
+            const std::string data_key = fmt::format("voice.0x{:x}.data.{}", voice_address, index);
+            if (!values.contains(data_key))
+                return false;
+            ngs::ModuleData &data = voice->datas[index];
+            const auto data_fields = quick_state_parse_semicolon_fields(values.at(data_key));
+            uint64_t callback = 0;
+            uint64_t user_data = 0;
+            uint64_t info_data = 0;
+            if (!quick_state_parse_u64_text(data_fields.at("callback"), callback, 0)
+                || !quick_state_parse_u64_text(data_fields.at("user_data"), user_data, 0)
+                || !quick_state_parse_u64_text(data_fields.at("info"), info_data, 0)
+                || !quick_state_parse_u32_text(data_fields.at("info_size"), data.info.size)
+                || !quick_state_parse_bool_text(data_fields.at("bypassed"), data.is_bypassed)
+                || !quick_state_parse_u32_text(data_fields.at("flags"), parsed_u32)) {
+                return false;
+            }
+            data.parent = voice;
+            data.index = index;
+            data.callback = Ptr<void>(static_cast<Address>(callback));
+            data.user_data = Ptr<void>(static_cast<Address>(user_data));
+            data.info.data = Ptr<void>(static_cast<Address>(info_data));
+            data.flags = static_cast<uint8_t>(parsed_u32);
+            if (!quick_state_parse_hex_bytes(values.at(data_key + ".voice_state"), data.voice_state_data)
+                || !quick_state_parse_hex_bytes(values.at(data_key + ".extra"), data.extra_storage)
+                || !quick_state_parse_hex_bytes(values.at(data_key + ".last_info"), data.last_info)) {
+                return false;
+            }
+        }
+
+        for (size_t port = 0; port < voice->patches.size(); port++) {
+            const std::string patch_key = fmt::format("voice.0x{:x}.patches.{}", voice_address, port);
+            if (!values.contains(patch_key))
+                continue;
+            std::vector<Address> patch_addresses;
+            if (!quick_state_parse_address_list(values.at(patch_key), patch_addresses))
+                return false;
+            voice->patches[port].clear();
+            for (const Address patch_address : patch_addresses)
+                voice->patches[port].push_back(Ptr<ngs::Patch>(patch_address));
+        }
+    }
+
+    for (const auto &[key, value] : values) {
+        Address patch_address = 0;
+        std::string suffix;
+        if (!quick_state_parse_ngs_addr_key(key, "patch.", patch_address, &suffix) || !suffix.empty())
+            continue;
+
+        ngs::Patch *patch = Ptr<ngs::Patch>(patch_address).get(emuenv.mem);
+        const auto fields = quick_state_parse_semicolon_fields(value);
+        uint64_t source = 0;
+        uint64_t dest = 0;
+        std::vector<uint8_t> matrix;
+        if (!quick_state_parse_u64_text(fields.at("source"), source, 0)
+            || !quick_state_parse_u64_text(fields.at("dest"), dest, 0)
+            || !quick_state_parse_i32_text(fields.at("output_index"), patch->output_index)
+            || !quick_state_parse_i32_text(fields.at("output_sub_index"), patch->output_sub_index)
+            || !quick_state_parse_i32_text(fields.at("dest_index"), patch->dest_index)
+            || !quick_state_parse_hex_bytes(fields.at("matrix"), matrix)
+            || matrix.size() != sizeof(patch->volume_matrix)) {
+            return false;
+        }
+        if ((source != 0 && !voices_by_address.contains(static_cast<Address>(source)))
+            || (dest != 0 && !voices_by_address.contains(static_cast<Address>(dest)))) {
+            return false;
+        }
+        patch->source = source == 0 ? nullptr : voices_by_address[static_cast<Address>(source)];
+        patch->dest = dest == 0 ? nullptr : voices_by_address[static_cast<Address>(dest)];
+        std::memcpy(patch->volume_matrix, matrix.data(), matrix.size());
+    }
+
+    for (size_t system_index = 0; system_index < system_count; system_index++) {
+        const std::string prefix = fmt::format("system.{}", system_index);
+        const auto fields = quick_state_parse_semicolon_fields(values.at(prefix));
+        uint64_t system_address = 0;
+        if (!quick_state_parse_u64_text(fields.at("addr"), system_address, 0) || !systems_by_address.contains(static_cast<Address>(system_address)))
+            return false;
+
+        ngs::System *system = systems_by_address[static_cast<Address>(system_address)];
+        std::vector<Address> rack_addresses;
+        std::vector<Address> queue_addresses;
+        if (!quick_state_parse_address_list(values.at(prefix + ".racks"), rack_addresses)
+            || !quick_state_parse_address_list(values.at(prefix + ".queue"), queue_addresses)) {
+            return false;
+        }
+        system->racks.clear();
+        for (const Address rack_address : rack_addresses) {
+            if (rack_address != 0 && !racks_by_address.contains(rack_address))
+                return false;
+            system->racks.push_back(rack_address == 0 ? nullptr : racks_by_address[rack_address]);
+        }
+        system->voice_scheduler.queue.clear();
+        for (const Address voice_address : queue_addresses) {
+            if (voice_address != 0 && !voices_by_address.contains(voice_address))
+                return false;
+            system->voice_scheduler.queue.push_back(voice_address == 0 ? nullptr : voices_by_address[voice_address]);
+        }
+        system->voice_scheduler.operations_pending = {};
+        system->voice_scheduler.is_updating = false;
+    }
+
+    return true;
+}
+
 static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvState &emuenv, const QuickStateSlot &slot) {
     const std::vector<std::string> planned_sections = {
         "thor.quickstate.manifest",
@@ -4016,6 +4748,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         "thor.io.vfs",
         "thor.display",
         "thor.audio",
+        "thor.ngs",
     };
 
     std::vector<QuickStateSection> sections;
@@ -4372,6 +5105,8 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         sections.push_back(quick_state_make_text_section("thor.audio", text));
     }
 
+    sections.push_back(quick_state_make_text_section("thor.ngs", quick_state_ngs_snapshot_text(emuenv)));
+
     return sections;
 }
 
@@ -4462,6 +5197,7 @@ static bool restore_quick_state_thread_metadata(EmuEnvState &emuenv, const Quick
             thread->status = saved_status == ThreadStatus::run ? ThreadStatus::suspend : saved_status;
             thread->status_cond.notify_all();
         }
+        thread->clear_deferred_import_wait_for_restore();
         emuenv.kernel.set_paused_thread_status_for_restore(thread->id, saved_status);
     }
 
@@ -4586,6 +5322,147 @@ static bool quick_state_restore_deferred_eventflag_waits(EmuEnvState &emuenv, co
     return true;
 }
 
+static bool quick_state_restore_deferred_condvar_waits(EmuEnvState &emuenv, const QuickStateSyncSnapshot &snapshot, const std::map<SceUID, ThreadStatePtr> &threads_by_saved_id, const SceUID uid, const QuickStateSyncCondvar &saved_condvar, const CondvarPtr &condvar, const char *kind) {
+    if (saved_condvar.waiting_count == 0)
+        return true;
+    if (!quick_state_wait_queue_entries_restorable_without_live_host(snapshot, kind, uid, saved_condvar.waiting_count))
+        return true;
+
+    if (!quick_state_wait_queue_contains_only_deferred_current_waiters(condvar->waiting_threads)) {
+        quick_state_last_restore_detail = fmt::format("{} {} has non-deferred current waiters", kind, uid);
+        return false;
+    }
+
+    quick_state_clear_wait_queue(condvar->waiting_threads);
+    for (uint32_t index = 0; index < saved_condvar.waiting_count; index++) {
+        const QuickStateSyncWaitQueueEntry *entry = quick_state_find_wait_queue_entry(snapshot, kind, uid, index);
+        if (!entry || entry->timeout != 0) {
+            quick_state_last_restore_detail = fmt::format("{} {} waiter {} has unsupported timeout state", kind, uid, index);
+            return false;
+        }
+
+        const auto thread = threads_by_saved_id.find(entry->thread_id);
+        if (thread == threads_by_saved_id.end() || !thread->second) {
+            quick_state_last_restore_detail = fmt::format("{} {} waiter thread {} was not matched", kind, uid, entry->thread_id);
+            return false;
+        }
+
+        WaitingThreadData data;
+        data.thread = thread->second;
+        data.priority = entry->priority;
+        data.timeout_value = entry->timeout_value;
+        data.timeout_start_host_us = quick_state_host_time_us();
+        data.deferred_import_wait = true;
+        if (!quick_state_restore_u32_pointer(emuenv.mem, entry->timeout, data.timeout)) {
+            quick_state_last_restore_detail = fmt::format("{} {} waiter {} timeout pointer 0x{:X} is invalid", kind, uid, index, entry->timeout);
+            return false;
+        }
+
+        thread->second->restore_deferred_import_wait();
+        condvar->waiting_threads->push(data);
+    }
+    return true;
+}
+
+static WaitingThreadQueuePtr quick_state_make_wait_queue(const uint32_t attr) {
+    if (attr & SCE_KERNEL_ATTR_TH_PRIO)
+        return std::make_unique<PriorityThreadDataQueue<WaitingThreadData>>();
+    return std::make_unique<FIFOThreadDataQueue<WaitingThreadData>>();
+}
+
+static void quick_state_copy_sync_identity(SyncPrimitive &object, const SceUID uid, const std::string &name, const uint32_t attr) {
+    object.uid = uid;
+    object.attr = attr;
+    std::strncpy(object.name, name.c_str(), KERNELOBJECT_MAX_NAME_LENGTH);
+    object.name[KERNELOBJECT_MAX_NAME_LENGTH] = '\0';
+}
+
+static bool restore_quick_state_simple_event_identities(EmuEnvState &emuenv, const QuickStateSyncSnapshot &snapshot) {
+    bool identities_match = emuenv.kernel.simple_events.size() == snapshot.simple_events.size();
+    if (identities_match) {
+        for (const auto &[uid, _] : snapshot.simple_events) {
+            if (!emuenv.kernel.simple_events.contains(uid)) {
+                identities_match = false;
+                break;
+            }
+        }
+    }
+    if (identities_match)
+        return true;
+
+    for (const auto &[uid, saved_event] : snapshot.simple_events) {
+        if (saved_event.waiting_count != 0) {
+            quick_state_last_restore_detail = fmt::format("simple event {} waiters cannot be recreated without live host state yet", uid);
+            return false;
+        }
+    }
+    for (const auto &[uid, event] : emuenv.kernel.simple_events) {
+        const std::lock_guard<std::mutex> event_lock(event->mutex);
+        if (quick_state_waiting_count(event->waiting_threads) != 0) {
+            quick_state_last_restore_detail = fmt::format("current simple event {} has live waiters and cannot be replaced", uid);
+            return false;
+        }
+    }
+
+    SimpleEventPtrs restored_events;
+    for (const auto &[uid, saved_event] : snapshot.simple_events) {
+        const SimpleEventPtr event = std::make_shared<SimpleEvent>();
+        quick_state_copy_sync_identity(*event, uid, saved_event.name, saved_event.attr);
+        event->waiting_threads = quick_state_make_wait_queue(saved_event.attr);
+        event->pattern = saved_event.pattern;
+        event->last_user_data = saved_event.last_user_data;
+        event->auto_reset = saved_event.auto_reset;
+        event->cb_wakeup_only = saved_event.cb_wakeup_only;
+        restored_events.emplace(uid, event);
+    }
+
+    emuenv.kernel.simple_events.swap(restored_events);
+    return true;
+}
+
+template <typename CurrentMap, typename SavedMap, typename MakeObject>
+static bool restore_quick_state_sync_identities_by_name(CurrentMap &current_map, const SavedMap &saved_map, const char *kind, MakeObject make_object) {
+    (void)kind;
+    CurrentMap remapped;
+    std::set<SceUID> consumed_current_uids;
+
+    for (const auto &[saved_uid, saved_object] : saved_map) {
+        typename CurrentMap::mapped_type object;
+
+        const auto exact = current_map.find(saved_uid);
+        if (exact != current_map.end()
+            && quick_state_sync_identity_matches(*exact->second, saved_object.name, saved_object.attr)) {
+            object = exact->second;
+            consumed_current_uids.insert(exact->first);
+        } else {
+            for (const auto &[current_uid, current_object] : current_map) {
+                if (consumed_current_uids.contains(current_uid))
+                    continue;
+                if (!quick_state_sync_identity_matches(*current_object, saved_object.name, saved_object.attr))
+                    continue;
+                object = current_object;
+                consumed_current_uids.insert(current_uid);
+                break;
+            }
+        }
+
+        if (!object)
+            object = make_object(saved_object);
+
+        quick_state_copy_sync_identity(*object, saved_uid, saved_object.name, saved_object.attr);
+        remapped.emplace(saved_uid, object);
+    }
+
+    current_map.swap(remapped);
+    return true;
+}
+
+template <typename CurrentMap>
+static void quick_state_clear_sync_map_wait_queues(CurrentMap &current_map) {
+    for (auto &[_, object] : current_map)
+        quick_state_clear_wait_queue(object->waiting_threads);
+}
+
 static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const QuickStateSlot &slot, const std::vector<ThreadStatePtr> &matched_threads, const bool allow_live_host_state) {
     QuickStateSyncSnapshot snapshot;
     if (!quick_state_parse_sync_primitives_section(slot, snapshot)) {
@@ -4594,7 +5471,7 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
         return false;
     }
 
-    if (snapshot.total_waiting_threads() > 0 && !allow_live_host_state && quick_state_wait_queue_has_nondeferred_entries(snapshot)) {
+    if (snapshot.total_waiting_threads() > 0 && !allow_live_host_state && quick_state_wait_queue_has_live_host_only_entries(snapshot)) {
         LOG_WARN("Refused sync primitive restore for {} because non-deferred waiting thread queue entries still need live host stacks.",
             slot.title_id);
         quick_state_last_restore_detail = "non-deferred waiting thread queue entries still need live host stacks";
@@ -4610,6 +5487,57 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
     };
 
     const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
+    if (!allow_live_host_state) {
+        if (!restore_quick_state_simple_event_identities(emuenv, snapshot))
+            return false;
+
+        restore_quick_state_sync_identities_by_name(emuenv.kernel.semaphores, snapshot.semaphores, "semaphore", [](const QuickStateSyncSemaphore &saved_semaphore) {
+            const SemaphorePtr semaphore = std::make_shared<Semaphore>();
+            semaphore->waiting_threads = quick_state_make_wait_queue(saved_semaphore.attr);
+            return semaphore;
+        });
+        restore_quick_state_sync_identities_by_name(emuenv.kernel.mutexes, snapshot.mutexes, "mutex", [](const QuickStateSyncMutex &saved_mutex) {
+            const MutexPtr mutex = std::make_shared<Mutex>();
+            mutex->waiting_threads = quick_state_make_wait_queue(saved_mutex.attr);
+            return mutex;
+        });
+        restore_quick_state_sync_identities_by_name(emuenv.kernel.lwmutexes, snapshot.lwmutexes, "lwmutex", [](const QuickStateSyncMutex &saved_mutex) {
+            const MutexPtr mutex = std::make_shared<Mutex>();
+            mutex->waiting_threads = quick_state_make_wait_queue(saved_mutex.attr);
+            mutex->workarea = Ptr<SceKernelLwMutexWork>(saved_mutex.workarea);
+            return mutex;
+        });
+        for (const auto &[uid, saved_mutex] : snapshot.lwmutexes)
+            emuenv.kernel.lwmutexes.at(uid)->workarea = Ptr<SceKernelLwMutexWork>(saved_mutex.workarea);
+
+        restore_quick_state_sync_identities_by_name(emuenv.kernel.eventflags, snapshot.eventflags, "eventflag", [](const QuickStateSyncEventFlag &saved_eventflag) {
+            const EventFlagPtr eventflag = std::make_shared<EventFlag>();
+            eventflag->waiting_threads = quick_state_make_wait_queue(saved_eventflag.attr);
+            return eventflag;
+        });
+        restore_quick_state_sync_identities_by_name(emuenv.kernel.condvars, snapshot.condvars, "condvar", [](const QuickStateSyncCondvar &saved_condvar) {
+            const CondvarPtr condvar = std::make_shared<Condvar>();
+            condvar->waiting_threads = quick_state_make_wait_queue(saved_condvar.attr);
+            return condvar;
+        });
+        restore_quick_state_sync_identities_by_name(emuenv.kernel.lwcondvars, snapshot.lwcondvars, "lwcondvar", [](const QuickStateSyncCondvar &saved_condvar) {
+            const CondvarPtr condvar = std::make_shared<Condvar>();
+            condvar->waiting_threads = quick_state_make_wait_queue(saved_condvar.attr);
+            return condvar;
+        });
+        for (const auto &[uid, saved_condvar] : snapshot.condvars)
+            emuenv.kernel.condvars.at(uid)->associated_mutex = saved_condvar.associated_mutex == 0 ? nullptr : emuenv.kernel.mutexes.at(saved_condvar.associated_mutex);
+        for (const auto &[uid, saved_condvar] : snapshot.lwcondvars)
+            emuenv.kernel.lwcondvars.at(uid)->associated_mutex = saved_condvar.associated_mutex == 0 ? nullptr : emuenv.kernel.lwmutexes.at(saved_condvar.associated_mutex);
+
+        quick_state_clear_sync_map_wait_queues(emuenv.kernel.semaphores);
+        quick_state_clear_sync_map_wait_queues(emuenv.kernel.mutexes);
+        quick_state_clear_sync_map_wait_queues(emuenv.kernel.lwmutexes);
+        quick_state_clear_sync_map_wait_queues(emuenv.kernel.eventflags);
+        quick_state_clear_sync_map_wait_queues(emuenv.kernel.condvars);
+        quick_state_clear_sync_map_wait_queues(emuenv.kernel.lwcondvars);
+    }
+
     if (emuenv.kernel.simple_events.size() != snapshot.simple_events.size()
         || emuenv.kernel.timers.size() != snapshot.timers.size()
         || emuenv.kernel.semaphores.size() != snapshot.semaphores.size()
@@ -4684,11 +5612,23 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
         const std::lock_guard<std::mutex> semaphore_lock(current->second->mutex);
         const bool rebuild_deferred_waiters = saved_semaphore.waiting_count > 0
             && quick_state_wait_queue_entries_all_deferred(snapshot, "semaphore", uid, saved_semaphore.waiting_count);
-        if (!quick_state_sync_identity_matches(*current->second, saved_semaphore.name, saved_semaphore.attr)
-            || (!rebuild_deferred_waiters && quick_state_waiting_count(current->second->waiting_threads) != saved_semaphore.waiting_count)
-            || (rebuild_deferred_waiters && !quick_state_wait_queue_contains_only_deferred_current_waiters(current->second->waiting_threads))) {
+        const bool identity_matches = quick_state_sync_identity_matches(*current->second, saved_semaphore.name, saved_semaphore.attr);
+        const size_t current_waiting = quick_state_waiting_count(current->second->waiting_threads);
+        const bool current_waiters_deferred = quick_state_wait_queue_contains_only_deferred_current_waiters(current->second->waiting_threads);
+        if (!identity_matches
+            || (!rebuild_deferred_waiters && current_waiting != saved_semaphore.waiting_count)
+            || (rebuild_deferred_waiters && !current_waiters_deferred)) {
             LOG_WARN("Refused sync primitive restore for {} because semaphore {} does not match the saved identity.", slot.title_id, uid);
-            quick_state_last_restore_detail = fmt::format("semaphore {} does not match the saved identity", uid);
+            quick_state_last_restore_detail = fmt::format("semaphore {} does not match the saved identity; saved name='{}' attr={} waiting={} rebuild_deferred={} current name='{}' attr={} waiting={} current_waiters_deferred={}",
+                uid,
+                saved_semaphore.name,
+                saved_semaphore.attr,
+                saved_semaphore.waiting_count,
+                rebuild_deferred_waiters,
+                current->second->name,
+                current->second->attr,
+                current_waiting,
+                current_waiters_deferred);
             return false;
         }
     }
@@ -4748,8 +5688,11 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
             }
             const auto associated = saved_condvar.associated_mutex == 0 ? associated_mutexes.end() : associated_mutexes.find(saved_condvar.associated_mutex);
             const std::lock_guard<std::mutex> condvar_lock(current->second->mutex);
+            const bool rebuild_deferred_waiters = saved_condvar.waiting_count > 0
+                && quick_state_wait_queue_entries_restorable_without_live_host(snapshot, kind, uid, saved_condvar.waiting_count);
             if (!quick_state_sync_identity_matches(*current->second, saved_condvar.name, saved_condvar.attr)
-                || quick_state_waiting_count(current->second->waiting_threads) != saved_condvar.waiting_count
+                || (!rebuild_deferred_waiters && quick_state_waiting_count(current->second->waiting_threads) != saved_condvar.waiting_count)
+                || (rebuild_deferred_waiters && !quick_state_wait_queue_contains_only_deferred_current_waiters(current->second->waiting_threads))
                 || (saved_condvar.associated_mutex != 0 && associated == associated_mutexes.end())
                 || (saved_condvar.associated_mutex == 0 && current->second->associated_mutex)
                 || (saved_condvar.associated_mutex != 0 && !current->second->associated_mutex)
@@ -4873,10 +5816,15 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
             auto &condvar = current_map.at(uid);
             const std::lock_guard<std::mutex> condvar_lock(condvar->mutex);
             condvar->associated_mutex = saved_condvar.associated_mutex == 0 ? nullptr : associated_mutexes.at(saved_condvar.associated_mutex);
+            if (!quick_state_restore_deferred_condvar_waits(emuenv, snapshot, threads_by_saved_id, uid, saved_condvar, condvar, saved_condvar.lightweight ? "lwcondvar" : "condvar"))
+                return false;
         }
+        return true;
     };
-    restore_condvar_map(emuenv.kernel.condvars, emuenv.kernel.mutexes, snapshot.condvars);
-    restore_condvar_map(emuenv.kernel.lwcondvars, emuenv.kernel.lwmutexes, snapshot.lwcondvars);
+    if (!restore_condvar_map(emuenv.kernel.condvars, emuenv.kernel.mutexes, snapshot.condvars)
+        || !restore_condvar_map(emuenv.kernel.lwcondvars, emuenv.kernel.lwmutexes, snapshot.lwcondvars)) {
+        return false;
+    }
 
     for (const auto &[uid, saved_rwlock] : snapshot.rwlocks) {
         auto &rwlock = emuenv.kernel.rwlocks.at(uid);
@@ -5227,6 +6175,20 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         return false;
     }
 
+    bool restore_mutated_host_state = false;
+    auto fail_quick_state_restore = [&]() {
+        if (restore_mutated_host_state) {
+            if (quick_state_last_restore_detail.empty())
+                quick_state_last_restore_detail = "restore failed after host-state mutation";
+            LOG_WARN("Quickstate restore for {} failed after mutating host state; leaving guest paused: {}",
+                slot.title_id,
+                quick_state_last_restore_detail);
+        } else {
+            resume_after_quick_state(emuenv, already_paused);
+        }
+        return false;
+    };
+
     std::vector<ThreadStatePtr> drained_wait_threads;
     std::string drain_detail;
     if (slot.restore_requires_same_pause && !same_pause_host_state && !quick_state_check_live_wait_queues(emuenv, slot, &drained_wait_threads, &drain_detail)) {
@@ -5246,8 +6208,7 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         if (!wait_for_guest_threads_paused(emuenv.kernel, "restore")) {
             if (quick_state_last_restore_detail.empty())
                 quick_state_last_restore_detail = "drained extra waiters did not reach pause";
-            resume_after_quick_state(emuenv, already_paused);
-            return false;
+            return fail_quick_state_restore();
         }
         LOG_INFO("Drained {} extra live wait queue thread(s) before restoring quickstate for {}.",
             suspended_drained_threads.size(),
@@ -5255,74 +6216,81 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     }
 
     std::vector<ThreadStatePtr> matched_threads;
-    if (!preflight_quick_state_restore_threads(emuenv.kernel, slot, matched_threads)) {
+    std::vector<ThreadStatePtr> extra_threads;
+    restore_mutated_host_state = !allow_live_host_state;
+    if (!preflight_quick_state_restore_threads(emuenv, slot, !allow_live_host_state, matched_threads, &extra_threads)) {
         quick_state_last_restore_detail = "thread preflight failed";
-        resume_after_quick_state(emuenv, already_paused);
-        return false;
+        return fail_quick_state_restore();
+    }
+    if (!validate_quick_state_restore_thread_ids(slot, matched_threads)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "thread identity validation failed";
+        return fail_quick_state_restore();
+    }
+    if (!allow_live_host_state && !remove_quick_state_extra_restore_threads(emuenv.kernel, slot.title_id, extra_threads)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "extra current threads could not be removed";
+        return fail_quick_state_restore();
+    }
+    if (allow_live_host_state && !extra_threads.empty()) {
+        quick_state_last_restore_detail = fmt::format("same-session restore has extra current threads: {}", quick_state_thread_list_detail(extra_threads));
+        return fail_quick_state_restore();
+    }
+
+    restore_mutated_host_state = true;
+    if (!prepare_quick_state_restore_thread_blocks(slot, matched_threads)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "thread memory block restore prep failed";
+        return fail_quick_state_restore();
     }
 
     if (!restore_quick_state_allocation_map(emuenv, slot)) {
         quick_state_last_restore_detail = "allocation map restore failed";
-        resume_after_quick_state(emuenv, already_paused);
-        return false;
+        return fail_quick_state_restore();
     }
 
     uint32_t missing_pages = 0;
     for (const auto &page : slot.memory_pages) {
-        if (!quick_state_page_can_restore(emuenv.mem, page, missing_pages)) {
-            resume_after_quick_state(emuenv, already_paused);
-            return false;
-        }
+        if (!quick_state_page_can_restore(emuenv.mem, page, missing_pages))
+            return fail_quick_state_restore();
     }
 
     if (missing_pages > 0) {
-        resume_after_quick_state(emuenv, already_paused);
         LOG_WARN("Refused quickstate restore for {} because {} guest memory page(s) are not allocated in the current session. Restart/load-state support needs full kernel object and allocation-map serialization before this can be restored safely.",
             slot.title_id, missing_pages);
         quick_state_last_restore_detail = fmt::format("{} guest memory page(s) are not allocated in the current session", missing_pages);
-        return false;
+        return fail_quick_state_restore();
     }
 
     if (!restore_quick_state_timing_state(emuenv, slot)) {
         quick_state_last_restore_detail = "timing restore failed";
-        resume_after_quick_state(emuenv, already_paused);
-        return false;
+        return fail_quick_state_restore();
     }
 
     if (!restore_quick_state_thread_metadata(emuenv, slot, matched_threads)) {
         quick_state_last_restore_detail = "thread metadata restore failed";
-        resume_after_quick_state(emuenv, already_paused);
-        return false;
+        return fail_quick_state_restore();
     }
 
-    if (!restore_quick_state_sync_primitives(emuenv, slot, matched_threads, allow_live_host_state)) {
-        if (quick_state_last_restore_detail.empty())
-            quick_state_last_restore_detail = "sync primitive restore failed";
-        resume_after_quick_state(emuenv, already_paused);
-        return false;
-    }
-
-    if (!restore_quick_state_io_file_positions(emuenv, slot)) {
-        if (quick_state_last_restore_detail.empty())
-            quick_state_last_restore_detail = "IO file restore failed";
-        resume_after_quick_state(emuenv, already_paused);
-        return false;
-    }
-
-    if (!restore_quick_state_display_state(emuenv, slot, matched_threads, allow_live_host_state)) {
-        quick_state_last_restore_detail = "display restore failed";
-        resume_after_quick_state(emuenv, already_paused);
-        return false;
-    }
-
-    if (!restore_quick_state_audio_state(emuenv, slot)) {
-        quick_state_last_restore_detail = "audio restore failed";
-        resume_after_quick_state(emuenv, already_paused);
-        return false;
+    if (!allow_live_host_state && quick_state_needs_ngs_durable_restore(emuenv, slot)) {
+        std::string ngs_detail;
+        if (!quick_state_parse_ngs_snapshot_header(slot, nullptr, &ngs_detail)) {
+            quick_state_last_restore_detail = ngs_detail;
+            return fail_quick_state_restore();
+        }
     }
 
     for (const auto &page : slot.memory_pages)
         std::memcpy(Ptr<uint8_t>(page.address).get(emuenv.mem), page.bytes.data(), page.bytes.size());
+
+    if (!allow_live_host_state && quick_state_needs_ngs_durable_restore(emuenv, slot) && !quick_state_restore_ngs_state(emuenv, slot)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "NGS host-state restore failed";
+        LOG_WARN("Failed to restore NGS host state for {} after guest memory restore: {}",
+            slot.title_id,
+            quick_state_last_restore_detail);
+        return fail_quick_state_restore();
+    }
 
     {
         for (size_t i = 0; i < slot.thread_contexts.size(); i++) {
@@ -5333,11 +6301,32 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
                 LOG_WARN("Refused quickstate restore for {} because thread {} ({}) mutex stayed busy before CPU context load.",
                     slot.title_id, thread_context.id, thread_context.name);
                 quick_state_last_restore_detail = fmt::format("thread {} ({}) mutex stayed busy before CPU context load", thread_context.id, thread_context.name);
-                resume_after_quick_state(emuenv, already_paused);
-                return false;
+                return fail_quick_state_restore();
             }
             load_context(*thread->cpu, thread_context.context);
         }
+    }
+
+    if (!restore_quick_state_sync_primitives(emuenv, slot, matched_threads, allow_live_host_state)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "sync primitive restore failed";
+        return fail_quick_state_restore();
+    }
+
+    if (!restore_quick_state_io_file_positions(emuenv, slot)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "IO file restore failed";
+        return fail_quick_state_restore();
+    }
+
+    if (!restore_quick_state_display_state(emuenv, slot, matched_threads, allow_live_host_state)) {
+        quick_state_last_restore_detail = "display restore failed";
+        return fail_quick_state_restore();
+    }
+
+    if (!restore_quick_state_audio_state(emuenv, slot)) {
+        quick_state_last_restore_detail = "audio restore failed";
+        return fail_quick_state_restore();
     }
 
     reset_quick_state_runtime_render_state(emuenv);
@@ -5473,6 +6462,7 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "Display vblank waits: " << manifest.display_wait_entries << "\n";
     marker << "Display vblank callbacks: " << manifest.display_callback_entries << "\n";
     marker << "Audio scalar restore layer: " << (manifest.audio_state_restorable ? "ready" : "missing") << "\n";
+    marker << "NGS host-state restore layer: " << (manifest.ngs_state_restorable ? "ready" : "missing") << "\n";
     marker << "Block reason: " << manifest.block_reason << "\n";
     marker << "Missing serializers: " << quick_state_join_strings(manifest.missing_serializers) << "\n";
     marker << "\nKernel object snapshot at manifest time\n";
@@ -5547,6 +6537,7 @@ static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickSta
     marker << "Display scalar restore layer: " << (manifest.display_state_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank wait restore layer: " << (manifest.display_vblank_waits_restorable ? "ready" : "missing") << "\n";
     marker << "Audio scalar restore layer: " << (manifest.audio_state_restorable ? "ready" : "missing") << "\n";
+    marker << "NGS host-state restore layer: " << (manifest.ngs_state_restorable ? "ready" : "missing") << "\n";
     marker << "Block reason: " << manifest.block_reason << "\n";
     marker << "Missing serializers: " << quick_state_join_strings(manifest.missing_serializers) << "\n";
 }

@@ -702,14 +702,14 @@ EXPORT(int, _sceKernelSetTimerTime) {
 EXPORT(int, _sceKernelSignalLwCond, Ptr<SceKernelLwCondWork> workarea) {
     TRACY_FUNC(_sceKernelSignalLwCond, workarea);
     SceUID condid = workarea.get(emuenv.mem)->uid;
-    return condvar_signal(emuenv.kernel, export_name, thread_id, condid,
+    return condvar_signal(emuenv.kernel, emuenv.mem, export_name, thread_id, condid,
         Condvar::SignalTarget(Condvar::SignalTarget::Type::Any), SyncWeight::Light);
 }
 
 EXPORT(int, _sceKernelSignalLwCondAll, Ptr<SceKernelLwCondWork> workarea) {
     TRACY_FUNC(_sceKernelSignalLwCondAll, workarea);
     SceUID condid = workarea.get(emuenv.mem)->uid;
-    return condvar_signal(emuenv.kernel, export_name, thread_id, condid,
+    return condvar_signal(emuenv.kernel, emuenv.mem, export_name, thread_id, condid,
         Condvar::SignalTarget(Condvar::SignalTarget::Type::All), SyncWeight::Light);
 }
 
@@ -1375,19 +1375,19 @@ EXPORT(int, sceKernelSetTimerTimeWide, SceUID timer_handle, SceUInt64 time) {
 
 EXPORT(int, sceKernelSignalCond, SceUID condid) {
     TRACY_FUNC(sceKernelSignalCond, condid);
-    return condvar_signal(emuenv.kernel, export_name, thread_id, condid,
+    return condvar_signal(emuenv.kernel, emuenv.mem, export_name, thread_id, condid,
         Condvar::SignalTarget(Condvar::SignalTarget::Type::Any), SyncWeight::Heavy);
 }
 
 EXPORT(int, sceKernelSignalCondAll, SceUID condid) {
     TRACY_FUNC(sceKernelSignalCondAll, condid);
-    return condvar_signal(emuenv.kernel, export_name, thread_id, condid,
+    return condvar_signal(emuenv.kernel, emuenv.mem, export_name, thread_id, condid,
         Condvar::SignalTarget(Condvar::SignalTarget::Type::All), SyncWeight::Heavy);
 }
 
 EXPORT(int, sceKernelSignalCondTo, SceUID condid, SceUID thread_target) {
     TRACY_FUNC(sceKernelSignalCondTo, condid, thread_target);
-    return condvar_signal(emuenv.kernel, export_name, thread_id, condid,
+    return condvar_signal(emuenv.kernel, emuenv.mem, export_name, thread_id, condid,
         Condvar::SignalTarget(Condvar::SignalTarget::Type::Specific, thread_target), SyncWeight::Heavy);
 }
 
@@ -1436,7 +1436,7 @@ EXPORT(int, sceKernelTryLockWriteRWLock) {
 
 EXPORT(int, sceKernelUnlockMutex, SceUID mutexid, int unlock_count) {
     TRACY_FUNC(sceKernelUnlockMutex, mutexid, unlock_count);
-    return mutex_unlock(emuenv.kernel, export_name, thread_id, mutexid, unlock_count, SyncWeight::Heavy);
+    return mutex_unlock(emuenv.kernel, emuenv.mem, export_name, thread_id, mutexid, unlock_count, SyncWeight::Heavy);
 }
 
 EXPORT(int, sceKernelUnlockReadRWLock, SceUID lock_id) {
