@@ -65,6 +65,21 @@ public:
         return reinterpret_cast<T *>(it->second.get());
     }
 
+    template <typename T>
+    T *get_if() {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto it = objs.find(TypeInfo::registered<T>::index);
+        if (it == objs.end())
+            return nullptr;
+        return reinterpret_cast<T *>(it->second.get());
+    }
+
+    template <typename T>
+    bool contains() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return objs.contains(TypeInfo::registered<T>::index);
+    }
+
     template <typename T, typename... Args>
     bool create(Args &&...args) {
         std::lock_guard<std::mutex> lock(mutex);

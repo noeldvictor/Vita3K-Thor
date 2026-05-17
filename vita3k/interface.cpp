@@ -47,6 +47,7 @@
 #include <renderer/texture_cache.h>
 
 #include <modules/module_parent.h>
+#include <modules/SceAvPlayer/quick_state.h>
 #include <motion/event_handler.h>
 #include <string>
 #include <touch/functions.h>
@@ -1369,6 +1370,13 @@ struct QuickStateAudioSnapshot {
     int32_t audio_in_len_bytes = 0;
 };
 
+struct QuickStateAvPlayerSnapshot {
+    bool valid = false;
+    size_t player_count = 0;
+    size_t active_player_count = 0;
+    std::string detail;
+};
+
 struct QuickStateRestoreManifest {
     uint32_t format_version = QUICKSTATE_VERSION;
     uint64_t guest_memory_bytes = 0;
@@ -1387,6 +1395,7 @@ struct QuickStateRestoreManifest {
     bool display_state_restorable = false;
     bool display_vblank_waits_restorable = false;
     bool audio_state_restorable = false;
+    bool avplayer_state_restorable = false;
     bool ngs_state_restorable = false;
     bool same_pause_restore_available = false;
     bool live_host_restore_available = false;
@@ -1396,6 +1405,8 @@ struct QuickStateRestoreManifest {
     size_t io_memory_file_handles = 0;
     size_t display_wait_entries = 0;
     size_t display_callback_entries = 0;
+    size_t avplayer_players = 0;
+    size_t avplayer_active_players = 0;
     QuickStateKernelObjectCounts kernel;
     QuickStateIOCounts io;
     std::vector<std::string> missing_serializers;
@@ -2256,8 +2267,13 @@ static bool remove_quick_state_extra_restore_threads(KernelState &kernel, const 
         thread->exit_delete(false);
     }
 
-    if (wait_for_quick_state_extra_threads_removed(kernel, thread_ids))
+    if (wait_for_quick_state_extra_threads_removed(kernel, thread_ids)) {
+        for (const auto &thread : extra_threads) {
+            if (thread)
+                thread->release_memory_blocks_for_quick_state();
+        }
         return true;
+    }
 
     quick_state_last_restore_detail = fmt::format("extra current restore threads did not exit: {}", quick_state_thread_list_detail(extra_threads));
     LOG_WARN("Refused quickstate restore for {} because {}.", title_id, quick_state_last_restore_detail);
@@ -2347,6 +2363,7 @@ static bool quick_state_page_can_restore(const MemState &mem, const QuickStateMe
 }
 
 static void reset_quick_state_runtime_render_state(EmuEnvState &emuenv) {
+    emuenv.gxm.display_queue_restore_generation.fetch_add(1, std::memory_order_acq_rel);
     emuenv.gxm.display_queue.reset();
     {
         const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
@@ -3555,6 +3572,25 @@ static bool quick_state_parse_audio_snapshot_section(const QuickStateSlot &slot,
     return snapshot.valid;
 }
 
+static bool quick_state_parse_avplayer_snapshot_section(const QuickStateSlot &slot, QuickStateAvPlayerSnapshot &snapshot) {
+    snapshot = {};
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.avplayer");
+    if (!section || section->version != 1) {
+        snapshot.detail = "AVPlayer host-state section is missing";
+        return false;
+    }
+
+    const auto values = quick_state_parse_text_section(*section);
+    std::string detail;
+    if (!sce_avplayer::quick_state_validate_snapshot_values(values, &snapshot.player_count, &snapshot.active_player_count, &detail)) {
+        snapshot.detail = detail.empty() ? "AVPlayer host-state section is invalid" : detail;
+        return false;
+    }
+
+    snapshot.valid = true;
+    return true;
+}
+
 static std::string quick_state_thread_status_name(const ThreadStatus status) {
     switch (status) {
     case ThreadStatus::run:
@@ -3711,6 +3747,10 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     }
     QuickStateAudioSnapshot audio_snapshot;
     manifest.audio_state_restorable = quick_state_parse_audio_snapshot_section(slot, audio_snapshot);
+    QuickStateAvPlayerSnapshot avplayer_snapshot;
+    manifest.avplayer_state_restorable = quick_state_parse_avplayer_snapshot_section(slot, avplayer_snapshot);
+    manifest.avplayer_players = avplayer_snapshot.player_count;
+    manifest.avplayer_active_players = avplayer_snapshot.active_player_count;
     manifest.ngs_state_restorable = quick_state_parse_ngs_snapshot_header(slot);
     manifest.kernel = quick_state_count_kernel_objects(emuenv);
     manifest.io = quick_state_count_io_objects(emuenv);
@@ -3753,6 +3793,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     }
     if (!manifest.audio_state_restorable)
         manifest.missing_serializers.push_back("audio-state");
+    if (!manifest.avplayer_state_restorable && manifest.avplayer_threads > 0)
+        manifest.missing_serializers.push_back("avplayer-movie-state");
     if (!manifest.ngs_state_restorable && quick_state_needs_ngs_durable_restore(emuenv, slot))
         manifest.missing_serializers.push_back("ngs-host-state");
     if (!manifest.io_file_positions_restorable) {
@@ -3765,16 +3807,14 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     }
     if (!manifest.timing_restorable)
         manifest.missing_serializers.push_back("timing-clocks");
-    if (manifest.avplayer_threads > 0)
-        manifest.missing_serializers.push_back("avplayer-movie-state");
-
     const bool live_host_sections_ready = (manifest.same_pause_restore_available || manifest.live_host_restore_available)
         && manifest.timing_restorable
         && manifest.thread_metadata_restorable
         && manifest.sync_primitives_restorable
         && manifest.io_file_positions_restorable
         && manifest.display_state_restorable
-        && manifest.audio_state_restorable;
+        && manifest.audio_state_restorable
+        && manifest.avplayer_state_restorable;
     const bool durable_restore_ready = manifest.missing_serializers.empty() && !slot.restore_requires_same_pause;
     manifest.restore_enabled = durable_restore_ready || live_host_sections_ready;
     if (manifest.restore_enabled) {
@@ -4745,6 +4785,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         "thor.io.vfs",
         "thor.display",
         "thor.audio",
+        "thor.avplayer",
         "thor.ngs",
     };
 
@@ -5101,6 +5142,8 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         text << "audio_in_len_bytes=" << emuenv.audio.in_port.len_bytes << "\n";
         sections.push_back(quick_state_make_text_section("thor.audio", text));
     }
+
+    sections.push_back(quick_state_make_text_section("thor.avplayer", sce_avplayer::quick_state_snapshot_text(emuenv)));
 
     sections.push_back(quick_state_make_text_section("thor.ngs", quick_state_ngs_snapshot_text(emuenv)));
 
@@ -5642,7 +5685,19 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
                 || quick_state_waiting_count(current->second->waiting_threads) != saved_mutex.waiting_count
                 || (saved_mutex.lightweight && current->second->workarea.address() != saved_mutex.workarea)) {
                 LOG_WARN("Refused sync primitive restore for {} because {} {} does not match the saved identity.", slot.title_id, kind, uid);
-                quick_state_last_restore_detail = fmt::format("{} {} does not match the saved identity", kind, uid);
+                quick_state_last_restore_detail = fmt::format("{} {} does not match the saved identity; saved name='{}' attr={} waiting={} owner={} workarea=0x{:08X} current name='{}' attr={} waiting={} owner={} workarea=0x{:08X}",
+                    kind,
+                    uid,
+                    saved_mutex.name,
+                    saved_mutex.attr,
+                    saved_mutex.waiting_count,
+                    saved_mutex.owner,
+                    saved_mutex.workarea,
+                    current->second->name,
+                    current->second->attr,
+                    quick_state_waiting_count(current->second->waiting_threads),
+                    current->second->owner ? current->second->owner->id : 0,
+                    current->second->workarea.address());
                 return false;
             }
             if (saved_mutex.owner != 0 && !resolve_owner(saved_mutex.owner)) {
@@ -5968,20 +6023,81 @@ static bool restore_quick_state_audio_state(EmuEnvState &emuenv, const QuickStat
         return false;
     }
 
+    if (emuenv.audio.audio_backend != snapshot.backend) {
+        LOG_WARN("Refused audio restore for {} because current backend '{}' does not match saved backend '{}'.",
+            slot.title_id,
+            emuenv.audio.audio_backend,
+            snapshot.backend);
+        return false;
+    }
+    if (!emuenv.audio.adapter) {
+        LOG_WARN("Refused audio restore for {} because no audio adapter is active.", slot.title_id);
+        return false;
+    }
+
+    bool rebuild_ports = false;
+    {
+        const std::lock_guard<std::mutex> audio_lock(emuenv.audio.mutex);
+        rebuild_ports = emuenv.audio.out_ports.size() != snapshot.out_ports.size();
+        if (!rebuild_ports) {
+            for (const auto &[port_id, saved_port] : snapshot.out_ports) {
+                const auto current = emuenv.audio.out_ports.find(port_id);
+                if (current == emuenv.audio.out_ports.end() || !current->second) {
+                    rebuild_ports = true;
+                    break;
+                }
+                const AudioOutPort &port = *current->second;
+                if (port.type != saved_port.type
+                    || port.len != saved_port.len
+                    || port.freq != saved_port.freq
+                    || port.mode != saved_port.mode) {
+                    rebuild_ports = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    AudioOutPortPtrs rebuilt_ports;
+    if (rebuild_ports) {
+        for (const auto &[port_id, saved_port] : snapshot.out_ports) {
+            const int channels = saved_port.mode == 0 ? 1 : 2;
+            AudioOutPortPtr port = emuenv.audio.open_port(channels, saved_port.freq, saved_port.len);
+            if (!port) {
+                LOG_WARN("Refused audio restore for {} because audio port {} could not be recreated.", slot.title_id, port_id);
+                quick_state_last_restore_detail = fmt::format("audio port {} could not be recreated", port_id);
+                return false;
+            }
+            rebuilt_ports.emplace(port_id, std::move(port));
+        }
+    }
+
     const std::lock_guard<std::mutex> audio_lock(emuenv.audio.mutex);
-    if (emuenv.audio.audio_backend != snapshot.backend || emuenv.audio.out_ports.size() != snapshot.out_ports.size()) {
-        LOG_WARN("Refused audio restore for {} because current backend/port count does not match the saved snapshot.", slot.title_id);
+    if (rebuild_ports) {
+        emuenv.audio.out_ports = std::move(rebuilt_ports);
+    } else {
+        for (const auto &[port_id, _] : snapshot.out_ports) {
+            const auto current = emuenv.audio.out_ports.find(port_id);
+            if (current == emuenv.audio.out_ports.end() || !current->second) {
+                LOG_WARN("Refused audio restore for {} because audio port {} disappeared during restore.", slot.title_id, port_id);
+                quick_state_last_restore_detail = fmt::format("audio port {} disappeared during restore", port_id);
+                return false;
+            }
+        }
+    }
+
+    if (emuenv.audio.out_ports.size() != snapshot.out_ports.size()) {
+        LOG_WARN("Refused audio restore for {} because rebuilt port count {} does not match saved count {}.",
+            slot.title_id,
+            emuenv.audio.out_ports.size(),
+            snapshot.out_ports.size());
         return false;
     }
 
     for (const auto &[port_id, saved_port] : snapshot.out_ports) {
         const auto current = emuenv.audio.out_ports.find(port_id);
-        if (current == emuenv.audio.out_ports.end()) {
-            LOG_WARN("Refused audio restore for {} because audio port {} is not open in the current session.", slot.title_id, port_id);
-            return false;
-        }
-        if (!current->second) {
-            LOG_WARN("Refused audio restore for {} because audio port {} is null.", slot.title_id, port_id);
+        if (current == emuenv.audio.out_ports.end() || !current->second) {
+            LOG_WARN("Refused audio restore for {} because audio port {} is missing after reconciliation.", slot.title_id, port_id);
             return false;
         }
     }
@@ -6007,11 +6123,41 @@ static bool restore_quick_state_audio_state(EmuEnvState &emuenv, const QuickStat
             emuenv.audio.adapter->set_volume(port, saved_port.volume * snapshot.global_volume);
     }
 
-    LOG_INFO("Restored audio scalar snapshot for {} (ports={}, backend={}, speed={}%).",
+    LOG_INFO("Restored audio scalar snapshot for {} (ports={}, backend={}, speed={}%, rebuilt_ports={}).",
         slot.title_id,
         snapshot.out_ports.size(),
         snapshot.backend,
-        snapshot.speed_percent);
+        snapshot.speed_percent,
+        rebuild_ports);
+    return true;
+}
+
+static bool restore_quick_state_avplayer_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.avplayer");
+    if (!section || section->version != 1) {
+        if (quick_state_count_avplayer_threads(slot) == 0) {
+            LOG_INFO("Skipping AVPlayer host snapshot restore for {} because this older state has no AVPlayer threads.", slot.title_id);
+            return true;
+        }
+        LOG_WARN("Refused AVPlayer restore for {} because the thor.avplayer section is missing.", slot.title_id);
+        quick_state_last_restore_detail = "AVPlayer host-state section is missing";
+        return false;
+    }
+
+    const auto values = quick_state_parse_text_section(*section);
+    std::string detail;
+    if (!sce_avplayer::quick_state_restore_snapshot(emuenv, values, &detail)) {
+        quick_state_last_restore_detail = detail.empty() ? "AVPlayer host-state restore failed" : detail;
+        LOG_WARN("Refused AVPlayer restore for {} because {}.", slot.title_id, quick_state_last_restore_detail);
+        return false;
+    }
+
+    QuickStateAvPlayerSnapshot snapshot;
+    quick_state_parse_avplayer_snapshot_section(slot, snapshot);
+    LOG_INFO("Restored AVPlayer host snapshot for {} (players={}, active={}).",
+        slot.title_id,
+        snapshot.player_count,
+        snapshot.active_player_count);
     return true;
 }
 
@@ -6348,6 +6494,12 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         return fail_quick_state_restore();
     }
 
+    if (!restore_quick_state_avplayer_state(emuenv, slot)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "AVPlayer restore failed";
+        return fail_quick_state_restore();
+    }
+
     reset_quick_state_runtime_render_state(emuenv);
     emuenv.kernel.invalidate_jit_cache(0, std::numeric_limits<Address>::max());
     resume_after_quick_state(emuenv, already_paused);
@@ -6481,6 +6633,8 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "Display vblank waits: " << manifest.display_wait_entries << "\n";
     marker << "Display vblank callbacks: " << manifest.display_callback_entries << "\n";
     marker << "Audio scalar restore layer: " << (manifest.audio_state_restorable ? "ready" : "missing") << "\n";
+    marker << "AVPlayer host-state restore layer: " << (manifest.avplayer_state_restorable ? "ready" : "missing") << "\n";
+    marker << "AVPlayer players: " << manifest.avplayer_players << " (" << manifest.avplayer_active_players << " active)\n";
     marker << "NGS host-state restore layer: " << (manifest.ngs_state_restorable ? "ready" : "missing") << "\n";
     marker << "Block reason: " << manifest.block_reason << "\n";
     marker << "Missing serializers: " << quick_state_join_strings(manifest.missing_serializers) << "\n";
@@ -6556,6 +6710,8 @@ static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickSta
     marker << "Display scalar restore layer: " << (manifest.display_state_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank wait restore layer: " << (manifest.display_vblank_waits_restorable ? "ready" : "missing") << "\n";
     marker << "Audio scalar restore layer: " << (manifest.audio_state_restorable ? "ready" : "missing") << "\n";
+    marker << "AVPlayer host-state restore layer: " << (manifest.avplayer_state_restorable ? "ready" : "missing") << "\n";
+    marker << "AVPlayer players: " << manifest.avplayer_players << " (" << manifest.avplayer_active_players << " active)\n";
     marker << "NGS host-state restore layer: " << (manifest.ngs_state_restorable ? "ready" : "missing") << "\n";
     marker << "Block reason: " << manifest.block_reason << "\n";
     marker << "Missing serializers: " << quick_state_join_strings(manifest.missing_serializers) << "\n";

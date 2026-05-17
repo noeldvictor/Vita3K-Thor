@@ -17,6 +17,8 @@
 
 #include <module/module.h>
 
+#include <modules/SceAvPlayer/quick_state.h>
+
 #include <codec/state.h>
 #include <io/functions.h>
 #include <kernel/state.h>
@@ -25,6 +27,10 @@
 #include <util/log.h>
 
 #include <algorithm>
+#include <iomanip>
+#include <limits>
+#include <sstream>
+#include <vector>
 
 // Defines stop/pause behaviour. If true, GetVideo/AudioData will return false when stopped.
 constexpr bool REJECT_DATA_ON_PAUSE = true;
@@ -206,6 +212,465 @@ static uint64_t scaled_video_frame_interval(const EmuEnvState &emuenv, const uin
     const uint64_t speed_percent = std::max<uint32_t>(emuenv.kernel.speed_percent.load(), 1);
     return std::max<uint64_t>(1, (frame_interval_us * 100) / speed_percent);
 }
+
+namespace sce_avplayer {
+
+static std::string quick_state_hex_string(const std::string &value) {
+    static constexpr char digits[] = "0123456789ABCDEF";
+    std::string text;
+    text.reserve(value.size() * 2);
+    for (const unsigned char byte : value) {
+        text.push_back(digits[byte >> 4]);
+        text.push_back(digits[byte & 0xF]);
+    }
+    return text;
+}
+
+static bool quick_state_unhex_string(const std::string &text, std::string &value) {
+    if (text.size() % 2 != 0)
+        return false;
+
+    const auto hex_value = [](const char c) -> int {
+        if (c >= '0' && c <= '9')
+            return c - '0';
+        if (c >= 'a' && c <= 'f')
+            return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F')
+            return c - 'A' + 10;
+        return -1;
+    };
+
+    value.clear();
+    value.reserve(text.size() / 2);
+    for (size_t i = 0; i < text.size(); i += 2) {
+        const int hi = hex_value(text[i]);
+        const int lo = hex_value(text[i + 1]);
+        if (hi < 0 || lo < 0)
+            return false;
+        value.push_back(static_cast<char>((hi << 4) | lo));
+    }
+    return true;
+}
+
+static std::map<std::string, std::string> quick_state_parse_fields(const std::string &text) {
+    std::map<std::string, std::string> fields;
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t end = text.find(';', start);
+        const std::string item = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        const size_t separator = item.find('=');
+        if (separator != std::string::npos)
+            fields[item.substr(0, separator)] = item.substr(separator + 1);
+        if (end == std::string::npos)
+            break;
+        start = end + 1;
+    }
+    return fields;
+}
+
+static bool quick_state_parse_u64_text(const std::string &text, uint64_t &out, const int base = 10) {
+    if (text.empty())
+        return false;
+
+    size_t consumed = 0;
+    try {
+        out = std::stoull(text, &consumed, base);
+    } catch (...) {
+        return false;
+    }
+    return consumed == text.size();
+}
+
+static bool quick_state_parse_u32_text(const std::string &text, uint32_t &out, const int base = 10) {
+    uint64_t parsed = 0;
+    if (!quick_state_parse_u64_text(text, parsed, base) || parsed > std::numeric_limits<uint32_t>::max())
+        return false;
+    out = static_cast<uint32_t>(parsed);
+    return true;
+}
+
+static bool quick_state_parse_i32_text(const std::string &text, int32_t &out) {
+    if (text.empty())
+        return false;
+
+    size_t consumed = 0;
+    long parsed = 0;
+    try {
+        parsed = std::stol(text, &consumed, 10);
+    } catch (...) {
+        return false;
+    }
+    if (consumed != text.size() || parsed < std::numeric_limits<int32_t>::min() || parsed > std::numeric_limits<int32_t>::max())
+        return false;
+    out = static_cast<int32_t>(parsed);
+    return true;
+}
+
+static bool quick_state_parse_bool_text(const std::string &text, bool &out) {
+    if (text == "1" || text == "true") {
+        out = true;
+        return true;
+    }
+    if (text == "0" || text == "false") {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+static bool quick_state_parse_address_text(const std::string &text, Address &out) {
+    uint64_t parsed = 0;
+    if (!quick_state_parse_u64_text(text, parsed, 0) || parsed > std::numeric_limits<Address>::max())
+        return false;
+    out = static_cast<Address>(parsed);
+    return true;
+}
+
+static bool quick_state_parse_indexed_player(const std::map<std::string, std::string> &values, const size_t index, std::map<std::string, std::string> &fields, std::string *detail) {
+    const std::string key = fmt::format("player.{}", index);
+    const auto value = values.find(key);
+    if (value == values.end()) {
+        if (detail)
+            *detail = fmt::format("player {} metadata is missing", index);
+        return false;
+    }
+
+    fields = quick_state_parse_fields(value->second);
+    static constexpr const char *required_fields[] = {
+        "handle",
+        "active",
+        "playing",
+        "queued",
+        "video_ring",
+        "video_size",
+        "audio_ring",
+        "audio_size",
+        "loop",
+        "paused",
+        "last_frame_age_us",
+        "last_timestamp",
+        "last_channels",
+        "last_sample_rate",
+        "last_sample_count",
+        "general_user",
+        "general_allocator",
+        "general_deallocator",
+        "texture_user",
+        "texture_allocator",
+        "texture_deallocator",
+        "file_user",
+        "open_file",
+        "close_file",
+        "read_file",
+        "file_size",
+        "event_user",
+        "event_callback",
+    };
+    for (const char *field : required_fields) {
+        if (!fields.contains(field)) {
+            if (detail)
+                *detail = fmt::format("player {} field '{}' is missing", index, field);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+std::string quick_state_snapshot_text(EmuEnvState &emuenv) {
+    std::ostringstream text;
+    text << "schema=thor.avplayer.v1\n";
+
+    AvPlayerState *state = emuenv.kernel.obj_store.get_if<AvPlayerState>();
+    if (!state) {
+        text << "players=0\n";
+        text << "active_players=0\n";
+        return text.str();
+    }
+
+    const uint64_t now = current_time();
+    std::lock_guard<std::mutex> lock(state->mutex);
+    std::vector<std::pair<SceUID, PlayerPtr>> players;
+    players.reserve(state->players.size());
+    for (const auto &[handle, player] : state->players) {
+        if (player)
+            players.push_back({ handle, player });
+    }
+
+    size_t active_players = 0;
+    for (const auto &[_, player_info] : players) {
+        if (!player_info->player.video_playing.empty())
+            active_players++;
+    }
+
+    text << "players=" << players.size() << "\n";
+    text << "active_players=" << active_players << "\n";
+    for (size_t index = 0; index < players.size(); index++) {
+        const auto &[handle, player_info] = players[index];
+        const PlayerQuickState player_state = player_info->player.export_quick_state();
+        const uint64_t last_frame_age_us = now > player_info->last_frame_time ? now - player_info->last_frame_time : 0;
+
+        text << "player." << index
+             << "=handle=" << handle
+             << ";active=" << !player_state.video_playing.empty()
+             << ";playing=" << quick_state_hex_string(player_state.video_playing)
+             << ";queued=" << player_state.videos_queue.size()
+             << ";video_ring=" << player_info->video_buffer_ring_index
+             << ";video_size=" << player_info->video_buffer_size
+             << ";audio_ring=" << player_info->audio_buffer_ring_index
+             << ";audio_size=" << player_info->audio_buffer_size
+             << ";loop=" << player_info->do_loop
+             << ";paused=" << player_info->paused
+             << ";last_frame_age_us=" << last_frame_age_us
+             << ";last_timestamp=" << player_state.last_timestamp
+             << ";last_channels=" << player_state.last_channels
+             << ";last_sample_rate=" << player_state.last_sample_rate
+             << ";last_sample_count=" << player_state.last_sample_count
+             << ";general_user=" << player_info->memory_allocator.user_data
+             << ";general_allocator=0x" << std::hex << player_info->memory_allocator.general_allocator.address()
+             << ";general_deallocator=0x" << player_info->memory_allocator.general_deallocator.address()
+             << ";texture_user=" << std::dec << player_info->memory_allocator.user_data
+             << ";texture_allocator=0x" << std::hex << player_info->memory_allocator.texture_allocator.address()
+             << ";texture_deallocator=0x" << player_info->memory_allocator.texture_deallocator.address()
+             << ";file_user=" << std::dec << player_info->file_manager.user_data
+             << ";open_file=0x" << std::hex << player_info->file_manager.open_file.address()
+             << ";close_file=0x" << player_info->file_manager.close_file.address()
+             << ";read_file=0x" << player_info->file_manager.read_file.address()
+             << ";file_size=0x" << player_info->file_manager.file_size.address()
+             << ";event_user=" << std::dec << player_info->event_manager.user_data
+             << ";event_callback=0x" << std::hex << player_info->event_manager.event_callback.address()
+             << std::dec
+             << "\n";
+        for (size_t queue_index = 0; queue_index < player_state.videos_queue.size(); queue_index++) {
+            text << "player." << index << ".queue." << queue_index << "=" << quick_state_hex_string(player_state.videos_queue[queue_index]) << "\n";
+        }
+        for (size_t buffer_index = 0; buffer_index < PlayerInfoState::RING_BUFFER_COUNT; buffer_index++) {
+            text << "player." << index << ".video_buffer." << buffer_index << "=0x" << std::hex << player_info->video_buffer[buffer_index].address() << std::dec << "\n";
+            text << "player." << index << ".audio_buffer." << buffer_index << "=0x" << std::hex << player_info->audio_buffer[buffer_index].address() << std::dec << "\n";
+        }
+    }
+
+    return text.str();
+}
+
+bool quick_state_validate_snapshot_values(const std::map<std::string, std::string> &values, size_t *player_count, size_t *active_player_count, std::string *detail) {
+    const auto schema = values.find("schema");
+    if (schema == values.end() || schema->second != "thor.avplayer.v1") {
+        if (detail)
+            *detail = "AVPlayer section schema is invalid";
+        return false;
+    }
+
+    uint64_t parsed_players = 0;
+    uint64_t parsed_active = 0;
+    if (!values.contains("players") || !values.contains("active_players")
+        || !quick_state_parse_u64_text(values.at("players"), parsed_players)
+        || !quick_state_parse_u64_text(values.at("active_players"), parsed_active)
+        || parsed_players > 64
+        || parsed_active > parsed_players) {
+        if (detail)
+            *detail = "AVPlayer section header is invalid";
+        return false;
+    }
+
+    if (player_count)
+        *player_count = static_cast<size_t>(parsed_players);
+    if (active_player_count)
+        *active_player_count = static_cast<size_t>(parsed_active);
+
+    for (size_t index = 0; index < static_cast<size_t>(parsed_players); index++) {
+        std::map<std::string, std::string> fields;
+        if (!quick_state_parse_indexed_player(values, index, fields, detail))
+            return false;
+
+        uint32_t parsed_u32 = 0;
+        uint64_t parsed_u64 = 0;
+        Address parsed_address = 0;
+        bool parsed_bool = false;
+        std::string decoded_path;
+        if (!quick_state_parse_u32_text(fields.at("handle"), parsed_u32) || parsed_u32 == 0
+            || !quick_state_parse_bool_text(fields.at("active"), parsed_bool)
+            || !quick_state_unhex_string(fields.at("playing"), decoded_path)
+            || !quick_state_parse_u64_text(fields.at("queued"), parsed_u64) || parsed_u64 > 64
+            || !quick_state_parse_u32_text(fields.at("video_ring"), parsed_u32)
+            || !quick_state_parse_u32_text(fields.at("video_size"), parsed_u32)
+            || !quick_state_parse_u32_text(fields.at("audio_ring"), parsed_u32)
+            || !quick_state_parse_u32_text(fields.at("audio_size"), parsed_u32)
+            || !quick_state_parse_bool_text(fields.at("loop"), parsed_bool)
+            || !quick_state_parse_bool_text(fields.at("paused"), parsed_bool)
+            || !quick_state_parse_u64_text(fields.at("last_frame_age_us"), parsed_u64)
+            || !quick_state_parse_u64_text(fields.at("last_timestamp"), parsed_u64)
+            || !quick_state_parse_u32_text(fields.at("last_channels"), parsed_u32)
+            || !quick_state_parse_u32_text(fields.at("last_sample_rate"), parsed_u32)
+            || !quick_state_parse_u32_text(fields.at("last_sample_count"), parsed_u32)
+            || !quick_state_parse_u32_text(fields.at("general_user"), parsed_u32)
+            || !quick_state_parse_address_text(fields.at("general_allocator"), parsed_address)
+            || !quick_state_parse_address_text(fields.at("general_deallocator"), parsed_address)
+            || !quick_state_parse_u32_text(fields.at("texture_user"), parsed_u32)
+            || !quick_state_parse_address_text(fields.at("texture_allocator"), parsed_address)
+            || !quick_state_parse_address_text(fields.at("texture_deallocator"), parsed_address)
+            || !quick_state_parse_u32_text(fields.at("file_user"), parsed_u32)
+            || !quick_state_parse_address_text(fields.at("open_file"), parsed_address)
+            || !quick_state_parse_address_text(fields.at("close_file"), parsed_address)
+            || !quick_state_parse_address_text(fields.at("read_file"), parsed_address)
+            || !quick_state_parse_address_text(fields.at("file_size"), parsed_address)
+            || !quick_state_parse_u32_text(fields.at("event_user"), parsed_u32)
+            || !quick_state_parse_address_text(fields.at("event_callback"), parsed_address)) {
+            if (detail)
+                *detail = fmt::format("AVPlayer player {} metadata is invalid", index);
+            return false;
+        }
+
+        uint64_t queued = 0;
+        quick_state_parse_u64_text(fields.at("queued"), queued);
+        for (size_t queue_index = 0; queue_index < static_cast<size_t>(queued); queue_index++) {
+            const std::string queue_key = fmt::format("player.{}.queue.{}", index, queue_index);
+            if (!values.contains(queue_key) || !quick_state_unhex_string(values.at(queue_key), decoded_path)) {
+                if (detail)
+                    *detail = fmt::format("AVPlayer player {} queue {} is invalid", index, queue_index);
+                return false;
+            }
+        }
+        for (size_t buffer_index = 0; buffer_index < PlayerInfoState::RING_BUFFER_COUNT; buffer_index++) {
+            const std::string video_key = fmt::format("player.{}.video_buffer.{}", index, buffer_index);
+            const std::string audio_key = fmt::format("player.{}.audio_buffer.{}", index, buffer_index);
+            if (!values.contains(video_key) || !quick_state_parse_address_text(values.at(video_key), parsed_address)
+                || !values.contains(audio_key) || !quick_state_parse_address_text(values.at(audio_key), parsed_address)) {
+                if (detail)
+                    *detail = fmt::format("AVPlayer player {} ring buffer {} is invalid", index, buffer_index);
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+bool quick_state_restore_snapshot(EmuEnvState &emuenv, const std::map<std::string, std::string> &values, std::string *detail) {
+    size_t player_count = 0;
+    if (!quick_state_validate_snapshot_values(values, &player_count, nullptr, detail))
+        return false;
+
+    AvPlayerState *state = emuenv.kernel.obj_store.get_if<AvPlayerState>();
+    if (!state) {
+        emuenv.kernel.obj_store.create<AvPlayerState>();
+        state = emuenv.kernel.obj_store.get_if<AvPlayerState>();
+    }
+    if (!state) {
+        if (detail)
+            *detail = "AVPlayer state object could not be created";
+        return false;
+    }
+
+    const uint64_t now = current_time();
+    PlayerStates restored_players;
+    for (size_t index = 0; index < player_count; index++) {
+        std::map<std::string, std::string> fields;
+        if (!quick_state_parse_indexed_player(values, index, fields, detail))
+            return false;
+
+        uint32_t handle = 0;
+        uint32_t parsed_u32 = 0;
+        uint64_t parsed_u64 = 0;
+        Address parsed_address = 0;
+        bool parsed_bool = false;
+        std::string decoded_path;
+        if (!quick_state_parse_u32_text(fields.at("handle"), handle) || handle == 0)
+            return false;
+
+        PlayerPtr player_info = std::make_shared<PlayerInfoState>();
+        PlayerQuickState player_state;
+        if (!quick_state_unhex_string(fields.at("playing"), player_state.video_playing))
+            return false;
+        if (!quick_state_parse_u64_text(fields.at("queued"), parsed_u64) || parsed_u64 > 64)
+            return false;
+        player_state.videos_queue.reserve(static_cast<size_t>(parsed_u64));
+        for (size_t queue_index = 0; queue_index < static_cast<size_t>(parsed_u64); queue_index++) {
+            const std::string queue_key = fmt::format("player.{}.queue.{}", index, queue_index);
+            if (!quick_state_unhex_string(values.at(queue_key), decoded_path))
+                return false;
+            player_state.videos_queue.push_back(decoded_path);
+        }
+
+        if (!quick_state_parse_u32_text(fields.at("video_ring"), player_info->video_buffer_ring_index)
+            || !quick_state_parse_u32_text(fields.at("video_size"), player_info->video_buffer_size)
+            || !quick_state_parse_u32_text(fields.at("audio_ring"), player_info->audio_buffer_ring_index)
+            || !quick_state_parse_u32_text(fields.at("audio_size"), player_info->audio_buffer_size)
+            || !quick_state_parse_bool_text(fields.at("loop"), player_info->do_loop)
+            || !quick_state_parse_bool_text(fields.at("paused"), player_info->paused)
+            || !quick_state_parse_u64_text(fields.at("last_frame_age_us"), parsed_u64)
+            || !quick_state_parse_u64_text(fields.at("last_timestamp"), player_state.last_timestamp)
+            || !quick_state_parse_u32_text(fields.at("last_channels"), player_state.last_channels)
+            || !quick_state_parse_u32_text(fields.at("last_sample_rate"), player_state.last_sample_rate)
+            || !quick_state_parse_u32_text(fields.at("last_sample_count"), player_state.last_sample_count)) {
+            if (detail)
+                *detail = fmt::format("AVPlayer player {} scalar restore fields are invalid", index);
+            return false;
+        }
+        player_info->last_frame_time = now > parsed_u64 ? now - parsed_u64 : now;
+
+        if (!quick_state_parse_u32_text(fields.at("general_user"), player_info->memory_allocator.user_data)
+            || !quick_state_parse_address_text(fields.at("general_allocator"), parsed_address)) {
+            return false;
+        }
+        player_info->memory_allocator.general_allocator = Ptr<void>(parsed_address);
+        if (!quick_state_parse_address_text(fields.at("general_deallocator"), parsed_address)
+            || !quick_state_parse_u32_text(fields.at("texture_user"), parsed_u32)) {
+            return false;
+        }
+        player_info->memory_allocator.general_deallocator = Ptr<void>(parsed_address);
+        player_info->memory_allocator.user_data = parsed_u32;
+        if (!quick_state_parse_address_text(fields.at("texture_allocator"), parsed_address))
+            return false;
+        player_info->memory_allocator.texture_allocator = Ptr<void>(parsed_address);
+        if (!quick_state_parse_address_text(fields.at("texture_deallocator"), parsed_address)
+            || !quick_state_parse_u32_text(fields.at("file_user"), player_info->file_manager.user_data)) {
+            return false;
+        }
+        player_info->memory_allocator.texture_deallocator = Ptr<void>(parsed_address);
+        if (!quick_state_parse_address_text(fields.at("open_file"), parsed_address))
+            return false;
+        player_info->file_manager.open_file = Ptr<void>(parsed_address);
+        if (!quick_state_parse_address_text(fields.at("close_file"), parsed_address))
+            return false;
+        player_info->file_manager.close_file = Ptr<void>(parsed_address);
+        if (!quick_state_parse_address_text(fields.at("read_file"), parsed_address))
+            return false;
+        player_info->file_manager.read_file = Ptr<void>(parsed_address);
+        if (!quick_state_parse_address_text(fields.at("file_size"), parsed_address)
+            || !quick_state_parse_u32_text(fields.at("event_user"), player_info->event_manager.user_data)) {
+            return false;
+        }
+        player_info->file_manager.file_size = Ptr<void>(parsed_address);
+        if (!quick_state_parse_address_text(fields.at("event_callback"), parsed_address))
+            return false;
+        player_info->event_manager.event_callback = Ptr<void>(parsed_address);
+
+        for (size_t buffer_index = 0; buffer_index < PlayerInfoState::RING_BUFFER_COUNT; buffer_index++) {
+            const std::string video_key = fmt::format("player.{}.video_buffer.{}", index, buffer_index);
+            const std::string audio_key = fmt::format("player.{}.audio_buffer.{}", index, buffer_index);
+            if (!quick_state_parse_address_text(values.at(video_key), parsed_address))
+                return false;
+            player_info->video_buffer[buffer_index] = Ptr<uint8_t>(parsed_address);
+            if (!quick_state_parse_address_text(values.at(audio_key), parsed_address))
+                return false;
+            player_info->audio_buffer[buffer_index] = Ptr<uint8_t>(parsed_address);
+        }
+
+        if (!player_info->player.restore_quick_state(player_state, detail))
+            return false;
+
+        restored_players.emplace(static_cast<SceUID>(handle), std::move(player_info));
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->players.swap(restored_players);
+    }
+    return true;
+}
+
+} // namespace sce_avplayer
 
 static Ptr<uint8_t> get_buffer(const PlayerPtr &player, MediaType media_type,
     MemState &mem, uint32_t size, bool new_frame = true) {

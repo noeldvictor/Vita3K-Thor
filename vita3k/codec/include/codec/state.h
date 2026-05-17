@@ -21,6 +21,7 @@
 #include <mutex>
 #include <queue>
 #include <string>
+#include <vector>
 
 struct AVFrame;
 struct AVPacket;
@@ -244,6 +245,17 @@ struct AacDecoderState : public DecoderState {
     ~AacDecoderState() override;
 };
 
+struct PlayerQuickState {
+    std::string video_playing;
+    std::vector<std::string> videos_queue;
+    uint64_t time_of_last_frame = 0;
+    uint64_t framerate_microseconds = 0;
+    uint64_t last_timestamp = 0;
+    uint32_t last_channels = 0;
+    uint32_t last_sample_rate = 0;
+    uint32_t last_sample_count = 0;
+};
+
 struct PlayerState {
     std::string video_playing;
     std::queue<std::string> videos_queue;
@@ -270,7 +282,7 @@ struct PlayerState {
 
     void pop_video();
     void free_video();
-    void switch_video(const std::string &path);
+    bool switch_video(const std::string &path);
 
     bool next_packet(int32_t stream_id);
 
@@ -278,6 +290,8 @@ struct PlayerState {
     std::vector<uint8_t> receive_video();
 
     void queue(const std::string &path);
+    PlayerQuickState export_quick_state() const;
+    bool restore_quick_state(const PlayerQuickState &state, std::string *detail = nullptr);
 
     ~PlayerState();
 };

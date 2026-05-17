@@ -992,6 +992,7 @@ static void display_entry_thread(EmuEnvState &emuenv) {
     }
 
     while (true) {
+        const uint64_t restore_generation = emuenv.gxm.display_queue_restore_generation.load(std::memory_order_acquire);
         auto display_callback = display_queue.top();
         if (!display_callback)
             break;
@@ -1008,6 +1009,8 @@ static void display_entry_thread(EmuEnvState &emuenv) {
         display_queue.pop();
         complete_display_queue_waiters(emuenv);
         pump_deferred_display_queue_add_entries(emuenv);
+        if (restore_generation != emuenv.gxm.display_queue_restore_generation.load(std::memory_order_acquire))
+            continue;
 
         // specify whether the call to SceDisplaySetFrameBuf is expected to do something
         emuenv.display.predicting = display_callback->frame_predicted;
@@ -1015,6 +1018,8 @@ static void display_entry_thread(EmuEnvState &emuenv) {
 
         // Now run callback
         display_thread->run_guest_function(callback_address, display_callback->data);
+        if (restore_generation != emuenv.gxm.display_queue_restore_generation.load(std::memory_order_acquire))
+            continue;
 
         // Notifies the renderer of the completion of the callback for the display_entry.
         // The last_display of the entry, when pushed into the queue, is guaranteed to be timestamp_ahead + 1 at the time of the call.

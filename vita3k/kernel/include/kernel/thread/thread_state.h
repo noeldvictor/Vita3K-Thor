@@ -128,6 +128,7 @@ struct ThreadState {
     void resume_after_pause_if_needed(bool saved_running_before_pause);
     bool has_deferred_import_wait();
     void set_active_import_detail(uint32_t detail);
+    void release_memory_blocks_for_quick_state();
     void restore_memory_blocks_for_quick_state(Address stack_address, int stack_size, Address tls_address);
     std::string quick_state_debug_summary() const;
     std::string log_stack_traceback() const;

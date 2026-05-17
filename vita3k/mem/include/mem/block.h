@@ -69,6 +69,13 @@ public:
         return addr;
     }
 
+    Address release() {
+        const Address released_addr = addr;
+        addr = 0;
+        deleter = nullptr;
+        return released_addr;
+    }
+
     template <class T>
     Ptr<T> get_ptr() const {
         return Ptr<T>(addr);

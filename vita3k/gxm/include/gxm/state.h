@@ -21,6 +21,7 @@
 #include <mem/ptr.h>
 #include <threads/queue.h>
 
+#include <atomic>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -63,6 +64,7 @@ struct GxmState {
 
     Queue<DisplayCallback> display_queue;
     SceUID display_queue_thread;
+    std::atomic<uint64_t> display_queue_restore_generation{ 1 };
     std::mutex display_queue_waiters_mutex;
     std::vector<SceUID> display_queue_waiters;
     std::deque<PendingDisplayCallback> pending_display_callbacks;

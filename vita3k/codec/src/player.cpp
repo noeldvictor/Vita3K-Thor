@@ -27,8 +27,16 @@ extern "C" {
 
 #include <cassert>
 
+#include <fmt/format.h>
+
 uint64_t PlayerState::get_framerate_microseconds() {
+    if (!format || video_stream_id < 0 || !format->streams[video_stream_id])
+        return 16667;
+
     AVRational rational = format->streams[video_stream_id]->avg_frame_rate;
+    if (rational.num == 0)
+        return 16667;
+
     return 1000000ull * rational.den / rational.num;
 }
 
@@ -40,7 +48,11 @@ DecoderSize PlayerState::get_size() {
 }
 
 void PlayerState::pop_video() {
-    switch_video(videos_queue.front());
+    if (videos_queue.empty())
+        return;
+
+    if (!switch_video(videos_queue.front()))
+        LOG_WARN("Failed to switch queued video '{}'.", videos_queue.front());
     videos_queue.pop();
 }
 
@@ -67,18 +79,30 @@ void PlayerState::free_video() {
     }
 
     video_playing.clear();
+    video_stream_id = -1;
+    audio_stream_id = -1;
+    time_of_last_frame = 0;
+    framerate_microseconds = 0;
 }
 
-void PlayerState::switch_video(const std::string &path) {
+bool PlayerState::switch_video(const std::string &path) {
     free_video();
     video_playing = path;
 
     int error = avformat_open_input(&format, path.c_str(), nullptr, nullptr);
-    assert(error == 0);
+    if (error != 0) {
+        LOG_WARN("Failed to open video '{}': {}.", path, codec_error_name(error));
+        video_playing.clear();
+        return false;
+    }
 
     // Load stream info.
     error = avformat_find_stream_info(format, nullptr);
-    assert(error >= 0);
+    if (error < 0) {
+        LOG_WARN("Failed to read stream info for video '{}': {}.", path, codec_error_name(error));
+        free_video();
+        return false;
+    }
 
     video_stream_id = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     audio_stream_id = av_find_best_stream(format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
@@ -98,6 +122,8 @@ void PlayerState::switch_video(const std::string &path) {
         avcodec_parameters_to_context(audio_context, audio_stream->codecpar);
         avcodec_open2(audio_context, audio_codec, nullptr);
     }
+
+    return true;
 }
 
 bool PlayerState::next_packet(int32_t stream_id) {
@@ -157,7 +183,8 @@ std::vector<int16_t> PlayerState::receive_audio() {
                 break;
             } else {
                 // Play the next video (if there is any).
-                switch_video(videos_queue.front());
+                if (!switch_video(videos_queue.front()))
+                    LOG_WARN("Failed to switch queued audio/video source '{}'.", videos_queue.front());
                 videos_queue.pop();
                 continue;
             }
@@ -210,13 +237,15 @@ std::vector<uint8_t> PlayerState::receive_video() {
                 break;
             } else {
                 // Play the next video (if there is any).
-                switch_video(videos_queue.front());
+                if (!switch_video(videos_queue.front()))
+                    LOG_WARN("Failed to switch queued video source '{}'.", videos_queue.front());
                 videos_queue.pop();
                 continue;
             }
         }
 
-        last_timestamp = frame->best_effort_timestamp;
+        if (frame->best_effort_timestamp != AV_NOPTS_VALUE && frame->best_effort_timestamp >= 0)
+            last_timestamp = static_cast<uint64_t>(frame->best_effort_timestamp);
 
         data.resize(H264DecoderState::buffer_size(
             { { static_cast<uint32_t>(video_context->width), static_cast<uint32_t>(video_context->height) } }));
@@ -232,13 +261,79 @@ std::vector<uint8_t> PlayerState::receive_video() {
 void PlayerState::queue(const std::string &path) {
     if (fs::exists(path)) {
         LOG_INFO("Queued video: '{}'.", path);
-        if (video_playing.empty())
-            switch_video(path);
-        else
+        if (video_playing.empty()) {
+            if (!switch_video(path))
+                LOG_WARN("Failed to start queued video '{}'.", path);
+        } else {
             videos_queue.push(path);
+        }
     } else {
         LOG_INFO("Cannot find video: {}", path);
     }
+}
+
+PlayerQuickState PlayerState::export_quick_state() const {
+    PlayerQuickState state;
+    state.video_playing = video_playing;
+    std::queue<std::string> queued = videos_queue;
+    while (!queued.empty()) {
+        state.videos_queue.push_back(queued.front());
+        queued.pop();
+    }
+    state.time_of_last_frame = time_of_last_frame;
+    state.framerate_microseconds = framerate_microseconds;
+    state.last_timestamp = last_timestamp;
+    state.last_channels = last_channels;
+    state.last_sample_rate = last_sample_rate;
+    state.last_sample_count = last_sample_count;
+    return state;
+}
+
+bool PlayerState::restore_quick_state(const PlayerQuickState &state, std::string *detail) {
+    free_video();
+    videos_queue = {};
+    for (const std::string &queued : state.videos_queue)
+        videos_queue.push(queued);
+
+    time_of_last_frame = state.time_of_last_frame;
+    framerate_microseconds = state.framerate_microseconds;
+    last_timestamp = state.last_timestamp;
+    last_channels = state.last_channels;
+    last_sample_rate = state.last_sample_rate;
+    last_sample_count = state.last_sample_count;
+
+    if (state.video_playing.empty())
+        return true;
+
+    if (!fs::exists(state.video_playing)) {
+        if (detail)
+            *detail = fmt::format("video '{}' is missing", state.video_playing);
+        return false;
+    }
+
+    if (!switch_video(state.video_playing)) {
+        if (detail)
+            *detail = fmt::format("video '{}' could not be reopened", state.video_playing);
+        return false;
+    }
+
+    if (state.last_timestamp == 0 || video_stream_id < 0)
+        return true;
+
+    const int seek_error = av_seek_frame(format, video_stream_id, static_cast<int64_t>(state.last_timestamp), AVSEEK_FLAG_BACKWARD);
+    if (seek_error < 0) {
+        if (detail)
+            *detail = fmt::format("video '{}' could not seek to timestamp {}: {}", state.video_playing, state.last_timestamp, codec_error_name(seek_error));
+        return false;
+    }
+
+    if (video_context)
+        avcodec_flush_buffers(video_context);
+    if (audio_context)
+        avcodec_flush_buffers(audio_context);
+
+    last_timestamp = state.last_timestamp;
+    return true;
 }
 
 PlayerState::~PlayerState() {

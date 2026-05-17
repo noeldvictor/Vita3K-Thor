@@ -554,16 +554,34 @@ void ThreadState::clear_deferred_import_wait_for_restore() {
     active_import_detail.store(0, std::memory_order_relaxed);
 }
 
+void ThreadState::release_memory_blocks_for_quick_state() {
+    std::lock_guard<std::mutex> lock(mutex);
+    stack.release();
+    tls.release();
+}
+
 void ThreadState::restore_memory_blocks_for_quick_state(const Address stack_address, const int saved_stack_size, const Address tls_address) {
     std::lock_guard<std::mutex> lock(mutex);
-    stack = Block(stack_address, [this](Address address) {
-        ::free(mem, address);
-    });
+    stack.release();
+    tls.release();
+
+    if (stack_address) {
+        stack = Block(stack_address, [this](Address address) {
+            ::free(mem, address);
+        });
+    } else {
+        stack = nullptr;
+    }
     stack_size = saved_stack_size;
-    tls = Block(tls_address, [this](Address address) {
-        ::free(mem, address);
-    });
-    if (cpu)
+
+    if (tls_address) {
+        tls = Block(tls_address, [this](Address address) {
+            ::free(mem, address);
+        });
+    } else {
+        tls = nullptr;
+    }
+    if (cpu && tls_address)
         write_tpidruro(*cpu, tls_address + 0x800);
 }
 

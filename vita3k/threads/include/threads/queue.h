@@ -120,9 +120,14 @@ public:
     }
 
     void reset() {
-        std::queue<T> empty;
-        std::swap(queue_, empty);
-        aborted = false;
+        {
+            std::unique_lock<std::mutex> mlock(mutex_);
+            std::queue<T> empty;
+            std::swap(queue_, empty);
+            aborted = false;
+        }
+        condempty_.notify_all();
+        cond_.notify_all();
     }
 
     void wait_empty() {
