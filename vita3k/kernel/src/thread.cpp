@@ -27,9 +27,11 @@
 #include <util/log.h>
 
 #include <cassert>
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <sstream>
+#include <thread>
 
 void ThreadSignal::wait() {
     std::unique_lock<std::mutex> lock(mutex);
@@ -176,9 +178,7 @@ void ThreadState::exit(SceInt32 status) {
     returned_value = static_cast<uint32_t>(status);
 }
 
-void ThreadState::exit_delete(bool exit) {
-    std::lock_guard<std::mutex> lock(mutex);
-
+void ThreadState::exit_delete_locked(bool exit) {
     run_end_callback = exit;
     deferred_import_wait = false;
     deferred_import_return = false;
@@ -201,6 +201,43 @@ void ThreadState::exit_delete(bool exit) {
 
     // Wake if thread waiting on sceKernelWaitSignal
     signal.send();
+}
+
+void ThreadState::exit_delete(bool exit) {
+    std::lock_guard<std::mutex> lock(mutex);
+    exit_delete_locked(exit);
+}
+
+bool ThreadState::try_exit_delete_for_quick_state(const std::chrono::milliseconds timeout) {
+    LOG_DEBUG("Quickstate requesting thread exit for {} ({}).", id, name);
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::unique_lock<std::mutex> lock(mutex, std::try_to_lock);
+        if (lock.owns_lock()) {
+            LOG_DEBUG("Quickstate acquired thread exit mutex for {} ({}).", id, name);
+            run_end_callback = false;
+            deferred_import_wait = false;
+            deferred_import_return = false;
+            deferred_resume_after_pause = false;
+            to_do = ThreadToDo::remove;
+            something_to_do.notify_one();
+            LOG_DEBUG("Quickstate notified thread exit for {} ({}).", id, name);
+
+            if (status == ThreadStatus::wait) {
+                status = ThreadStatus::run;
+                status_cond.notify_all();
+            }
+
+            signal.send();
+            LOG_DEBUG("Quickstate signaled thread exit for {} ({}).", id, name);
+            return true;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    LOG_WARN("Quickstate could not acquire thread exit mutex for {} ({}).", id, name);
+    return false;
 }
 
 bool ThreadState::run_loop() {
@@ -556,6 +593,11 @@ void ThreadState::clear_deferred_import_wait_for_restore() {
 
 void ThreadState::release_memory_blocks_for_quick_state() {
     std::lock_guard<std::mutex> lock(mutex);
+    stack.release();
+    tls.release();
+}
+
+void ThreadState::release_memory_blocks_for_removed_quick_state_thread() {
     stack.release();
     tls.release();
 }

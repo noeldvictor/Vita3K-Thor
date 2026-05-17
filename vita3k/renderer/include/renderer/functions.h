@@ -59,6 +59,8 @@ bool is_cmd_ready(MemState &mem, CommandList &command_list);
 void process_batch(State &state, MemState &mem, Config &config, CommandList &command_list);
 void process_batches(State &state, const FeatureState &features, MemState &mem, Config &config);
 bool init(SDL_Window *window, std::unique_ptr<State> &state, Backend backend, const Config &config, const Root &root_paths);
+bool map_memory_now(State &state, MemState &mem, Ptr<void> address, uint32_t size);
+bool unmap_memory_now(State &state, MemState &mem, Ptr<void> address);
 
 void set_depth_bias(State &state, Context *ctx, bool is_front, int factor, int units);
 void set_depth_func(State &state, Context *ctx, bool is_front, SceGxmDepthFunc depth_func);

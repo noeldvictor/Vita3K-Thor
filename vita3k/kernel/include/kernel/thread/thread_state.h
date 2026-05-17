@@ -25,6 +25,7 @@
 
 #include <condition_variable>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -101,6 +102,7 @@ struct ThreadState {
     int start(SceSize arglen, const Ptr<void> argp, bool run_entry_callback = false);
     void exit(SceInt32 status);
     void exit_delete(bool exit = true);
+    bool try_exit_delete_for_quick_state(std::chrono::milliseconds timeout);
 
     void update_status(ThreadStatus status, std::optional<ThreadStatus> expected = std::nullopt);
     Address stack_top() const;
@@ -129,6 +131,7 @@ struct ThreadState {
     bool has_deferred_import_wait();
     void set_active_import_detail(uint32_t detail);
     void release_memory_blocks_for_quick_state();
+    void release_memory_blocks_for_removed_quick_state_thread();
     void restore_memory_blocks_for_quick_state(Address stack_address, int stack_size, Address tls_address);
     std::string quick_state_debug_summary() const;
     std::string log_stack_traceback() const;
@@ -136,6 +139,7 @@ struct ThreadState {
 private:
     void push_arguments(const std::vector<uint32_t> &args);
     void dispatch_abort(CPUState &cpu);
+    void exit_delete_locked(bool exit);
 
     KernelState &kernel;
 

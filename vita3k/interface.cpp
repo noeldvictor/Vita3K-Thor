@@ -43,6 +43,7 @@
 #include <packages/license.h>
 #include <packages/pkg.h>
 #include <packages/sfo.h>
+#include <renderer/functions.h>
 #include <renderer/state.h>
 #include <renderer/texture_cache.h>
 
@@ -999,7 +1000,7 @@ constexpr uint32_t QUICKSTATE_MAX_SECTION_COUNT = 64;
 constexpr uint64_t QUICKSTATE_MAX_SECTION_BYTES = 16 * 1024 * 1024;
 constexpr uint32_t QUICKSTATE_COMPRESSION_NONE = 0;
 constexpr uint32_t QUICKSTATE_COMPRESSION_MINIZ = 1;
-constexpr auto QUICKSTATE_PAUSE_TIMEOUT = std::chrono::milliseconds(12000);
+constexpr auto QUICKSTATE_PAUSE_TIMEOUT = std::chrono::milliseconds(45000);
 constexpr auto QUICKSTATE_MUTEX_LOCK_TIMEOUT = std::chrono::milliseconds(500);
 constexpr auto QUICKSTATE_EXTRA_THREAD_EXIT_TIMEOUT = std::chrono::milliseconds(12000);
 
@@ -1350,6 +1351,26 @@ struct QuickStateDisplaySnapshot {
     uint32_t vblank_callback_count = 0;
 };
 
+struct QuickStateGxmMemoryMapSnapshot {
+    Address offset = 0;
+    uint32_t size = 0;
+    uint32_t perm = 0;
+};
+
+struct QuickStateGxmSnapshot {
+    bool valid = false;
+    uint32_t flags = 0;
+    uint32_t display_queue_max_pending_count = 0;
+    Address display_queue_callback = 0;
+    uint32_t display_queue_callback_data_size = 0;
+    uint32_t parameter_buffer_size = 0;
+    SceUID display_queue_thread = 0;
+    uint32_t global_timestamp = 1;
+    uint32_t last_display_global = 0;
+    Address notification_region = 0;
+    std::vector<QuickStateGxmMemoryMapSnapshot> memory_maps;
+};
+
 struct QuickStateAudioPortSnapshot {
     int32_t id = 0;
     int32_t type = 0;
@@ -1399,6 +1420,8 @@ struct QuickStateRestoreManifest {
     bool sync_wait_queue_metadata_complete = false;
     bool display_state_restorable = false;
     bool display_vblank_waits_restorable = false;
+    bool gxm_state_restorable = false;
+    bool gxm_program_host_state_restorable = false;
     bool audio_state_restorable = false;
     bool avplayer_state_restorable = false;
     bool ngs_state_restorable = false;
@@ -1410,6 +1433,7 @@ struct QuickStateRestoreManifest {
     size_t io_memory_file_handles = 0;
     size_t display_wait_entries = 0;
     size_t display_callback_entries = 0;
+    size_t gxm_memory_maps = 0;
     size_t avplayer_players = 0;
     size_t avplayer_active_players = 0;
     QuickStateKernelObjectCounts kernel;
@@ -2220,8 +2244,13 @@ static bool preflight_quick_state_restore_threads(EmuEnvState &emuenv, const Qui
                     colliding_thread->name,
                     thread_context.id,
                     thread_context.name);
-                colliding_thread->release_memory_blocks_for_quick_state();
-                colliding_thread->exit_delete(false);
+                if (!colliding_thread->try_exit_delete_for_quick_state(QUICKSTATE_EXTRA_THREAD_EXIT_TIMEOUT)) {
+                    LOG_WARN("Refused quickstate restore for {} because colliding current thread {} ({}) stayed busy while requesting exit.",
+                        slot.title_id,
+                        colliding_thread->id,
+                        colliding_thread->name);
+                    return false;
+                }
                 if (!wait_for_quick_state_extra_threads_removed(emuenv.kernel, { thread_context.id })) {
                     LOG_WARN("Refused quickstate restore for {} because colliding current thread {} ({}) did not exit.",
                         slot.title_id,
@@ -2229,6 +2258,7 @@ static bool preflight_quick_state_restore_threads(EmuEnvState &emuenv, const Qui
                         colliding_thread->name);
                     return false;
                 }
+                colliding_thread->release_memory_blocks_for_removed_quick_state_thread();
             }
             thread = emuenv.kernel.create_thread_for_restore(
                 emuenv.mem,
@@ -2307,31 +2337,33 @@ static bool wait_for_quick_state_extra_threads_removed(KernelState &kernel, cons
     if (thread_ids.empty())
         return true;
 
+    LOG_DEBUG("Waiting for {} quickstate extra thread(s) to exit.", thread_ids.size());
     const auto deadline = std::chrono::steady_clock::now() + QUICKSTATE_EXTRA_THREAD_EXIT_TIMEOUT;
     while (std::chrono::steady_clock::now() < deadline) {
         bool all_removed = true;
-        ThreadStatePtr thread_to_stop;
         {
-            const std::lock_guard<std::mutex> kernel_lock(kernel.mutex);
-            for (const SceUID thread_id : thread_ids) {
-                const auto thread = kernel.threads.find(thread_id);
-                if (thread == kernel.threads.end())
-                    continue;
-
+            std::unique_lock<std::mutex> kernel_lock(kernel.mutex, std::try_to_lock);
+            if (!kernel_lock.owns_lock()) {
                 all_removed = false;
-                const std::lock_guard<std::mutex> thread_lock(thread->second->mutex);
-                if (thread->second->needs_quick_state_stop_pulse())
-                    thread_to_stop = thread->second;
-                break;
+            } else {
+                for (const SceUID thread_id : thread_ids) {
+                    const auto thread = kernel.threads.find(thread_id);
+                    if (thread == kernel.threads.end())
+                        continue;
+
+                    all_removed = false;
+                    break;
+                }
             }
         }
-        if (all_removed)
+        if (all_removed) {
+            LOG_DEBUG("Quickstate extra thread cleanup observed all requested thread exits.");
             return true;
-        if (thread_to_stop && thread_to_stop->cpu)
-            stop(*thread_to_stop->cpu);
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
+    LOG_WARN("Quickstate extra thread cleanup timed out waiting for {} thread(s).", thread_ids.size());
     return false;
 }
 
@@ -2345,15 +2377,26 @@ static bool remove_quick_state_extra_restore_threads(KernelState &kernel, const 
             continue;
         thread_ids.insert(thread->id);
         LOG_INFO("Removing extra current thread {} ({}) before durable quickstate restore for {}.",
-            thread->id,
-            thread->name,
-            title_id);
-        thread->release_memory_blocks_for_quick_state();
-        thread->exit_delete(false);
+        thread->id,
+        thread->name,
+        title_id);
+        if (!thread->try_exit_delete_for_quick_state(QUICKSTATE_EXTRA_THREAD_EXIT_TIMEOUT)) {
+            quick_state_last_restore_detail = fmt::format("extra current restore thread {} ({}) stayed busy while requesting exit", thread->id, thread->name);
+            LOG_WARN("Refused quickstate restore for {} because {}.", title_id, quick_state_last_restore_detail);
+            return false;
+        }
     }
 
-    if (wait_for_quick_state_extra_threads_removed(kernel, thread_ids))
+    if (wait_for_quick_state_extra_threads_removed(kernel, thread_ids)) {
+        for (const auto &thread : extra_threads) {
+            if (thread) {
+                LOG_DEBUG("Releasing quickstate memory block ownership for removed extra thread {} ({}).", thread->id, thread->name);
+                thread->release_memory_blocks_for_removed_quick_state_thread();
+            }
+        }
+        LOG_INFO("Finished quickstate extra thread cleanup for {} ({} removed thread(s)).", title_id, extra_threads.size());
         return true;
+    }
 
     quick_state_last_restore_detail = fmt::format("extra current restore threads did not exit: {}", quick_state_thread_list_detail(extra_threads));
     LOG_WARN("Refused quickstate restore for {} because {}.", title_id, quick_state_last_restore_detail);
@@ -3600,6 +3643,107 @@ static bool quick_state_parse_display_snapshot_section(const QuickStateSlot &slo
     return true;
 }
 
+static bool quick_state_parse_gxm_memory_map_key(const std::string &key, uint32_t &index) {
+    constexpr std::string_view prefix = "memory_map.";
+    if (key.rfind(prefix, 0) != 0 || key.size() <= prefix.size())
+        return false;
+    return quick_state_parse_u32_text(key.substr(prefix.size()), index);
+}
+
+static bool quick_state_parse_gxm_memory_map_snapshot(const std::string &text, QuickStateGxmMemoryMapSnapshot &map) {
+    const auto fields = quick_state_parse_semicolon_fields(text);
+    if (!fields.contains("offset")
+        || !fields.contains("size")
+        || !fields.contains("perm")) {
+        return false;
+    }
+
+    uint64_t parsed_address = 0;
+    if (!quick_state_parse_u64_text(fields.at("offset"), parsed_address, 0)
+        || parsed_address > std::numeric_limits<Address>::max()
+        || !quick_state_parse_u32_text(fields.at("size"), map.size)
+        || !quick_state_parse_u32_text(fields.at("perm"), map.perm)) {
+        return false;
+    }
+
+    map.offset = static_cast<Address>(parsed_address);
+    const uint64_t end = static_cast<uint64_t>(map.offset) + map.size;
+    return map.offset % KiB(4) == 0
+        && map.size % KiB(4) == 0
+        && end <= static_cast<uint64_t>(std::numeric_limits<Address>::max()) + 1;
+}
+
+static bool quick_state_parse_gxm_snapshot_section(const QuickStateSlot &slot, QuickStateGxmSnapshot &snapshot) {
+    snapshot = {};
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.gxm");
+    if (!section || section->version != 1)
+        return false;
+
+    const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    if (schema == values.end() || schema->second != "thor.gxm.v1")
+        return false;
+
+    uint64_t parsed_address = 0;
+    size_t memory_map_count = 0;
+    int32_t parsed_thread_id = 0;
+    if (!quick_state_parse_u32(values, "flags", snapshot.flags)
+        || !quick_state_parse_u32(values, "display_queue_max_pending_count", snapshot.display_queue_max_pending_count)
+        || !values.contains("display_queue_callback")
+        || !quick_state_parse_u64_text(values.at("display_queue_callback"), parsed_address, 0)
+        || parsed_address > std::numeric_limits<Address>::max()
+        || !quick_state_parse_u32(values, "display_queue_callback_data_size", snapshot.display_queue_callback_data_size)
+        || !quick_state_parse_u32(values, "parameter_buffer_size", snapshot.parameter_buffer_size)
+        || !values.contains("display_queue_thread")
+        || !quick_state_parse_i32_text(values.at("display_queue_thread"), parsed_thread_id)
+        || parsed_thread_id < 0
+        || !quick_state_parse_u32(values, "global_timestamp", snapshot.global_timestamp)
+        || !quick_state_parse_u32(values, "last_display_global", snapshot.last_display_global)) {
+        return false;
+    }
+    snapshot.display_queue_callback = static_cast<Address>(parsed_address);
+    snapshot.display_queue_thread = static_cast<SceUID>(parsed_thread_id);
+
+    if (!values.contains("notification_region")
+        || !quick_state_parse_u64_text(values.at("notification_region"), parsed_address, 0)
+        || parsed_address > std::numeric_limits<Address>::max()
+        || !quick_state_parse_size(values, "memory_maps", memory_map_count)) {
+        return false;
+    }
+    snapshot.notification_region = static_cast<Address>(parsed_address);
+
+    snapshot.memory_maps.resize(memory_map_count);
+    std::vector<bool> seen(memory_map_count, false);
+    for (const auto &[key, value] : values) {
+        uint32_t index = 0;
+        if (!quick_state_parse_gxm_memory_map_key(key, index))
+            continue;
+        if (index >= memory_map_count)
+            return false;
+
+        QuickStateGxmMemoryMapSnapshot map;
+        if (!quick_state_parse_gxm_memory_map_snapshot(value, map))
+            return false;
+        snapshot.memory_maps[index] = map;
+        seen[index] = true;
+    }
+    if (std::any_of(seen.begin(), seen.end(), [](const bool value) { return !value; }))
+        return false;
+
+    snapshot.valid = true;
+    return true;
+}
+
+static bool quick_state_parse_gxm_program_host_snapshot_header(const QuickStateSlot &slot) {
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.gxm.program-host");
+    if (!section)
+        return false;
+
+    const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    return schema != values.end() && schema->second == "thor.gxm.program-host.v1";
+}
+
 static bool quick_state_parse_audio_port_snapshot(const std::string &key, const std::string &value, QuickStateAudioPortSnapshot &port) {
     SceUID port_id = 0;
     if (!quick_state_parse_uid_from_key(key, "port.", ".type", port_id))
@@ -3856,6 +4000,11 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         manifest.display_callback_entries = display_snapshot.vblank_callback_count;
         manifest.display_vblank_waits_restorable = display_snapshot.vblank_waits_complete;
     }
+    QuickStateGxmSnapshot gxm_snapshot;
+    manifest.gxm_state_restorable = quick_state_parse_gxm_snapshot_section(slot, gxm_snapshot);
+    if (manifest.gxm_state_restorable)
+        manifest.gxm_memory_maps = gxm_snapshot.memory_maps.size();
+    manifest.gxm_program_host_state_restorable = quick_state_parse_gxm_program_host_snapshot_header(slot);
     QuickStateAudioSnapshot audio_snapshot;
     manifest.audio_state_restorable = quick_state_parse_audio_snapshot_section(slot, audio_snapshot);
     QuickStateAvPlayerSnapshot avplayer_snapshot;
@@ -3906,6 +4055,10 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     }
     if (!manifest.audio_state_restorable)
         manifest.missing_serializers.push_back("audio-state");
+    if (!manifest.gxm_state_restorable)
+        manifest.missing_serializers.push_back("gxm-state");
+    if (!manifest.gxm_program_host_state_restorable)
+        manifest.missing_serializers.push_back("gxm-program-host-state");
     if (!manifest.avplayer_state_restorable && manifest.avplayer_threads > 0)
         manifest.missing_serializers.push_back("avplayer-movie-state");
     if (!manifest.ngs_state_restorable && quick_state_needs_ngs_durable_restore(emuenv, slot))
@@ -3926,6 +4079,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         && manifest.sync_primitives_restorable
         && manifest.io_file_positions_restorable
         && manifest.display_state_restorable
+        && manifest.gxm_state_restorable
+        && manifest.gxm_program_host_state_restorable
         && manifest.audio_state_restorable
         && manifest.avplayer_state_restorable;
     const bool durable_restore_ready = manifest.missing_serializers.empty() && !slot.restore_requires_same_pause;
@@ -4909,6 +5064,8 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         "thor.kernel.objects",
         "thor.io.vfs",
         "thor.display",
+        "thor.gxm",
+        "thor.gxm.program-host",
         "thor.audio",
         "thor.avplayer",
         "thor.ngs",
@@ -5248,6 +5405,39 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
             text << "vblank_callbacks=" << emuenv.display.vblank_callbacks.size() << "\n";
         }
         sections.push_back(quick_state_make_text_section("thor.display", text));
+    }
+
+    {
+        std::ostringstream text;
+        text << "schema=thor.gxm.v1\n";
+        text << "flags=" << emuenv.gxm.params.flags << "\n";
+        text << "display_queue_max_pending_count=" << emuenv.gxm.params.displayQueueMaxPendingCount << "\n";
+        text << "display_queue_callback=0x" << std::hex << emuenv.gxm.params.displayQueueCallback.address() << std::dec << "\n";
+        text << "display_queue_callback_data_size=" << emuenv.gxm.params.displayQueueCallbackDataSize << "\n";
+        text << "parameter_buffer_size=" << emuenv.gxm.params.parameterBufferSize << "\n";
+        text << "display_queue_thread=" << (emuenv.gxm.display_queue_thread > 0 ? emuenv.gxm.display_queue_thread : 0) << "\n";
+        text << "global_timestamp=" << emuenv.gxm.global_timestamp.load() << "\n";
+        text << "last_display_global=" << emuenv.gxm.last_display_global << "\n";
+        text << "notification_region=0x" << std::hex << emuenv.gxm.notification_region.address() << std::dec << "\n";
+        text << "memory_maps=" << emuenv.gxm.memory_mapped_regions.size() << "\n";
+        size_t map_index = 0;
+        for (const auto &[_, map] : emuenv.gxm.memory_mapped_regions) {
+            text << "memory_map." << map_index++
+                 << "=offset=0x" << std::hex << map.offset << std::dec
+                 << ";size=" << map.size
+                 << ";perm=" << map.perm
+                 << "\n";
+        }
+        sections.push_back(quick_state_make_text_section("thor.gxm", text));
+    }
+
+    {
+        std::ostringstream text;
+        text << "schema=thor.gxm.program-host.v1\n";
+        text << "storage=guest-opaque-struct-fields\n";
+        text << "magic=0x54484758\n";
+        text << "note=fragment blend and vertex layout snapshots are stored beside GXM shader program opaque objects\n";
+        sections.push_back(quick_state_make_text_section("thor.gxm.program-host", text));
     }
 
     {
@@ -6189,6 +6379,104 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
     return true;
 }
 
+static bool quick_state_renderer_unmap_memory_now(EmuEnvState &emuenv, const Address offset) {
+    if (!emuenv.renderer || !emuenv.renderer->features.enable_memory_mapping)
+        return true;
+
+    if (renderer::unmap_memory_now(*emuenv.renderer, emuenv.mem, Ptr<void>(offset)))
+        return true;
+
+    const int status = renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryUnmap, true, Ptr<void>(offset));
+    return status == 0;
+}
+
+static bool quick_state_renderer_map_memory_now(EmuEnvState &emuenv, const Address offset, const uint32_t size) {
+    if (!emuenv.renderer || !emuenv.renderer->features.enable_memory_mapping || size == 0)
+        return true;
+
+    if (renderer::map_memory_now(*emuenv.renderer, emuenv.mem, Ptr<void>(offset), size))
+        return true;
+
+    const int status = renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryMap, true, Ptr<void>(offset), size);
+    return status == 0;
+}
+
+static bool quick_state_unmap_current_gxm_memory_mappings(EmuEnvState &emuenv, const std::string &title_id) {
+    std::vector<MemoryMapInfo> current_maps;
+    current_maps.reserve(emuenv.gxm.memory_mapped_regions.size());
+    for (const auto &[_, map] : emuenv.gxm.memory_mapped_regions)
+        current_maps.push_back(map);
+
+    LOG_DEBUG("Preparing to clear {} current GXM memory mapping(s) before durable quickstate restore for {} (renderer={}, memory_mapping={}).",
+        current_maps.size(),
+        title_id,
+        emuenv.renderer ? "yes" : "no",
+        (emuenv.renderer && emuenv.renderer->features.enable_memory_mapping) ? "yes" : "no");
+
+    if (emuenv.renderer && emuenv.renderer->features.enable_memory_mapping) {
+        for (const MemoryMapInfo &map : current_maps) {
+            if (map.size == 0)
+                continue;
+            LOG_DEBUG("Quickstate unmapping current GXM memory at 0x{:08X} (size={}) before durable restore for {}.",
+                map.offset,
+                map.size,
+                title_id);
+            if (!quick_state_renderer_unmap_memory_now(emuenv, map.offset)) {
+                quick_state_last_restore_detail = fmt::format("failed to unmap stale GXM memory at 0x{:08X}", map.offset);
+                return false;
+            }
+            LOG_DEBUG("Quickstate unmapped current GXM memory at 0x{:08X} before durable restore for {}.",
+                map.offset,
+                title_id);
+        }
+    }
+
+    emuenv.gxm.memory_mapped_regions.clear();
+    if (!current_maps.empty()) {
+        LOG_INFO("Cleared {} current GXM memory mapping(s) before durable quickstate restore for {}.",
+            current_maps.size(),
+            title_id);
+    }
+    return true;
+}
+
+static bool restore_quick_state_gxm_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    QuickStateGxmSnapshot snapshot;
+    if (!quick_state_parse_gxm_snapshot_section(slot, snapshot)) {
+        LOG_WARN("Refused GXM restore for {} because the thor.gxm section is missing or invalid.", slot.title_id);
+        return false;
+    }
+
+    emuenv.gxm.params.flags = snapshot.flags;
+    emuenv.gxm.params.displayQueueMaxPendingCount = snapshot.display_queue_max_pending_count;
+    emuenv.gxm.params.displayQueueCallback = Ptr<void>(snapshot.display_queue_callback);
+    emuenv.gxm.params.displayQueueCallbackDataSize = snapshot.display_queue_callback_data_size;
+    emuenv.gxm.params.parameterBufferSize = snapshot.parameter_buffer_size;
+    emuenv.gxm.display_queue_thread = snapshot.display_queue_thread;
+    emuenv.gxm.global_timestamp.store(snapshot.global_timestamp);
+    emuenv.gxm.last_display_global = snapshot.last_display_global;
+    emuenv.gxm.notification_region = Ptr<uint32_t>(snapshot.notification_region);
+    emuenv.gxm.memory_mapped_regions.clear();
+
+    for (const QuickStateGxmMemoryMapSnapshot &map : snapshot.memory_maps) {
+        emuenv.gxm.memory_mapped_regions.emplace(map.offset, MemoryMapInfo{ map.offset, map.size, map.perm });
+        if (!emuenv.renderer || !emuenv.renderer->features.enable_memory_mapping || map.size == 0)
+            continue;
+
+        if (!quick_state_renderer_map_memory_now(emuenv, map.offset, map.size)) {
+            quick_state_last_restore_detail = fmt::format("failed to remap saved GXM memory at 0x{:08X}", map.offset);
+            return false;
+        }
+    }
+
+    LOG_INFO("Restored GXM host snapshot for {} (maps={}, global_timestamp={}, display_thread={}).",
+        slot.title_id,
+        snapshot.memory_maps.size(),
+        snapshot.global_timestamp,
+        snapshot.display_queue_thread);
+    return true;
+}
+
 static DisplayFrameInfo quick_state_to_display_frame_info(const QuickStateDisplayFrameSnapshot &snapshot) {
     DisplayFrameInfo frame;
     frame.base = Ptr<const void>(snapshot.base);
@@ -6673,6 +6961,12 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     }
 
     restore_mutated_host_state = true;
+    if (!allow_live_host_state && !quick_state_unmap_current_gxm_memory_mappings(emuenv, slot.title_id)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "current GXM memory maps could not be cleared";
+        return fail_quick_state_restore();
+    }
+
     if (!prepare_quick_state_restore_thread_blocks(slot, matched_threads)) {
         if (quick_state_last_restore_detail.empty())
             quick_state_last_restore_detail = "thread memory block restore prep failed";
@@ -6717,6 +7011,12 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
 
     for (const auto &page : slot.memory_pages)
         std::memcpy(Ptr<uint8_t>(page.address).get(emuenv.mem), page.bytes.data(), page.bytes.size());
+
+    if (!allow_live_host_state && !restore_quick_state_gxm_state(emuenv, slot)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "GXM host-state restore failed";
+        return fail_quick_state_restore();
+    }
 
     if (!allow_live_host_state && quick_state_needs_ngs_durable_restore(emuenv, slot) && !quick_state_restore_ngs_state(emuenv, slot)) {
         if (quick_state_last_restore_detail.empty())
@@ -6906,6 +7206,9 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "Display vblank wait restore layer: " << (manifest.display_vblank_waits_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank waits: " << manifest.display_wait_entries << "\n";
     marker << "Display vblank callbacks: " << manifest.display_callback_entries << "\n";
+    marker << "GXM host-state restore layer: " << (manifest.gxm_state_restorable ? "ready" : "missing") << "\n";
+    marker << "GXM memory maps: " << manifest.gxm_memory_maps << "\n";
+    marker << "GXM shader program host-state restore layer: " << (manifest.gxm_program_host_state_restorable ? "ready" : "missing") << "\n";
     marker << "Audio scalar restore layer: " << (manifest.audio_state_restorable ? "ready" : "missing") << "\n";
     marker << "AVPlayer host-state restore layer: " << (manifest.avplayer_state_restorable ? "ready" : "missing") << "\n";
     marker << "AVPlayer players: " << manifest.avplayer_players << " (" << manifest.avplayer_active_players << " active)\n";
@@ -6983,6 +7286,9 @@ static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickSta
     marker << "IO file-position restore layer: " << (manifest.io_file_positions_restorable ? "ready" : "missing") << "\n";
     marker << "Display scalar restore layer: " << (manifest.display_state_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank wait restore layer: " << (manifest.display_vblank_waits_restorable ? "ready" : "missing") << "\n";
+    marker << "GXM host-state restore layer: " << (manifest.gxm_state_restorable ? "ready" : "missing") << "\n";
+    marker << "GXM memory maps: " << manifest.gxm_memory_maps << "\n";
+    marker << "GXM shader program host-state restore layer: " << (manifest.gxm_program_host_state_restorable ? "ready" : "missing") << "\n";
     marker << "Audio scalar restore layer: " << (manifest.audio_state_restorable ? "ready" : "missing") << "\n";
     marker << "AVPlayer host-state restore layer: " << (manifest.avplayer_state_restorable ? "ready" : "missing") << "\n";
     marker << "AVPlayer players: " << manifest.avplayer_players << " (" << manifest.avplayer_active_players << " active)\n";

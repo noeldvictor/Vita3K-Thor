@@ -29,6 +29,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 namespace renderer {
 struct FragmentProgram;
@@ -284,6 +285,10 @@ struct SceGxmFragmentProgram {
     std::atomic<uint32_t> compile_threads_on = 0;
     bool is_maskupdate;
     std::unique_ptr<renderer::FragmentProgram> renderer_data;
+    SceGxmBlendInfo saved_blend_info{};
+    uint32_t saved_has_blend_info = 0;
+    uint32_t host_state_magic = 0;
+    uint64_t host_generation = 0;
 };
 
 struct SceGxmNotification {
@@ -334,6 +339,12 @@ struct SceGxmVertexProgram {
     uint64_t key_hash;
     // only necessary with async compilation
     std::atomic<uint32_t> compile_threads_on = 0;
+    std::array<SceGxmVertexStream, SCE_GXM_MAX_VERTEX_STREAMS> saved_streams{};
+    std::array<SceGxmVertexAttribute, 32> saved_attributes{};
+    uint32_t saved_stream_count = 0;
+    uint32_t saved_attribute_count = 0;
+    uint32_t host_state_magic = 0;
+    uint64_t host_generation = 0;
 };
 
 struct SceGxmPrecomputedDraw {

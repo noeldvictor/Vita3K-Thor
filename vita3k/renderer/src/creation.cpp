@@ -176,6 +176,21 @@ COMMAND(handle_memory_unmap) {
     complete_command(renderer, helper, 0);
 }
 
+bool map_memory_now(State &state, MemState &mem, const Ptr<void> address, const uint32_t size) {
+    if (state.current_backend != Backend::Vulkan)
+        return false;
+
+    return dynamic_cast<vulkan::VKState &>(state).map_memory(mem, address, size);
+}
+
+bool unmap_memory_now(State &state, MemState &mem, const Ptr<void> address) {
+    if (state.current_backend != Backend::Vulkan)
+        return false;
+
+    dynamic_cast<vulkan::VKState &>(state).unmap_memory(mem, address);
+    return true;
+}
+
 // Client
 bool create(std::unique_ptr<FragmentProgram> &fp, State &state, const SceGxmProgram &program, const SceGxmBlendInfo *blend, GXPPtrMap &gxp_ptr_map) {
     switch (state.current_backend) {
