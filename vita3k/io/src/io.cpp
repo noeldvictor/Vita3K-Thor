@@ -1438,6 +1438,7 @@ SceUID read_dir(IOState &io, const SceUID fd, SceIoDirent *dent, const fs::path 
         const auto d = dir->second.get_dir_ptr();
         if (!d)
             return 0;
+        dir->second.note_native_entry_read();
 
         const auto d_name_utf8 = get_file_in_dir(d);
         strncpy(dent->d_name, d_name_utf8.c_str(), sizeof(dent->d_name));

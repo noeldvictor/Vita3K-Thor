@@ -96,6 +96,7 @@ class DirStats : public VitaStats {
     DirPtr dir_ptr;
     std::vector<std::string> memory_entries;
     mutable size_t memory_entry_index = 0;
+    size_t native_entry_index = 0;
     bool memory_directory = false;
 
 public:
@@ -139,6 +140,34 @@ public:
             return {};
 
         return memory_entries[memory_entry_index++];
+    }
+
+    void note_native_entry_read() {
+        if (!memory_directory)
+            native_entry_index++;
+    }
+
+    size_t entries_read() const {
+        return memory_directory ? memory_entry_index : native_entry_index;
+    }
+
+    bool restore_entry_position(const size_t entry_index) {
+        if (memory_directory) {
+            if (entry_index > memory_entries.size())
+                return false;
+            memory_entry_index = entry_index;
+            return true;
+        }
+
+        if (!dir_ptr)
+            return entry_index == 0;
+
+        for (size_t i = 0; i < entry_index; i++) {
+            if (!get_system_dir_ptr(dir_ptr))
+                return false;
+        }
+        native_entry_index = entry_index;
+        return true;
     }
 };
 

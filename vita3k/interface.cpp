@@ -1102,6 +1102,24 @@ struct QuickStateIOFilePosition {
     SceOff offset = 0;
 };
 
+struct QuickStateIODirectoryPosition {
+    SceUID fd = 0;
+    std::string vita_path;
+    std::string translated_path;
+    fs::path host_path;
+    bool memory_directory = false;
+    size_t entry_index = 0;
+};
+
+struct QuickStateIOOverlay {
+    SceUID id = 0;
+    SceFiosOverlayType type = SCE_FIOS_OVERLAY_TYPE_OPAQUE;
+    uint8_t order = 0;
+    SceUID process_id = 0;
+    std::string dst;
+    std::string src;
+};
+
 struct QuickStateSyncSimpleEvent {
     SceUID id = 0;
     std::string name;
@@ -1416,6 +1434,8 @@ struct QuickStateRestoreManifest {
     bool thread_metadata_restorable = false;
     bool io_file_positions_restorable = false;
     bool io_file_handles_restorable = false;
+    bool io_directory_handles_restorable = false;
+    bool io_overlays_restorable = false;
     bool sync_primitives_restorable = false;
     bool sync_wait_queue_metadata_complete = false;
     bool display_state_restorable = false;
@@ -1431,6 +1451,8 @@ struct QuickStateRestoreManifest {
     size_t sync_wait_queue_entries = 0;
     size_t msgpipe_buffer_bytes = 0;
     size_t io_memory_file_handles = 0;
+    size_t io_directory_handles = 0;
+    size_t io_overlay_count = 0;
     size_t display_wait_entries = 0;
     size_t display_callback_entries = 0;
     size_t gxm_memory_maps = 0;
@@ -3123,6 +3145,38 @@ static bool quick_state_parse_fd_from_key(const std::string &key, SceUID &fd) {
     return true;
 }
 
+static bool quick_state_parse_dir_fd_from_key(const std::string &key, SceUID &fd) {
+    constexpr std::string_view prefix = "dir.";
+    constexpr std::string_view suffix = ".vita";
+    if (key.rfind(prefix, 0) != 0 || key.size() <= prefix.size() + suffix.size())
+        return false;
+    if (key.compare(key.size() - suffix.size(), suffix.size(), suffix) != 0)
+        return false;
+
+    const std::string fd_text = key.substr(prefix.size(), key.size() - prefix.size() - suffix.size());
+    int32_t parsed_fd = 0;
+    if (!quick_state_parse_i32_text(fd_text, parsed_fd) || parsed_fd < 0)
+        return false;
+    fd = static_cast<SceUID>(parsed_fd);
+    return true;
+}
+
+static bool quick_state_parse_overlay_id_from_key(const std::string &key, SceUID &id) {
+    constexpr std::string_view prefix = "overlay.";
+    constexpr std::string_view suffix = ".type";
+    if (key.rfind(prefix, 0) != 0 || key.size() <= prefix.size() + suffix.size())
+        return false;
+    if (key.compare(key.size() - suffix.size(), suffix.size(), suffix) != 0)
+        return false;
+
+    const std::string id_text = key.substr(prefix.size(), key.size() - prefix.size() - suffix.size());
+    int32_t parsed_id = 0;
+    if (!quick_state_parse_i32_text(id_text, parsed_id) || parsed_id <= 0)
+        return false;
+    id = static_cast<SceUID>(parsed_id);
+    return true;
+}
+
 static bool quick_state_parse_io_file_position(const std::string &key, const std::string &value, QuickStateIOFilePosition &position) {
     if (!quick_state_parse_fd_from_key(key, position.fd))
         return false;
@@ -3159,8 +3213,84 @@ static bool quick_state_parse_io_file_position(const std::string &key, const std
     return true;
 }
 
-static bool quick_state_parse_io_file_positions_section(const QuickStateSlot &slot, std::map<SceUID, QuickStateIOFilePosition> &positions_by_fd, SceUID *next_fd_out = nullptr) {
+static bool quick_state_parse_io_directory_position(const std::string &key, const std::string &value, QuickStateIODirectoryPosition &position) {
+    if (!quick_state_parse_dir_fd_from_key(key, position.fd))
+        return false;
+
+    const auto fields = quick_state_parse_semicolon_fields("vita=" + value);
+    const auto required_fields = {
+        "vita",
+        "translated",
+        "host",
+        "memory",
+        "entry_index",
+    };
+    for (const auto required : required_fields) {
+        if (!fields.contains(required))
+            return false;
+    }
+
+    uint64_t parsed_u64 = 0;
+    bool parsed_bool = false;
+    position.vita_path = fields.at("vita");
+    position.translated_path = fields.at("translated");
+    position.host_path = fs_utils::utf8_to_path(quick_state_unquote_path_field(fields.at("host")));
+    if (!quick_state_parse_bool_text(fields.at("memory"), parsed_bool))
+        return false;
+    position.memory_directory = parsed_bool;
+    if (!quick_state_parse_u64_text(fields.at("entry_index"), parsed_u64) || parsed_u64 > static_cast<uint64_t>(std::numeric_limits<size_t>::max()))
+        return false;
+    position.entry_index = static_cast<size_t>(parsed_u64);
+    return true;
+}
+
+static bool quick_state_parse_io_overlay(const std::string &key, const std::string &value, QuickStateIOOverlay &overlay) {
+    if (!quick_state_parse_overlay_id_from_key(key, overlay.id))
+        return false;
+
+    const auto fields = quick_state_parse_semicolon_fields("type=" + value);
+    const auto required_fields = {
+        "type",
+        "order",
+        "process_id",
+        "dst",
+        "src",
+    };
+    for (const auto required : required_fields) {
+        if (!fields.contains(required))
+            return false;
+    }
+
+    uint32_t parsed_type = 0;
+    uint32_t parsed_order = 0;
+    int32_t parsed_process_id = 0;
+    if (!quick_state_parse_u32_text(fields.at("type"), parsed_type)
+        || parsed_type > SCE_FIOS_OVERLAY_TYPE_WRITABLE
+        || !quick_state_parse_u32_text(fields.at("order"), parsed_order)
+        || parsed_order > std::numeric_limits<uint8_t>::max()
+        || !quick_state_parse_i32_text(fields.at("process_id"), parsed_process_id)
+        || parsed_process_id < 0) {
+        return false;
+    }
+
+    overlay.type = static_cast<SceFiosOverlayType>(parsed_type);
+    overlay.order = static_cast<uint8_t>(parsed_order);
+    overlay.process_id = static_cast<SceUID>(parsed_process_id);
+    overlay.dst = fields.at("dst");
+    overlay.src = fields.at("src");
+    return true;
+}
+
+static bool quick_state_parse_io_file_positions_section(
+    const QuickStateSlot &slot,
+    std::map<SceUID, QuickStateIOFilePosition> &positions_by_fd,
+    SceUID *next_fd_out = nullptr,
+    std::map<SceUID, QuickStateIODirectoryPosition> *directories_by_fd_out = nullptr,
+    std::vector<QuickStateIOOverlay> *overlays_out = nullptr,
+    SceUID *next_overlay_id_out = nullptr) {
     positions_by_fd.clear();
+    std::map<SceUID, QuickStateIODirectoryPosition> directories_by_fd;
+    std::vector<QuickStateIOOverlay> overlays;
     const QuickStateSection *section = quick_state_find_section(slot, "thor.io.vfs");
     if (!section || section->version != 1)
         return false;
@@ -3173,23 +3303,62 @@ static bool quick_state_parse_io_file_positions_section(const QuickStateSlot &sl
     uint64_t expected_file_count = 0;
     if (!quick_state_parse_u64(values, "std_files", expected_file_count) || expected_file_count > 1024)
         return false;
+    uint64_t expected_dir_count = 0;
+    if (!quick_state_parse_u64(values, "dir_entries", expected_dir_count) || expected_dir_count > 1024)
+        return false;
+    uint64_t expected_overlay_count = 0;
+    if (!quick_state_parse_u64(values, "overlays", expected_overlay_count) || expected_overlay_count > SCE_FIOS_OVERLAY_MAX_OVERLAYS)
+        return false;
     int32_t parsed_next_fd = 0;
     if (!values.contains("next_fd") || !quick_state_parse_i32_text(values.at("next_fd"), parsed_next_fd) || parsed_next_fd < 0)
         return false;
-
-    for (const auto &[key, value] : values) {
-        if (key.rfind("file.", 0) != 0)
-            continue;
-
-        QuickStateIOFilePosition position;
-        if (!quick_state_parse_io_file_position(key, value, position))
-            return false;
-        positions_by_fd[position.fd] = std::move(position);
+    int32_t parsed_next_overlay_id = 1;
+    if (expected_overlay_count > 0
+        && (!values.contains("next_overlay_id") || !quick_state_parse_i32_text(values.at("next_overlay_id"), parsed_next_overlay_id) || parsed_next_overlay_id <= 0)) {
+        return false;
     }
 
+    for (const auto &[key, value] : values) {
+        if (key.rfind("file.", 0) == 0) {
+            QuickStateIOFilePosition position;
+            if (!quick_state_parse_io_file_position(key, value, position))
+                return false;
+            if (directories_by_fd.contains(position.fd))
+                return false;
+            positions_by_fd[position.fd] = std::move(position);
+            continue;
+        }
+
+        if (key.rfind("dir.", 0) == 0) {
+            QuickStateIODirectoryPosition position;
+            if (!quick_state_parse_io_directory_position(key, value, position))
+                return false;
+            if (positions_by_fd.contains(position.fd))
+                return false;
+            directories_by_fd[position.fd] = std::move(position);
+            continue;
+        }
+
+        if (key.rfind("overlay.", 0) == 0) {
+            QuickStateIOOverlay overlay;
+            if (!quick_state_parse_io_overlay(key, value, overlay))
+                return false;
+            overlays.push_back(std::move(overlay));
+            continue;
+        }
+    }
+
+    if (positions_by_fd.size() != expected_file_count || directories_by_fd.size() != expected_dir_count || overlays.size() != expected_overlay_count)
+        return false;
     if (next_fd_out)
         *next_fd_out = static_cast<SceUID>(parsed_next_fd);
-    return positions_by_fd.size() == expected_file_count;
+    if (directories_by_fd_out)
+        *directories_by_fd_out = std::move(directories_by_fd);
+    if (overlays_out)
+        *overlays_out = std::move(overlays);
+    if (next_overlay_id_out)
+        *next_overlay_id_out = static_cast<SceUID>(parsed_next_overlay_id);
+    return true;
 }
 
 static bool quick_state_parse_sync_simple_event(const std::string &key, const std::string &value, QuickStateSyncSimpleEvent &event) {
@@ -4085,12 +4254,18 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     std::map<SceUID, QuickStateThreadMetadata> thread_metadata;
     manifest.thread_metadata_restorable = quick_state_parse_thread_metadata_section(slot, thread_metadata);
     std::map<SceUID, QuickStateIOFilePosition> io_file_positions;
-    manifest.io_file_positions_restorable = quick_state_parse_io_file_positions_section(slot, io_file_positions);
+    std::map<SceUID, QuickStateIODirectoryPosition> io_directories;
+    std::vector<QuickStateIOOverlay> io_overlays;
+    manifest.io_file_positions_restorable = quick_state_parse_io_file_positions_section(slot, io_file_positions, nullptr, &io_directories, &io_overlays);
     if (manifest.io_file_positions_restorable) {
         manifest.io_memory_file_handles = static_cast<size_t>(std::count_if(io_file_positions.begin(), io_file_positions.end(), [](const auto &item) {
             return item.second.memory_file;
         }));
+        manifest.io_directory_handles = io_directories.size();
+        manifest.io_overlay_count = io_overlays.size();
         manifest.io_file_handles_restorable = true;
+        manifest.io_directory_handles_restorable = true;
+        manifest.io_overlays_restorable = true;
     }
     QuickStateSyncSnapshot sync_snapshot;
     manifest.sync_primitives_restorable = quick_state_parse_sync_primitives_section(slot, sync_snapshot);
@@ -4173,9 +4348,9 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     if (!manifest.io_file_positions_restorable) {
         manifest.missing_serializers.push_back("io-file-positions");
     } else {
-        if (manifest.io.dir_entries > 0)
+        if (manifest.io_directory_handles > 0 && !manifest.io_directory_handles_restorable)
             manifest.missing_serializers.push_back("io-directory-handles");
-        if (manifest.io.overlays > 0)
+        if (manifest.io_overlay_count > 0 && !manifest.io_overlays_restorable)
             manifest.missing_serializers.push_back("io-overlays");
     }
     if (!manifest.timing_restorable)
@@ -5463,11 +5638,22 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";translated=" << dir.get_translated_path()
                  << ";host=" << fs_utils::path_to_utf8(dir.get_system_location())
                  << ";memory=" << dir.is_memory_directory()
+                 << ";entry_index=" << dir.entries_read()
                  << "\n";
         }
         {
             const std::lock_guard<std::mutex> overlay_lock(emuenv.io.overlay_mutex);
             text << "overlays=" << emuenv.io.overlays.size() << "\n";
+            text << "next_overlay_id=" << emuenv.io.next_overlay_id << "\n";
+            for (const auto &overlay : emuenv.io.overlays) {
+                text << "overlay." << overlay.id
+                     << ".type=" << static_cast<uint32_t>(overlay.type)
+                     << ";order=" << static_cast<uint32_t>(overlay.order)
+                     << ";process_id=" << overlay.process_id
+                     << ";dst=" << overlay.dst
+                     << ";src=" << overlay.src
+                     << "\n";
+            }
         }
         sections.push_back(quick_state_make_text_section("thor.io.vfs", text));
     }
@@ -6877,20 +7063,58 @@ static std::optional<FileStats> quick_state_recreate_file_stats(EmuEnvState &emu
     return file_stats;
 }
 
+static std::optional<DirStats> quick_state_recreate_dir_stats(EmuEnvState &emuenv, const QuickStateIODirectoryPosition &position) {
+    if (position.memory_directory) {
+        const auto relative_path = quick_state_app0_relative_path(position.vita_path);
+        if (!relative_path.has_value())
+            return std::nullopt;
+        if (!vfs::current_app_directory_exists(emuenv.io, *relative_path))
+            return std::nullopt;
+
+        DirStats dir_stats(position.vita_path.c_str(), position.translated_path, position.host_path, vfs::list_current_app_directory(emuenv.io, *relative_path));
+        if (!dir_stats.restore_entry_position(position.entry_index))
+            return std::nullopt;
+        return dir_stats;
+    }
+
+    if (!fs::exists(position.host_path) || !fs::is_directory(position.host_path))
+        return std::nullopt;
+
+    const DirPtr opened = create_shared_dir(position.host_path);
+    if (!opened)
+        return std::nullopt;
+
+    DirStats dir_stats(position.vita_path.c_str(), position.translated_path, position.host_path, opened);
+    if (!dir_stats.restore_entry_position(position.entry_index))
+        return std::nullopt;
+    return dir_stats;
+}
+
 static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const QuickStateSlot &slot) {
     std::map<SceUID, QuickStateIOFilePosition> positions_by_fd;
+    std::map<SceUID, QuickStateIODirectoryPosition> directories_by_fd;
+    std::vector<QuickStateIOOverlay> saved_overlays;
     SceUID saved_next_fd = 0;
-    if (!quick_state_parse_io_file_positions_section(slot, positions_by_fd, &saved_next_fd)) {
+    SceUID saved_next_overlay_id = 1;
+    if (!quick_state_parse_io_file_positions_section(slot, positions_by_fd, &saved_next_fd, &directories_by_fd, &saved_overlays, &saved_next_overlay_id)) {
         LOG_WARN("Refused IO file-position restore for {} because the thor.io.vfs file metadata is missing or invalid.", slot.title_id);
         quick_state_last_restore_detail = "IO metadata missing or invalid";
         return false;
     }
 
     for (const auto &[fd, position] : positions_by_fd) {
-        if (emuenv.io.tty_files.contains(fd) || emuenv.io.dir_entries.contains(fd)) {
-            LOG_WARN("Refused IO file-handle restore for {} because saved fd {} collides with an existing tty or directory handle.",
+        if (directories_by_fd.contains(fd) || emuenv.io.tty_files.contains(fd)) {
+            LOG_WARN("Refused IO file-handle restore for {} because saved fd {} collides with a saved directory or existing tty handle.",
                 slot.title_id, fd);
-            quick_state_last_restore_detail = fmt::format("saved fd {} collides with an existing tty or directory handle", fd);
+            quick_state_last_restore_detail = fmt::format("saved fd {} collides with a directory or tty handle", fd);
+            return false;
+        }
+    }
+    for (const auto &[fd, position] : directories_by_fd) {
+        if (emuenv.io.tty_files.contains(fd)) {
+            LOG_WARN("Refused IO directory-handle restore for {} because saved fd {} collides with an existing tty handle.",
+                slot.title_id, fd);
+            quick_state_last_restore_detail = fmt::format("saved directory fd {} collides with a tty handle", fd);
             return false;
         }
     }
@@ -6915,10 +7139,31 @@ static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const Qui
             }
         }
     }
+    bool rebuild_dir_handles = directories_by_fd.size() != emuenv.io.dir_entries.size();
+    if (!rebuild_dir_handles) {
+        for (const auto &[fd, position] : directories_by_fd) {
+            const auto dir = emuenv.io.dir_entries.find(fd);
+            if (dir == emuenv.io.dir_entries.end()) {
+                rebuild_dir_handles = true;
+                break;
+            }
+
+            const DirStats &current_dir = dir->second;
+            if (position.vita_path != current_dir.get_vita_loc()
+                || position.translated_path != current_dir.get_translated_path()
+                || position.host_path != current_dir.get_system_location()
+                || position.memory_directory != current_dir.is_memory_directory()
+                || position.entry_index != current_dir.entries_read()) {
+                rebuild_dir_handles = true;
+                break;
+            }
+        }
+    }
+
+    SceUID highest_fd = saved_next_fd;
 
     if (rebuild_file_handles) {
         StdFiles rebuilt_files;
-        SceUID highest_fd = saved_next_fd;
         for (const auto &[fd, position] : positions_by_fd) {
             auto file = quick_state_recreate_file_stats(emuenv, position);
             if (!file.has_value()) {
@@ -6939,10 +7184,27 @@ static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const Qui
         }
 
         emuenv.io.std_files = std::move(rebuilt_files);
-        emuenv.io.next_fd = std::max(saved_next_fd, highest_fd);
         LOG_INFO("Recreated IO file handles for {} ({} open file(s), next_fd={}).",
-            slot.title_id, positions_by_fd.size(), emuenv.io.next_fd);
-        return true;
+            slot.title_id, positions_by_fd.size(), std::max(saved_next_fd, highest_fd));
+    }
+
+    if (rebuild_dir_handles) {
+        DirEntries rebuilt_dirs;
+        for (const auto &[fd, position] : directories_by_fd) {
+            auto dir = quick_state_recreate_dir_stats(emuenv, position);
+            if (!dir.has_value()) {
+                const std::string source = position.memory_directory ? std::string("archive memory directory") : fs_utils::path_to_utf8(position.host_path);
+                LOG_WARN("Refused IO directory-handle restore for {} because saved fd {} could not be recreated from {}.",
+                    slot.title_id, fd, source);
+                quick_state_last_restore_detail = fmt::format("saved directory fd {} could not be recreated from {}", fd, source);
+                return false;
+            }
+            rebuilt_dirs.emplace(fd, std::move(*dir));
+            highest_fd = std::max<SceUID>(highest_fd, fd + 1);
+        }
+        emuenv.io.dir_entries = std::move(rebuilt_dirs);
+        LOG_INFO("Recreated IO directory handles for {} ({} open dir(s), next_fd={}).",
+            slot.title_id, directories_by_fd.size(), std::max(saved_next_fd, highest_fd));
     }
 
     for (const auto &[fd, position] : positions_by_fd) {
@@ -6975,6 +7237,24 @@ static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const Qui
             return false;
         }
     }
+    for (const auto &[fd, position] : directories_by_fd) {
+        const auto dir = emuenv.io.dir_entries.find(fd);
+        if (dir == emuenv.io.dir_entries.end()) {
+            LOG_WARN("Refused IO directory-position restore for {} because fd {} is not open after directory-handle reconciliation.", slot.title_id, fd);
+            quick_state_last_restore_detail = fmt::format("directory fd {} is not open in the current session", fd);
+            return false;
+        }
+
+        const DirStats &current_dir = dir->second;
+        if (position.vita_path != current_dir.get_vita_loc()
+            || position.translated_path != current_dir.get_translated_path()
+            || position.host_path != current_dir.get_system_location()
+            || position.memory_directory != current_dir.is_memory_directory()) {
+            LOG_WARN("Refused IO directory-position restore for {} because fd {} does not match the saved directory identity.", slot.title_id, fd);
+            quick_state_last_restore_detail = fmt::format("directory fd {} does not match the saved identity", fd);
+            return false;
+        }
+    }
 
     for (const auto &[fd, position] : positions_by_fd) {
         auto &file = emuenv.io.std_files.at(fd);
@@ -6984,9 +7264,41 @@ static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const Qui
             return false;
         }
     }
-    emuenv.io.next_fd = std::max(emuenv.io.next_fd, saved_next_fd);
+    if (!rebuild_dir_handles) {
+        for (const auto &[fd, position] : directories_by_fd) {
+            auto dir = quick_state_recreate_dir_stats(emuenv, position);
+            if (!dir.has_value()) {
+                LOG_WARN("Refused IO directory-position restore for {} because fd {} could not be rewound to entry {}.", slot.title_id, fd, position.entry_index);
+                quick_state_last_restore_detail = fmt::format("directory fd {} could not be rewound", fd);
+                return false;
+            }
+            emuenv.io.dir_entries.at(fd) = std::move(*dir);
+            highest_fd = std::max<SceUID>(highest_fd, fd + 1);
+        }
+    }
 
-    LOG_INFO("Restored IO file positions for {} ({} open file(s)).", slot.title_id, positions_by_fd.size());
+    {
+        const std::lock_guard<std::mutex> overlay_lock(emuenv.io.overlay_mutex);
+        emuenv.io.overlays.clear();
+        SceUID highest_overlay_id = saved_next_overlay_id;
+        for (const auto &saved_overlay : saved_overlays) {
+            FiosOverlay overlay{
+                .id = saved_overlay.id,
+                .type = saved_overlay.type,
+                .order = saved_overlay.order,
+                .process_id = saved_overlay.process_id,
+                .dst = saved_overlay.dst,
+                .src = saved_overlay.src,
+            };
+            emuenv.io.overlays.push_back(std::move(overlay));
+            highest_overlay_id = std::max<SceUID>(highest_overlay_id, saved_overlay.id + 1);
+        }
+        emuenv.io.next_overlay_id = std::max(saved_next_overlay_id, highest_overlay_id);
+    }
+    emuenv.io.next_fd = std::max<SceUID>(std::max(emuenv.io.next_fd, saved_next_fd), highest_fd);
+
+    LOG_INFO("Restored IO/VFS state for {} ({} open file(s), {} open dir(s), {} overlay(s), next_fd={}).",
+        slot.title_id, positions_by_fd.size(), directories_by_fd.size(), saved_overlays.size(), emuenv.io.next_fd);
     return true;
 }
 
