@@ -1489,6 +1489,14 @@ static fs::path quick_state_file(EmuEnvState &emuenv, const std::string &title_i
     return quick_state_dir(emuenv, title_id) / "slot0.thorstate";
 }
 
+static fs::path quick_state_tmp_file(EmuEnvState &emuenv, const std::string &title_id) {
+    return quick_state_file(emuenv, title_id).string() + ".tmp";
+}
+
+static fs::path quick_state_backup_file(EmuEnvState &emuenv, const std::string &title_id) {
+    return quick_state_file(emuenv, title_id).string() + ".bak";
+}
+
 static fs::path quick_state_marker_file(EmuEnvState &emuenv, const std::string &title_id) {
     return quick_state_dir(emuenv, title_id) / "slot0.thorstate.txt";
 }
@@ -1500,6 +1508,8 @@ static fs::path quick_state_capture_marker_file(EmuEnvState &emuenv, const std::
 static fs::path quick_state_restore_marker_file(EmuEnvState &emuenv, const std::string &title_id) {
     return quick_state_dir(emuenv, title_id) / "slot0.thorstate.restore.txt";
 }
+
+static bool load_quick_state_from_path(EmuEnvState &emuenv, const fs::path &state_file, const std::string &title_id, QuickStateSlot &slot);
 
 template <typename T>
 static bool quick_state_write_value(std::ostream &out, const T &value) {
@@ -1907,14 +1917,20 @@ static bool save_quick_state_to_disk(EmuEnvState &emuenv, const QuickStateSlot &
 
     const fs::path state_dir = quick_state_dir(emuenv, slot.title_id);
     const fs::path state_file = quick_state_file(emuenv, slot.title_id);
-    const fs::path tmp_file = state_file.string() + ".tmp";
-    const fs::path backup_file = state_file.string() + ".bak";
+    const fs::path tmp_file = quick_state_tmp_file(emuenv, slot.title_id);
+    const fs::path backup_file = quick_state_backup_file(emuenv, slot.title_id);
     fs::create_directories(state_dir);
+    auto fail = [&](const std::string_view detail) {
+        boost::system::error_code cleanup_ec;
+        fs::remove(tmp_file, cleanup_ec);
+        LOG_WARN("Failed to write durable quickstate {}: {}", state_file, detail);
+        return false;
+    };
 
     {
         fs::ofstream out(tmp_file, std::ios::binary | std::ios::trunc);
         if (!out)
-            return false;
+            return fail("could not open temporary file");
 
         const uint32_t compression_level = static_cast<uint32_t>(std::clamp(emuenv.cfg.save_state_compression_level, 0, 9));
         const uint32_t thread_count = static_cast<uint32_t>(slot.thread_contexts.size());
@@ -1922,7 +1938,7 @@ static bool save_quick_state_to_disk(EmuEnvState &emuenv, const QuickStateSlot &
         const uint32_t allocator_word_count = static_cast<uint32_t>(slot.allocator_words.size());
         const uint32_t allocation_page_count = static_cast<uint32_t>(slot.allocation_pages.size());
         if (slot.sections.size() > QUICKSTATE_MAX_SECTION_COUNT)
-            return false;
+            return fail("too many metadata sections");
 
         if (!quick_state_write_bytes(out, QUICKSTATE_MAGIC, sizeof(QUICKSTATE_MAGIC))
             || !quick_state_write_value(out, QUICKSTATE_VERSION)
@@ -1935,17 +1951,17 @@ static bool save_quick_state_to_disk(EmuEnvState &emuenv, const QuickStateSlot &
             || !quick_state_write_value(out, memory_page_count)
             || !quick_state_write_value(out, allocator_word_count)
             || !quick_state_write_value(out, allocation_page_count)) {
-            return false;
+            return fail("header write failed");
         }
 
         for (const auto word : slot.allocator_words) {
             if (!quick_state_write_value(out, word))
-                return false;
+                return fail("allocator bitmap write failed");
         }
 
         for (const auto page : slot.allocation_pages) {
             if (!quick_state_write_value(out, page))
-                return false;
+                return fail("allocation table write failed");
         }
 
         for (const auto &thread_context : slot.thread_contexts) {
@@ -1958,7 +1974,7 @@ static bool save_quick_state_to_disk(EmuEnvState &emuenv, const QuickStateSlot &
                 || !quick_state_write_value(out, thread_context.priority)
                 || !quick_state_write_value(out, thread_context.affinity_mask)
                 || !quick_state_write_cpu_context(out, thread_context.context)) {
-                return false;
+                return fail("thread context write failed");
             }
         }
 
@@ -1980,29 +1996,54 @@ static bool save_quick_state_to_disk(EmuEnvState &emuenv, const QuickStateSlot &
                 || !quick_state_write_value(out, compression_method)
                 || !quick_state_write_value(out, raw_crc32)
                 || !quick_state_write_bytes(out, page_bytes->data(), stored_page_size)) {
-                return false;
+                return fail("guest memory page write failed");
             }
         }
 
         const uint32_t section_count = static_cast<uint32_t>(slot.sections.size());
         if (!quick_state_write_value(out, section_count))
-            return false;
+            return fail("section count write failed");
         for (const auto &section : slot.sections) {
             if (!quick_state_write_section(out, section))
-                return false;
+                return fail("metadata section write failed");
         }
+        out.flush();
+        if (!out.good())
+            return fail("temporary file flush failed");
+    }
+
+    QuickStateSlot validation_slot;
+    if (!load_quick_state_from_path(emuenv, tmp_file, slot.title_id, validation_slot)) {
+        return fail("temporary file failed readback validation");
+    }
+    if (validation_slot.byte_count != slot.byte_count
+        || validation_slot.thread_contexts.size() != slot.thread_contexts.size()
+        || validation_slot.memory_pages.size() != slot.memory_pages.size()
+        || validation_slot.sections.size() != slot.sections.size()) {
+        return fail("temporary file readback summary did not match captured state");
     }
 
     boost::system::error_code ec;
-    fs::remove(backup_file, ec);
-    ec.clear();
-    if (fs::exists(state_file, ec)) {
-        ec.clear();
-        fs::rename(state_file, backup_file, ec);
-        if (ec) {
-            fs::remove(tmp_file);
-            LOG_WARN("Failed to stage old quickstate backup {}: {}", backup_file, ec.message());
-            return false;
+    const bool had_primary_state = fs::exists(state_file, ec);
+    if (had_primary_state) {
+        QuickStateSlot existing_primary;
+        if (load_quick_state_from_path(emuenv, state_file, slot.title_id, existing_primary)) {
+            fs::remove(backup_file, ec);
+            ec.clear();
+            fs::rename(state_file, backup_file, ec);
+            if (ec) {
+                fs::remove(tmp_file);
+                LOG_WARN("Failed to stage old quickstate backup {}: {}", backup_file, ec.message());
+                return false;
+            }
+        } else {
+            fs::remove(state_file, ec);
+            if (ec) {
+                fs::remove(tmp_file);
+                LOG_WARN("Failed to discard invalid primary quickstate {} before finalizing replacement: {}", state_file, ec.message());
+                return false;
+            }
+            LOG_WARN("Discarded invalid primary quickstate for {} while preserving the previous backup at {}", slot.title_id, backup_file);
         }
     }
     ec.clear();
@@ -2010,20 +2051,21 @@ static bool save_quick_state_to_disk(EmuEnvState &emuenv, const QuickStateSlot &
     if (ec) {
         fs::remove(tmp_file);
         boost::system::error_code restore_ec;
-        if (fs::exists(backup_file, restore_ec)) {
+        if (had_primary_state && fs::exists(backup_file, restore_ec)) {
             restore_ec.clear();
             fs::rename(backup_file, state_file, restore_ec);
         }
         LOG_WARN("Failed to finalize durable quickstate {}: {}", state_file, ec.message());
         return false;
     }
-    fs::remove(backup_file, ec);
+    ec.clear();
+    if (fs::exists(backup_file, ec))
+        LOG_INFO("Kept previous durable quickstate backup for {} at {}", slot.title_id, backup_file);
 
     return true;
 }
 
-static bool read_quick_state_disk_header(EmuEnvState &emuenv, const std::string &title_id, QuickStateDiskHeader &header) {
-    const fs::path state_file = quick_state_file(emuenv, title_id);
+static bool read_quick_state_disk_header_from_path(const fs::path &state_file, const std::string &title_id, QuickStateDiskHeader &header) {
     fs::ifstream in(state_file, std::ios::binary);
     if (!in)
         return false;
@@ -2031,8 +2073,14 @@ static bool read_quick_state_disk_header(EmuEnvState &emuenv, const std::string 
     return quick_state_read_header(in, header) && (header.title_id == title_id);
 }
 
-static bool load_quick_state_from_disk(EmuEnvState &emuenv, const std::string &title_id, QuickStateSlot &slot) {
-    const fs::path state_file = quick_state_file(emuenv, title_id);
+static bool read_quick_state_disk_header(EmuEnvState &emuenv, const std::string &title_id, QuickStateDiskHeader &header) {
+    if (read_quick_state_disk_header_from_path(quick_state_file(emuenv, title_id), title_id, header))
+        return true;
+
+    return read_quick_state_disk_header_from_path(quick_state_backup_file(emuenv, title_id), title_id, header);
+}
+
+static bool load_quick_state_from_path(EmuEnvState &emuenv, const fs::path &state_file, const std::string &title_id, QuickStateSlot &slot) {
     fs::ifstream in(state_file, std::ios::binary);
     if (!in)
         return false;
@@ -2152,6 +2200,20 @@ static bool load_quick_state_from_disk(EmuEnvState &emuenv, const std::string &t
 
     slot = std::move(loaded);
     return true;
+}
+
+static bool load_quick_state_from_disk(EmuEnvState &emuenv, const std::string &title_id, QuickStateSlot &slot) {
+    const fs::path state_file = quick_state_file(emuenv, title_id);
+    if (load_quick_state_from_path(emuenv, state_file, title_id, slot))
+        return true;
+
+    const fs::path backup_file = quick_state_backup_file(emuenv, title_id);
+    if (load_quick_state_from_path(emuenv, backup_file, title_id, slot)) {
+        LOG_WARN("Loaded durable quickstate backup for {} because the primary slot was missing or failed validation: {}", title_id, backup_file);
+        return true;
+    }
+
+    return false;
 }
 
 static ThreadStatePtr find_quick_state_restore_thread(KernelState &kernel, const QuickStateThreadContext &saved_thread, const std::set<SceUID> &matched_threads, const bool require_saved_thread_id) {
