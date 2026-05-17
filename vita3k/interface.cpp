@@ -5994,6 +5994,11 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
         if (!restore_quick_state_simple_event_identities(emuenv, snapshot))
             return false;
 
+        restore_quick_state_sync_identities_by_name(emuenv.kernel.timers, snapshot.timers, "timer", [](const QuickStateSyncTimer &saved_timer) {
+            const TimerPtr timer = std::make_shared<Timer>();
+            timer->waiting_threads = quick_state_make_wait_queue(saved_timer.attr);
+            return timer;
+        });
         restore_quick_state_sync_identities_by_name(emuenv.kernel.semaphores, snapshot.semaphores, "semaphore", [](const QuickStateSyncSemaphore &saved_semaphore) {
             const SemaphorePtr semaphore = std::make_shared<Semaphore>();
             semaphore->waiting_threads = quick_state_make_wait_queue(saved_semaphore.attr);
@@ -6032,6 +6037,11 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
             emuenv.kernel.condvars.at(uid)->associated_mutex = saved_condvar.associated_mutex == 0 ? nullptr : emuenv.kernel.mutexes.at(saved_condvar.associated_mutex);
         for (const auto &[uid, saved_condvar] : snapshot.lwcondvars)
             emuenv.kernel.lwcondvars.at(uid)->associated_mutex = saved_condvar.associated_mutex == 0 ? nullptr : emuenv.kernel.lwmutexes.at(saved_condvar.associated_mutex);
+        restore_quick_state_sync_identities_by_name(emuenv.kernel.rwlocks, snapshot.rwlocks, "rwlock", [](const QuickStateSyncRWLock &saved_rwlock) {
+            const RWLockPtr rwlock = std::make_shared<RWLock>();
+            rwlock->waiting_threads = quick_state_make_wait_queue(saved_rwlock.attr);
+            return rwlock;
+        });
         for (const auto &[uid, msgpipe] : emuenv.kernel.msgpipes) {
             const std::lock_guard<std::mutex> msgpipe_lock(msgpipe->mutex);
             if (!quick_state_wait_queue_contains_only_deferred_current_waiters(msgpipe->senders)
@@ -6047,12 +6057,15 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
             return msgpipe;
         });
 
+        quick_state_clear_sync_map_wait_queues(emuenv.kernel.simple_events);
+        quick_state_clear_sync_map_wait_queues(emuenv.kernel.timers);
         quick_state_clear_sync_map_wait_queues(emuenv.kernel.semaphores);
         quick_state_clear_sync_map_wait_queues(emuenv.kernel.mutexes);
         quick_state_clear_sync_map_wait_queues(emuenv.kernel.lwmutexes);
         quick_state_clear_sync_map_wait_queues(emuenv.kernel.eventflags);
         quick_state_clear_sync_map_wait_queues(emuenv.kernel.condvars);
         quick_state_clear_sync_map_wait_queues(emuenv.kernel.lwcondvars);
+        quick_state_clear_sync_map_wait_queues(emuenv.kernel.rwlocks);
         for (auto &[_, msgpipe] : emuenv.kernel.msgpipes) {
             quick_state_clear_wait_queue(msgpipe->senders);
             quick_state_clear_wait_queue(msgpipe->receivers);
