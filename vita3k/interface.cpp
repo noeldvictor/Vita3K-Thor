@@ -1205,6 +1205,10 @@ struct QuickStateSyncWaitQueueEntry {
     int32_t flags = 0;
     Address out_bits = 0;
     uint32_t request_size = 0;
+    uint32_t transfer_size = 0;
+    Address buffer = 0;
+    Address result = 0;
+    uint32_t wait_mode = 0;
     std::string cancel_source;
     bool deferred_import_wait = false;
 };
@@ -3324,8 +3328,21 @@ static bool quick_state_parse_sync_wait_queue_entry(const std::string &key, cons
             && quick_state_parse_bool_text(fields.at("is_write"), entry.is_write);
     }
     if (entry.kind == "msgpipe_sender" || entry.kind == "msgpipe_receiver") {
-        return fields.contains("request_size")
-            && quick_state_parse_u32_text(fields.at("request_size"), entry.request_size);
+        if (!fields.contains("request_size")
+            || !quick_state_parse_u32_text(fields.at("request_size"), entry.request_size)) {
+            return false;
+        }
+        if (fields.contains("transfer_size")
+            && !quick_state_parse_u32_text(fields.at("transfer_size"), entry.transfer_size)) {
+            return false;
+        }
+        if (fields.contains("buffer") && !parse_address("buffer", entry.buffer))
+            return false;
+        if (fields.contains("result") && !parse_address("result", entry.result))
+            return false;
+        if (fields.contains("wait_mode") && !quick_state_parse_u32_text(fields.at("wait_mode"), entry.wait_mode))
+            return false;
+        return true;
     }
     return false;
 }
@@ -3867,7 +3884,9 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
                     && entry.kind != "semaphore"
                     && entry.kind != "eventflag"
                     && entry.kind != "condvar"
-                    && entry.kind != "lwcondvar";
+                    && entry.kind != "lwcondvar"
+                    && entry.kind != "msgpipe_sender"
+                    && entry.kind != "msgpipe_receiver";
             });
             if (has_live_host_only_wait)
                 manifest.missing_serializers.push_back("host-syscall-state");
@@ -4006,7 +4025,9 @@ static bool quick_state_wait_queue_entry_restorable_without_live_host(const Quic
         return entry.kind == "semaphore"
             || entry.kind == "eventflag"
             || entry.kind == "condvar"
-            || entry.kind == "lwcondvar";
+            || entry.kind == "lwcondvar"
+            || entry.kind == "msgpipe_sender"
+            || entry.kind == "msgpipe_receiver";
     }
 
     return (entry.kind == "condvar" || entry.kind == "lwcondvar") && entry.timeout == 0;
@@ -4116,7 +4137,17 @@ static bool quick_state_wait_queue_fields_match(const MemState &mem, const Quick
         return saved.is_write == current.is_write ? true : fail("rwlock fields");
     }
     if (saved.kind == "msgpipe_sender" || saved.kind == "msgpipe_receiver") {
-        return saved.request_size == current.mp.request_size ? true : fail("msgpipe fields");
+        const bool has_extended_msgpipe_fields = saved.transfer_size != 0 || saved.buffer != 0 || saved.result != 0 || saved.wait_mode != 0;
+        if (!has_extended_msgpipe_fields)
+            return saved.request_size == current.mp.request_size ? true : fail("msgpipe fields");
+
+        return saved.request_size == current.mp.request_size
+                && saved.transfer_size == current.mp.transfer_size
+                && saved.buffer == quick_state_guest_address_from_host_pointer(mem, current.mp.buffer)
+                && saved.result == quick_state_guest_address_from_host_pointer(mem, current.mp.result)
+                && saved.wait_mode == current.mp.wait_mode
+            ? true
+            : fail("msgpipe fields");
     }
     return fail("kind");
 }
@@ -5096,11 +5127,21 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                  << ";payload=" << quick_state_bytes_to_hex(payload)
                  << ";being_deleted=" << msgpipe->beingDeleted
                  << "\n";
-            wait_queue_entries += quick_state_write_wait_queue_entries(text, emuenv.mem, "msgpipe_sender", uid, msgpipe->senders, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
-                entry_text << ";request_size=" << data.mp.request_size;
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, emuenv.mem, "msgpipe_sender", uid, msgpipe->senders, [&emuenv](std::ostringstream &entry_text, const WaitingThreadData &data) {
+                entry_text << ";request_size=" << data.mp.request_size
+                           << ";transfer_size=" << data.mp.transfer_size
+                           << ";buffer=0x" << std::hex << quick_state_guest_address_from_host_pointer(emuenv.mem, data.mp.buffer)
+                           << ";result=0x" << quick_state_guest_address_from_host_pointer(emuenv.mem, data.mp.result)
+                           << std::dec
+                           << ";wait_mode=" << data.mp.wait_mode;
             });
-            wait_queue_entries += quick_state_write_wait_queue_entries(text, emuenv.mem, "msgpipe_receiver", uid, msgpipe->receivers, [](std::ostringstream &entry_text, const WaitingThreadData &data) {
-                entry_text << ";request_size=" << data.mp.request_size;
+            wait_queue_entries += quick_state_write_wait_queue_entries(text, emuenv.mem, "msgpipe_receiver", uid, msgpipe->receivers, [&emuenv](std::ostringstream &entry_text, const WaitingThreadData &data) {
+                entry_text << ";request_size=" << data.mp.request_size
+                           << ";transfer_size=" << data.mp.transfer_size
+                           << ";buffer=0x" << std::hex << quick_state_guest_address_from_host_pointer(emuenv.mem, data.mp.buffer)
+                           << ";result=0x" << quick_state_guest_address_from_host_pointer(emuenv.mem, data.mp.result)
+                           << std::dec
+                           << ";wait_mode=" << data.mp.wait_mode;
             });
         }
 
@@ -5368,6 +5409,35 @@ static bool quick_state_restore_u32_pointer(MemState &mem, const Address address
     return true;
 }
 
+static bool quick_state_restore_size_pointer(MemState &mem, const Address address, SceSize *&out) {
+    out = nullptr;
+    if (address == 0)
+        return true;
+    Ptr<SceSize> ptr(address);
+    if (!ptr.valid(mem))
+        return false;
+    out = ptr.get(mem);
+    return true;
+}
+
+static bool quick_state_restore_buffer_pointer(MemState &mem, const Address address, const uint32_t size, void *&out) {
+    out = nullptr;
+    if (address == 0)
+        return size == 0;
+
+    if (size == 0) {
+        if (!is_valid_addr(mem, address))
+            return false;
+    } else {
+        const uint64_t end = static_cast<uint64_t>(address) + size;
+        if (end > std::numeric_limits<Address>::max() || !is_valid_addr_range(mem, address, static_cast<Address>(end)))
+            return false;
+    }
+
+    out = Ptr<void>(address).get(mem);
+    return true;
+}
+
 static bool quick_state_restore_deferred_semaphore_waits(EmuEnvState &emuenv, const QuickStateSyncSnapshot &snapshot, const std::map<SceUID, ThreadStatePtr> &threads_by_saved_id, const SceUID uid, const QuickStateSyncSemaphore &saved_semaphore, const SemaphorePtr &semaphore) {
     if (saved_semaphore.waiting_count == 0)
         return true;
@@ -5495,6 +5565,54 @@ static bool quick_state_restore_deferred_condvar_waits(EmuEnvState &emuenv, cons
         thread->second->restore_deferred_import_wait();
         condvar->waiting_threads->push(data);
     }
+    return true;
+}
+
+static bool quick_state_restore_deferred_msgpipe_waits(EmuEnvState &emuenv, const QuickStateSyncSnapshot &snapshot, const std::map<SceUID, ThreadStatePtr> &threads_by_saved_id, const SceUID uid, const uint32_t expected_count, const char *kind, const WaitingThreadQueuePtr &queue) {
+    if (expected_count == 0)
+        return true;
+    if (!quick_state_wait_queue_entries_all_deferred(snapshot, kind, uid, expected_count))
+        return true;
+
+    if (!quick_state_wait_queue_contains_only_deferred_current_waiters(queue)) {
+        quick_state_last_restore_detail = fmt::format("{} {} has non-deferred current waiters", kind, uid);
+        return false;
+    }
+
+    quick_state_clear_wait_queue(queue);
+    for (uint32_t index = 0; index < expected_count; index++) {
+        const QuickStateSyncWaitQueueEntry *entry = quick_state_find_wait_queue_entry(snapshot, kind, uid, index);
+        if (!entry || entry->timeout != 0) {
+            quick_state_last_restore_detail = fmt::format("{} {} waiter {} has unsupported timeout state", kind, uid, index);
+            return false;
+        }
+
+        const auto thread = threads_by_saved_id.find(entry->thread_id);
+        if (thread == threads_by_saved_id.end() || !thread->second) {
+            quick_state_last_restore_detail = fmt::format("{} {} waiter thread {} was not matched", kind, uid, entry->thread_id);
+            return false;
+        }
+
+        WaitingThreadData data;
+        data.thread = thread->second;
+        data.priority = entry->priority;
+        data.timeout_value = entry->timeout_value;
+        data.timeout_start_host_us = quick_state_host_time_us();
+        data.deferred_import_wait = true;
+        data.mp.request_size = entry->request_size;
+        data.mp.transfer_size = entry->transfer_size;
+        data.mp.wait_mode = entry->wait_mode;
+        if (!quick_state_restore_buffer_pointer(emuenv.mem, entry->buffer, entry->transfer_size, data.mp.buffer)
+            || !quick_state_restore_size_pointer(emuenv.mem, entry->result, data.mp.result)
+            || !quick_state_restore_u32_pointer(emuenv.mem, entry->timeout, data.timeout)) {
+            quick_state_last_restore_detail = fmt::format("{} {} waiter {} has invalid guest pointers", kind, uid, index);
+            return false;
+        }
+
+        thread->second->restore_deferred_import_wait();
+        queue->push(data);
+    }
+    LOG_INFO("Restored {} deferred quickstate waits for {} {}.", expected_count, kind, uid);
     return true;
 }
 
@@ -5663,6 +5781,20 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
             emuenv.kernel.condvars.at(uid)->associated_mutex = saved_condvar.associated_mutex == 0 ? nullptr : emuenv.kernel.mutexes.at(saved_condvar.associated_mutex);
         for (const auto &[uid, saved_condvar] : snapshot.lwcondvars)
             emuenv.kernel.lwcondvars.at(uid)->associated_mutex = saved_condvar.associated_mutex == 0 ? nullptr : emuenv.kernel.lwmutexes.at(saved_condvar.associated_mutex);
+        for (const auto &[uid, msgpipe] : emuenv.kernel.msgpipes) {
+            const std::lock_guard<std::mutex> msgpipe_lock(msgpipe->mutex);
+            if (!quick_state_wait_queue_contains_only_deferred_current_waiters(msgpipe->senders)
+                || !quick_state_wait_queue_contains_only_deferred_current_waiters(msgpipe->receivers)) {
+                quick_state_last_restore_detail = fmt::format("current msgpipe {} has non-deferred waiters and cannot be replaced", uid);
+                return false;
+            }
+        }
+        restore_quick_state_sync_identities_by_name(emuenv.kernel.msgpipes, snapshot.msgpipes, "msgpipe", [](const QuickStateSyncMsgPipe &saved_msgpipe) {
+            const MsgPipePtr msgpipe = std::make_shared<MsgPipe>(static_cast<std::size_t>(saved_msgpipe.capacity));
+            msgpipe->receivers = quick_state_make_wait_queue(saved_msgpipe.attr);
+            msgpipe->senders = std::make_unique<FIFOThreadDataQueue<WaitingThreadData>>();
+            return msgpipe;
+        });
 
         quick_state_clear_sync_map_wait_queues(emuenv.kernel.semaphores);
         quick_state_clear_sync_map_wait_queues(emuenv.kernel.mutexes);
@@ -5670,6 +5802,10 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
         quick_state_clear_sync_map_wait_queues(emuenv.kernel.eventflags);
         quick_state_clear_sync_map_wait_queues(emuenv.kernel.condvars);
         quick_state_clear_sync_map_wait_queues(emuenv.kernel.lwcondvars);
+        for (auto &[_, msgpipe] : emuenv.kernel.msgpipes) {
+            quick_state_clear_wait_queue(msgpipe->senders);
+            quick_state_clear_wait_queue(msgpipe->receivers);
+        }
     }
 
     if (emuenv.kernel.simple_events.size() != snapshot.simple_events.size()
@@ -5902,13 +6038,39 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
             return false;
         }
         const std::lock_guard<std::mutex> msgpipe_lock(current->second->mutex);
+        const bool rebuild_deferred_senders = saved_msgpipe.sender_count > 0
+            && quick_state_wait_queue_entries_all_deferred(snapshot, "msgpipe_sender", uid, saved_msgpipe.sender_count);
+        const bool rebuild_deferred_receivers = saved_msgpipe.receiver_count > 0
+            && quick_state_wait_queue_entries_all_deferred(snapshot, "msgpipe_receiver", uid, saved_msgpipe.receiver_count);
+        const size_t current_senders = quick_state_waiting_count(current->second->senders);
+        const size_t current_receivers = quick_state_waiting_count(current->second->receivers);
+        const bool current_senders_deferred = quick_state_wait_queue_contains_only_deferred_current_waiters(current->second->senders);
+        const bool current_receivers_deferred = quick_state_wait_queue_contains_only_deferred_current_waiters(current->second->receivers);
         if (!quick_state_sync_identity_matches(*current->second, saved_msgpipe.name, saved_msgpipe.attr)
-            || quick_state_waiting_count(current->second->senders) != saved_msgpipe.sender_count
-            || quick_state_waiting_count(current->second->receivers) != saved_msgpipe.receiver_count
+            || (!rebuild_deferred_senders && current_senders != saved_msgpipe.sender_count)
+            || (!rebuild_deferred_receivers && current_receivers != saved_msgpipe.receiver_count)
+            || (rebuild_deferred_senders && !current_senders_deferred)
+            || (rebuild_deferred_receivers && !current_receivers_deferred)
             || current->second->data_buffer.Capacity() != saved_msgpipe.capacity
             || saved_msgpipe.payload.size() != saved_msgpipe.used) {
             LOG_WARN("Refused sync primitive restore for {} because msgpipe {} does not match the saved identity.", slot.title_id, uid);
-            quick_state_last_restore_detail = fmt::format("msgpipe {} does not match the saved identity", uid);
+            quick_state_last_restore_detail = fmt::format("msgpipe {} does not match the saved identity; saved name='{}' attr={} senders={} receivers={} rebuild_senders={} rebuild_receivers={} capacity={} used={} current name='{}' attr={} senders={} receivers={} sender_waiters_deferred={} receiver_waiters_deferred={} capacity={}",
+                uid,
+                saved_msgpipe.name,
+                saved_msgpipe.attr,
+                saved_msgpipe.sender_count,
+                saved_msgpipe.receiver_count,
+                rebuild_deferred_senders,
+                rebuild_deferred_receivers,
+                saved_msgpipe.capacity,
+                saved_msgpipe.used,
+                current->second->name,
+                current->second->attr,
+                current_senders,
+                current_receivers,
+                current_senders_deferred,
+                current_receivers_deferred,
+                current->second->data_buffer.Capacity());
             return false;
         }
     }
@@ -6004,6 +6166,10 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
                 quick_state_last_restore_detail = fmt::format("msgpipe {} payload restore failed", uid);
                 return false;
             }
+        }
+        if (!quick_state_restore_deferred_msgpipe_waits(emuenv, snapshot, threads_by_saved_id, uid, saved_msgpipe.sender_count, "msgpipe_sender", msgpipe->senders)
+            || !quick_state_restore_deferred_msgpipe_waits(emuenv, snapshot, threads_by_saved_id, uid, saved_msgpipe.receiver_count, "msgpipe_receiver", msgpipe->receivers)) {
+            return false;
         }
         msgpipe->beingDeleted = saved_msgpipe.being_deleted;
     }
@@ -6640,7 +6806,11 @@ static std::string quick_state_wait_queue_entry_detail(const QuickStateSyncWaitQ
     } else if (entry.kind == "rwlock") {
         detail << " is_write=" << entry.is_write;
     } else if (entry.kind == "msgpipe_sender" || entry.kind == "msgpipe_receiver") {
-        detail << " request_size=" << entry.request_size;
+        detail << " request_size=" << entry.request_size
+               << " transfer_size=" << entry.transfer_size
+               << " buffer=0x" << std::hex << entry.buffer
+               << " result=0x" << entry.result << std::dec
+               << " wait_mode=" << entry.wait_mode;
     }
     return detail.str();
 }
