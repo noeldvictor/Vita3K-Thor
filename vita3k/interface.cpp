@@ -1497,6 +1497,18 @@ static fs::path quick_state_backup_file(EmuEnvState &emuenv, const std::string &
     return quick_state_file(emuenv, title_id).string() + ".bak";
 }
 
+static fs::path quick_state_load_undo_file(EmuEnvState &emuenv, const std::string &title_id) {
+    return quick_state_dir(emuenv, title_id) / "slot0.thorstate.undo";
+}
+
+static fs::path quick_state_load_undo_tmp_file(EmuEnvState &emuenv, const std::string &title_id) {
+    return quick_state_load_undo_file(emuenv, title_id).string() + ".tmp";
+}
+
+static fs::path quick_state_load_undo_backup_file(EmuEnvState &emuenv, const std::string &title_id) {
+    return quick_state_load_undo_file(emuenv, title_id).string() + ".bak";
+}
+
 static fs::path quick_state_marker_file(EmuEnvState &emuenv, const std::string &title_id) {
     return quick_state_dir(emuenv, title_id) / "slot0.thorstate.txt";
 }
@@ -1911,19 +1923,15 @@ static bool capture_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     return true;
 }
 
-static bool save_quick_state_to_disk(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+static bool save_quick_state_to_disk_path(EmuEnvState &emuenv, const QuickStateSlot &slot, const fs::path &state_file, const fs::path &tmp_file, const fs::path &backup_file, const std::string_view slot_label) {
     if (!slot.valid || slot.title_id.empty())
         return false;
 
-    const fs::path state_dir = quick_state_dir(emuenv, slot.title_id);
-    const fs::path state_file = quick_state_file(emuenv, slot.title_id);
-    const fs::path tmp_file = quick_state_tmp_file(emuenv, slot.title_id);
-    const fs::path backup_file = quick_state_backup_file(emuenv, slot.title_id);
-    fs::create_directories(state_dir);
+    fs::create_directories(state_file.parent_path());
     auto fail = [&](const std::string_view detail) {
         boost::system::error_code cleanup_ec;
         fs::remove(tmp_file, cleanup_ec);
-        LOG_WARN("Failed to write durable quickstate {}: {}", state_file, detail);
+        LOG_WARN("Failed to write durable quickstate {} {}: {}", slot_label, state_file, detail);
         return false;
     };
 
@@ -2043,7 +2051,7 @@ static bool save_quick_state_to_disk(EmuEnvState &emuenv, const QuickStateSlot &
                 LOG_WARN("Failed to discard invalid primary quickstate {} before finalizing replacement: {}", state_file, ec.message());
                 return false;
             }
-            LOG_WARN("Discarded invalid primary quickstate for {} while preserving the previous backup at {}", slot.title_id, backup_file);
+            LOG_WARN("Discarded invalid {} quickstate for {} while preserving the previous backup at {}", slot_label, slot.title_id, backup_file);
         }
     }
     ec.clear();
@@ -2060,9 +2068,25 @@ static bool save_quick_state_to_disk(EmuEnvState &emuenv, const QuickStateSlot &
     }
     ec.clear();
     if (fs::exists(backup_file, ec))
-        LOG_INFO("Kept previous durable quickstate backup for {} at {}", slot.title_id, backup_file);
+        LOG_INFO("Kept previous durable quickstate {} backup for {} at {}", slot_label, slot.title_id, backup_file);
 
     return true;
+}
+
+static bool save_quick_state_to_disk(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    return save_quick_state_to_disk_path(emuenv, slot,
+        quick_state_file(emuenv, slot.title_id),
+        quick_state_tmp_file(emuenv, slot.title_id),
+        quick_state_backup_file(emuenv, slot.title_id),
+        "slot 0");
+}
+
+static bool save_quick_state_load_undo_to_disk(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    return save_quick_state_to_disk_path(emuenv, slot,
+        quick_state_load_undo_file(emuenv, slot.title_id),
+        quick_state_load_undo_tmp_file(emuenv, slot.title_id),
+        quick_state_load_undo_backup_file(emuenv, slot.title_id),
+        "load-undo");
 }
 
 static bool read_quick_state_disk_header_from_path(const fs::path &state_file, const std::string &title_id, QuickStateDiskHeader &header) {
@@ -2078,6 +2102,13 @@ static bool read_quick_state_disk_header(EmuEnvState &emuenv, const std::string 
         return true;
 
     return read_quick_state_disk_header_from_path(quick_state_backup_file(emuenv, title_id), title_id, header);
+}
+
+static bool read_quick_state_load_undo_disk_header(EmuEnvState &emuenv, const std::string &title_id, QuickStateDiskHeader &header) {
+    if (read_quick_state_disk_header_from_path(quick_state_load_undo_file(emuenv, title_id), title_id, header))
+        return true;
+
+    return read_quick_state_disk_header_from_path(quick_state_load_undo_backup_file(emuenv, title_id), title_id, header);
 }
 
 static bool load_quick_state_from_path(EmuEnvState &emuenv, const fs::path &state_file, const std::string &title_id, QuickStateSlot &slot) {
@@ -2210,6 +2241,20 @@ static bool load_quick_state_from_disk(EmuEnvState &emuenv, const std::string &t
     const fs::path backup_file = quick_state_backup_file(emuenv, title_id);
     if (load_quick_state_from_path(emuenv, backup_file, title_id, slot)) {
         LOG_WARN("Loaded durable quickstate backup for {} because the primary slot was missing or failed validation: {}", title_id, backup_file);
+        return true;
+    }
+
+    return false;
+}
+
+static bool load_quick_state_load_undo_from_disk(EmuEnvState &emuenv, const std::string &title_id, QuickStateSlot &slot) {
+    const fs::path state_file = quick_state_load_undo_file(emuenv, title_id);
+    if (load_quick_state_from_path(emuenv, state_file, title_id, slot))
+        return true;
+
+    const fs::path backup_file = quick_state_load_undo_backup_file(emuenv, title_id);
+    if (load_quick_state_from_path(emuenv, backup_file, title_id, slot)) {
+        LOG_WARN("Loaded durable quickstate load-undo backup for {} because the primary undo slot was missing or failed validation: {}", title_id, backup_file);
         return true;
     }
 
@@ -7332,7 +7377,7 @@ static void write_quick_state_capture_marker(EmuEnvState &emuenv, const std::str
     marker << "Same-session live host state: " << (quick_state_slot0.has_live_host_state ? "attached" : "not attached") << "\n";
 }
 
-static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickStateSlot &slot, const bool success, const bool loaded_from_disk, const std::string_view detail) {
+static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickStateSlot &slot, const bool success, const std::string_view mode, const std::string_view detail) {
     if (slot.title_id.empty())
         return;
 
@@ -7344,9 +7389,9 @@ static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickSta
     marker << "Title ID: " << slot.title_id << "\n";
     marker << "Title: " << slot.title << "\n";
     marker << "Result: " << (success ? "success" : "failure") << "\n";
-    marker << "Mode: " << (loaded_from_disk ? "durable-disk" : "same-session") << "\n";
+    marker << "Mode: " << mode << "\n";
     marker << "Detail: " << detail << "\n";
-    marker << "State file: " << quick_state_file(emuenv, slot.title_id) << "\n";
+    marker << "State file: " << (mode == "durable-undo" ? quick_state_load_undo_file(emuenv, slot.title_id) : quick_state_file(emuenv, slot.title_id)) << "\n";
     marker << "\nRestore readiness at attempt time\n";
     marker << "Restore enabled: " << (manifest.restore_enabled ? "yes" : "no") << "\n";
     marker << "Same paused-session restore: " << (manifest.same_pause_restore_available ? "available" : "not available") << "\n";
@@ -7381,12 +7426,21 @@ bool runtime_quick_state_slot_valid(const EmuEnvState &emuenv) {
     return quick_state_slot0.valid && (quick_state_slot0.title_id == emuenv.io.title_id);
 }
 
+bool runtime_quick_state_load_undo_available(EmuEnvState &emuenv) {
+    const auto title_id = emuenv.io.title_id.empty() ? std::string("unknown-title") : emuenv.io.title_id;
+    QuickStateDiskHeader header;
+    return read_quick_state_load_undo_disk_header(emuenv, title_id, header);
+}
+
 uint64_t runtime_quick_state_slot_bytes() {
     return quick_state_slot0.byte_count;
 }
 
 std::string runtime_quick_state_slot_status(EmuEnvState &emuenv) {
     const auto title_id = emuenv.io.title_id.empty() ? std::string("unknown-title") : emuenv.io.title_id;
+    QuickStateDiskHeader undo_header;
+    const bool has_load_undo = read_quick_state_load_undo_disk_header(emuenv, title_id, undo_header);
+    const std::string undo_status = has_load_undo ? ", undo available" : "";
     if (quick_state_slot0.valid && (quick_state_slot0.title_id == title_id)) {
         QuickStateDiskHeader header;
         const bool has_disk_state = read_quick_state_disk_header(emuenv, title_id, header);
@@ -7394,21 +7448,22 @@ std::string runtime_quick_state_slot_status(EmuEnvState &emuenv) {
         const bool same_session_attached = quick_state_can_attempt_same_session_restore(quick_state_slot0, title_id);
         if (has_disk_state) {
             const uint64_t disk_size = quick_state_file_size(emuenv, title_id);
-            return fmt::format("capture {} MiB, {} ({} MiB raw)",
+            return fmt::format("capture {} MiB, {} ({} MiB raw){}",
                 disk_size / (1024 * 1024),
                 same_pause_ready ? "same-pause load ready" : (same_session_attached ? "same-session load guarded" : "durable load gated"),
-                quick_state_slot0.byte_count / (1024 * 1024));
+                quick_state_slot0.byte_count / (1024 * 1024),
+                undo_status);
         }
-        return fmt::format("RAM capture {} MiB, {}", quick_state_slot0.byte_count / (1024 * 1024), same_pause_ready ? "same-pause load ready" : (same_session_attached ? "same-session load guarded" : "load gated"));
+        return fmt::format("RAM capture {} MiB, {}{}", quick_state_slot0.byte_count / (1024 * 1024), same_pause_ready ? "same-pause load ready" : (same_session_attached ? "same-session load guarded" : "load gated"), undo_status);
     }
 
     QuickStateDiskHeader header;
     if (read_quick_state_disk_header(emuenv, title_id, header)) {
         const uint64_t disk_size = quick_state_file_size(emuenv, title_id);
-        return fmt::format("disk capture {} MiB, load gated ({} MiB raw)", disk_size / (1024 * 1024), header.byte_count / (1024 * 1024));
+        return fmt::format("disk capture {} MiB, load gated ({} MiB raw){}", disk_size / (1024 * 1024), header.byte_count / (1024 * 1024), undo_status);
     }
 
-    return "empty";
+    return has_load_undo ? "empty, undo available" : "empty";
 }
 
 void runtime_osd_set_open(EmuEnvState &emuenv, bool open) {
@@ -7485,27 +7540,37 @@ void runtime_request_save_state(EmuEnvState &emuenv) {
     }
 }
 
-void runtime_request_load_state(EmuEnvState &emuenv) {
+static bool runtime_capture_load_undo_snapshot(EmuEnvState &emuenv, const std::string &title_id) {
+    QuickStateSlot undo_slot;
+    if (!capture_quick_state(emuenv, undo_slot)) {
+        const std::string detail = quick_state_last_capture_detail.empty() ? "capture failed" : quick_state_last_capture_detail;
+        LOG_WARN("Could not capture quickstate load-undo slot for {}: {}", title_id, detail);
+        return false;
+    }
+
+    if (!save_quick_state_load_undo_to_disk(emuenv, undo_slot)) {
+        LOG_WARN("Could not write quickstate load-undo slot for {}", title_id);
+        return false;
+    }
+
+    LOG_INFO("Captured quickstate load-undo slot for {} at {}", title_id, quick_state_load_undo_file(emuenv, title_id));
+    return true;
+}
+
+static bool runtime_restore_quick_state_slot(EmuEnvState &emuenv, QuickStateSlot &slot, const bool loaded_from_disk, const std::string_view mode, const std::string_view slot_label, const bool save_load_undo) {
     const auto title_id = emuenv.io.title_id.empty() ? std::string("unknown-title") : emuenv.io.title_id;
-    bool loaded_from_disk = false;
-    if (!quick_state_slot0.valid || (quick_state_slot0.title_id != title_id)) {
-        loaded_from_disk = load_quick_state_from_disk(emuenv, title_id, quick_state_slot0);
-        if (loaded_from_disk) {
-            LOG_INFO("Loaded disk-backed quickstate slot 0 for {} from {}", title_id, quick_state_file(emuenv, title_id));
-        }
+    if (!slot.valid || (slot.title_id != title_id)) {
+        LOG_WARN("No quickstate {} is available for {}", slot_label, title_id);
+        return false;
     }
 
-    if (!quick_state_slot0.valid || (quick_state_slot0.title_id != title_id)) {
-        LOG_WARN("No quickstate slot 0 is available for {}", title_id);
-        return;
-    }
-
-    const auto manifest = build_quick_state_restore_manifest(emuenv, quick_state_slot0);
-    const bool can_attempt_same_session_restore = quick_state_can_attempt_same_session_restore(quick_state_slot0, title_id);
+    const auto manifest = build_quick_state_restore_manifest(emuenv, slot);
+    const bool can_attempt_same_session_restore = quick_state_can_attempt_same_session_restore(slot, title_id);
     if (!manifest.restore_enabled && !can_attempt_same_session_restore) {
-        LOG_WARN("Refused quickstate slot 0 restore for {} because {}.", title_id, manifest.block_reason);
-        write_quick_state_restore_marker(emuenv, quick_state_slot0, false, loaded_from_disk, fmt::format("refused: {}", manifest.block_reason));
-        LOG_INFO("Quickstate slot 0 manifest for {}: guest={} MiB, pages={}, saved_threads={}, sections={}, timing_restorable={}, thread_metadata_restorable={}, sync_primitives_restorable={}, sync_wait_entries={}, msgpipe_buffer_bytes={}, io_file_positions_restorable={}, io_file_handles_restorable={}, io_memory_file_handles={}, display_state_restorable={}, display_vblank_waits_restorable={}, display_wait_entries={}, display_callback_entries={}, audio_state_restorable={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
+        LOG_WARN("Refused quickstate {} restore for {} because {}.", slot_label, title_id, manifest.block_reason);
+        write_quick_state_restore_marker(emuenv, slot, false, mode, fmt::format("refused: {}", manifest.block_reason));
+        LOG_INFO("Quickstate {} manifest for {}: guest={} MiB, pages={}, saved_threads={}, sections={}, timing_restorable={}, thread_metadata_restorable={}, sync_primitives_restorable={}, sync_wait_entries={}, msgpipe_buffer_bytes={}, io_file_positions_restorable={}, io_file_handles_restorable={}, io_memory_file_handles={}, display_state_restorable={}, display_vblank_waits_restorable={}, display_wait_entries={}, display_callback_entries={}, audio_state_restorable={}, current_cpu_threads={}, current_kernel_objects timers={} semaphores={} condvars={} lwcondvars={} mutexes={} lwmutexes={} eventflags={} msgpipes={} callbacks={}, io_files={} io_dirs={} overlays={} archive_entries={}, avplayer_threads={}",
+            slot_label,
             title_id,
             manifest.guest_memory_bytes / (1024 * 1024),
             manifest.memory_pages,
@@ -7539,25 +7604,54 @@ void runtime_request_load_state(EmuEnvState &emuenv) {
             manifest.io.overlays,
             manifest.io.archive_entries,
             manifest.avplayer_threads);
-        return;
+        return false;
     }
     if (!manifest.restore_enabled && can_attempt_same_session_restore) {
-        LOG_INFO("Quickstate slot 0 for {} is a live same-session capture; pausing to check host wait-queue compatibility before restore.", title_id);
+        LOG_INFO("Quickstate {} for {} is a live same-session capture; pausing to check host wait-queue compatibility before restore.", slot_label, title_id);
     }
 
-    const bool restored = restore_quick_state(emuenv, quick_state_slot0);
+    if (save_load_undo && !runtime_capture_load_undo_snapshot(emuenv, title_id))
+        LOG_WARN("Continuing quickstate {} restore for {} without a fresh load-undo slot.", slot_label, title_id);
+
+    const bool restored = restore_quick_state(emuenv, slot);
     const std::string restore_detail = quick_state_last_restore_detail.empty()
         ? (restored ? "restore completed" : "restore failed after readiness gate")
         : quick_state_last_restore_detail;
-    write_quick_state_restore_marker(emuenv, quick_state_slot0, restored, loaded_from_disk, restore_detail);
+    write_quick_state_restore_marker(emuenv, slot, restored, mode, restore_detail);
     if (restored) {
-        LOG_INFO("Restored {} quickstate slot 0 for {} from {}",
+        LOG_INFO("Restored {} quickstate {} for {} from {}",
             loaded_from_disk ? "durable" : "same-session",
+            slot_label,
             title_id,
-            loaded_from_disk ? quick_state_file(emuenv, title_id) : quick_state_marker_file(emuenv, title_id));
+            loaded_from_disk ? (mode == "durable-undo" ? quick_state_load_undo_file(emuenv, title_id) : quick_state_file(emuenv, title_id)) : quick_state_marker_file(emuenv, title_id));
     } else {
-        LOG_WARN("Failed to restore quickstate slot 0 for {}", title_id);
+        LOG_WARN("Failed to restore quickstate {} for {}", slot_label, title_id);
     }
+    return restored;
+}
+
+void runtime_request_load_state(EmuEnvState &emuenv) {
+    const auto title_id = emuenv.io.title_id.empty() ? std::string("unknown-title") : emuenv.io.title_id;
+    bool loaded_from_disk = false;
+    if (!quick_state_slot0.valid || (quick_state_slot0.title_id != title_id)) {
+        loaded_from_disk = load_quick_state_from_disk(emuenv, title_id, quick_state_slot0);
+        if (loaded_from_disk)
+            LOG_INFO("Loaded disk-backed quickstate slot 0 for {} from {}", title_id, quick_state_file(emuenv, title_id));
+    }
+
+    runtime_restore_quick_state_slot(emuenv, quick_state_slot0, loaded_from_disk, loaded_from_disk ? "durable-disk" : "same-session", "slot 0", true);
+}
+
+void runtime_request_undo_load_state(EmuEnvState &emuenv) {
+    const auto title_id = emuenv.io.title_id.empty() ? std::string("unknown-title") : emuenv.io.title_id;
+    QuickStateSlot undo_slot;
+    if (!load_quick_state_load_undo_from_disk(emuenv, title_id, undo_slot)) {
+        LOG_WARN("No quickstate load-undo slot is available for {}", title_id);
+        return;
+    }
+
+    LOG_INFO("Loaded disk-backed quickstate load-undo slot for {} from {}", title_id, quick_state_load_undo_file(emuenv, title_id));
+    runtime_restore_quick_state_slot(emuenv, undo_slot, true, "durable-undo", "load-undo", true);
 }
 
 static std::string runtime_control_trim(std::string_view text) {
@@ -7643,6 +7737,9 @@ static void apply_runtime_control_action(EmuEnvState &emuenv, const std::string 
     } else if (action == "load" || action == "load_state" || action == "load_state_0" || action == "quick_load" || action == "quickload") {
         LOG_INFO("Runtime control action: load_state");
         runtime_request_load_state(emuenv);
+    } else if (action == "undo_load" || action == "undo_load_state" || action == "load_undo" || action == "load_state_undo") {
+        LOG_INFO("Runtime control action: undo_load_state");
+        runtime_request_undo_load_state(emuenv);
     } else if (action == "pause") {
         runtime_set_pause_state(emuenv, true);
     } else if (action == "resume" || action == "unpause") {

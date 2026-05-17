@@ -13,6 +13,7 @@ param(
     [int]$Cycles = 1,
     [switch]$SkipBuild,
     [switch]$StopExisting,
+    [switch]$ExerciseUndoLoad,
     [switch]$KeepRunning
 )
 
@@ -165,6 +166,7 @@ $summary.Add("Started: $((Get-Date).ToString("o"))")
 $summary.Add("Commit: $(git -C $repoRoot rev-parse --short HEAD)")
 $summary.Add("Titles: $($TitleId -join ", ")")
 $summary.Add("Cycles: $Cycles")
+$summary.Add("Exercise undo load: $ExerciseUndoLoad")
 $summary.Add("")
 
 if ($StopExisting) {
@@ -238,6 +240,15 @@ foreach ($run in $runs) {
         Assert-MarkerSuccess $restoreMarker | Out-Null
         Start-Sleep -Seconds $AfterActionSeconds
         Assert-HealthyProcess $process "$title same-session load"
+
+        if ($ExerciseUndoLoad) {
+            $before = (Get-Date).ToUniversalTime().AddMilliseconds(-500)
+            Invoke-ControlAction $control1 "undo_load_state" $TraceLimit
+            Wait-FreshFile $restoreMarker $before $MarkerTimeoutSeconds | Out-Null
+            Assert-MarkerSuccess $restoreMarker "durable-undo" | Out-Null
+            Start-Sleep -Seconds $AfterActionSeconds
+            Assert-HealthyProcess $process "$title undo load"
+        }
     } catch {
         $failures.Add("$title cycle $cycle run 1: $($_.Exception.Message)")
     } finally {

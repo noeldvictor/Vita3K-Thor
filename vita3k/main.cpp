@@ -798,9 +798,17 @@ static void draw_runtime_osd(GuiState &gui, EmuEnvState &emuenv, RuntimeCheats &
     if (ImGui::Button("Load State 0", action_button))
         runtime_request_load_state(emuenv);
     ImGui::SameLine();
+    const bool undo_load_available = runtime_quick_state_load_undo_available(emuenv);
+    if (!undo_load_available)
+        ImGui::BeginDisabled();
+    if (ImGui::Button("Undo Load", action_button))
+        runtime_request_undo_load_state(emuenv);
+    if (!undo_load_available)
+        ImGui::EndDisabled();
+
     if (ImGui::Button("Screenshot", action_button))
         runtime_take_screenshot(emuenv);
-
+    ImGui::SameLine();
     ImGui::BeginDisabled();
     ImGui::Button("Reset Game", action_button);
     ImGui::SameLine();
