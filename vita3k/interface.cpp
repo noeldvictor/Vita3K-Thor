@@ -4558,13 +4558,12 @@ static bool quick_state_check_live_wait_queues(EmuEnvState &emuenv, const QuickS
             return false;
         }
         const std::lock_guard<std::mutex> msgpipe_lock(current->second->mutex);
-        if (saved_msgpipe.sender_count > 0 || saved_msgpipe.receiver_count > 0
-            || quick_state_waiting_count(current->second->senders) > 0
-            || quick_state_waiting_count(current->second->receivers) > 0) {
-            if (detail)
-                *detail = fmt::format("msgpipe {} waiters still need host syscall serialization", uid);
+        if (!quick_state_wait_queue_matches_live(snapshot, emuenv.mem, saved_statuses, "msgpipe_sender", uid, saved_msgpipe.sender_count,
+                current->second->senders, drained_threads, detail))
             return false;
-        }
+        if (!quick_state_wait_queue_matches_live(snapshot, emuenv.mem, saved_statuses, "msgpipe_receiver", uid, saved_msgpipe.receiver_count,
+                current->second->receivers, drained_threads, detail))
+            return false;
     }
 
     return true;
