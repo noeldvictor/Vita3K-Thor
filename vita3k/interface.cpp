@@ -1630,9 +1630,73 @@ static bool quick_state_read_section(std::istream &in, QuickStateSection &sectio
     return quick_state_crc32(section.bytes) == section_crc32;
 }
 
-static bool memory_page_is_allocated(const MemState &mem, const uint32_t page) {
-    const uint32_t word = mem.allocator.words[page >> 5];
-    return (word & (1U << (page & 31))) == 0;
+static bool quick_state_allocator_page_is_allocated(const std::vector<uint32_t> &allocator_words, const uint32_t page) {
+    const uint32_t word_index = page >> 5;
+    if (word_index >= allocator_words.size())
+        return false;
+
+    return (allocator_words[word_index] & (1U << (page & 31))) == 0;
+}
+
+static uint32_t quick_state_page_count_for_range(const Address address, const uint32_t size) {
+    if (!address || !size || (address > std::numeric_limits<Address>::max() - size))
+        return 0;
+
+    const uint64_t start_page = address / QUICKSTATE_PAGE_SIZE;
+    const uint64_t end_page = (static_cast<uint64_t>(address) + size + QUICKSTATE_PAGE_SIZE - 1) / QUICKSTATE_PAGE_SIZE;
+    return static_cast<uint32_t>(end_page - start_page);
+}
+
+static bool quick_state_mark_allocated_range(std::vector<uint32_t> &allocator_words, std::vector<uint32_t> &allocation_pages, const Address address, const uint32_t size) {
+    const uint32_t page_count = quick_state_page_count_for_range(address, size);
+    if (!page_count)
+        return false;
+
+    const uint32_t start_page = address / QUICKSTATE_PAGE_SIZE;
+    if ((start_page >= allocation_pages.size()) || (static_cast<uint64_t>(start_page) + page_count > allocation_pages.size()))
+        return false;
+
+    bool changed = false;
+    for (uint32_t offset = 0; offset < page_count; offset++) {
+        const uint32_t page = start_page + offset;
+        const uint32_t word_index = page >> 5;
+        if (word_index >= allocator_words.size())
+            return changed;
+
+        const uint32_t mask = 1U << (page & 31);
+        if (allocator_words[word_index] & mask) {
+            allocator_words[word_index] &= ~mask;
+            changed = true;
+        }
+
+        const uint32_t desired_page = (offset == 0) ? ((1U << 28) | page_count) : 0;
+        if (allocation_pages[page] != desired_page) {
+            allocation_pages[page] = desired_page;
+            changed = true;
+        }
+    }
+
+    return changed;
+}
+
+static uint32_t quick_state_tls_allocation_size(const KernelState &kernel) {
+    constexpr uint32_t KERNEL_TLS_SIZE = 0x800;
+    const uint64_t raw_size = static_cast<uint64_t>(KERNEL_TLS_SIZE) + kernel.tls_msize;
+    return static_cast<uint32_t>(((raw_size + QUICKSTATE_PAGE_SIZE - 1) / QUICKSTATE_PAGE_SIZE) * QUICKSTATE_PAGE_SIZE);
+}
+
+static uint32_t quick_state_normalize_thread_block_allocations(std::vector<uint32_t> &allocator_words, std::vector<uint32_t> &allocation_pages, const std::vector<QuickStateThreadContext> &thread_contexts, const KernelState &kernel) {
+    uint32_t fixed_ranges = 0;
+    const uint32_t tls_size = quick_state_tls_allocation_size(kernel);
+
+    for (const auto &thread_context : thread_contexts) {
+        if (quick_state_mark_allocated_range(allocator_words, allocation_pages, thread_context.stack_address, thread_context.stack_size))
+            fixed_ranges++;
+        if (quick_state_mark_allocated_range(allocator_words, allocation_pages, thread_context.tls_address, tls_size))
+            fixed_ranges++;
+    }
+
+    return fixed_ranges;
 }
 
 static bool valid_quick_state_page(const MemState &mem, const Address address, const uint32_t size) {
@@ -1776,10 +1840,16 @@ static bool capture_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         for (uint32_t page = 0; page < page_count; page++)
             captured.allocation_pages.push_back(pack_quick_state_alloc_page(emuenv.mem.alloc_table[page]));
     }
+    const uint32_t normalized_thread_ranges = quick_state_normalize_thread_block_allocations(captured.allocator_words, captured.allocation_pages, captured.thread_contexts, emuenv.kernel);
+    if (normalized_thread_ranges > 0) {
+        LOG_INFO("Normalized {} thread stack/TLS allocation range(s) while capturing quickstate for {}.",
+            normalized_thread_ranges,
+            captured.title_id);
+    }
 
     captured.memory_pages.reserve(page_count / 8);
     for (uint32_t page = 1; page < page_count; page++) {
-        if (!memory_page_is_allocated(emuenv.mem, page))
+        if (!quick_state_allocator_page_is_allocated(captured.allocator_words, page))
             continue;
 
         const Address address = page * QUICKSTATE_PAGE_SIZE;
@@ -2280,14 +2350,6 @@ static bool remove_quick_state_extra_restore_threads(KernelState &kernel, const 
     return false;
 }
 
-static bool quick_state_alloc_page_is_allocated(const uint32_t packed) {
-    return ((packed >> 28) & 0xFU) != 0;
-}
-
-static uint32_t quick_state_alloc_page_size(const uint32_t packed) {
-    return packed & 0x0FFFFFFFU;
-}
-
 static bool quick_state_commit_guest_pages(MemState &mem, const uint32_t start_page, const uint32_t end_page) {
     if (end_page <= start_page)
         return true;
@@ -2295,6 +2357,47 @@ static bool quick_state_commit_guest_pages(MemState &mem, const uint32_t start_p
     const Address address = start_page * QUICKSTATE_PAGE_SIZE;
     const uint32_t size = (end_page - start_page) * QUICKSTATE_PAGE_SIZE;
     return commit_range(mem, address, size);
+}
+
+static bool quick_state_commit_allocated_word_ranges(MemState &mem, const std::vector<uint32_t> &allocator_words, const std::string &title_id) {
+    const uint32_t max_page = std::min<uint32_t>(static_cast<uint32_t>(mem.allocator.max_offset), static_cast<uint32_t>(allocator_words.size() * 32));
+    for (uint32_t page = 1; page < max_page;) {
+        if (!quick_state_allocator_page_is_allocated(allocator_words, page)) {
+            page++;
+            continue;
+        }
+
+        const uint32_t start_page = page;
+        while ((page < max_page) && quick_state_allocator_page_is_allocated(allocator_words, page))
+            page++;
+
+        if (!quick_state_commit_guest_pages(mem, start_page, page)) {
+            LOG_WARN("Refused quickstate restore for {} because guest memory pages {}-{} could not be committed.",
+                title_id,
+                start_page,
+                page);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static void quick_state_unprotect_allocated_word_ranges(MemState &mem, const std::vector<uint32_t> &allocator_words) {
+    const uint32_t max_page = std::min<uint32_t>(static_cast<uint32_t>(mem.allocator.max_offset), static_cast<uint32_t>(allocator_words.size() * 32));
+    for (uint32_t page = 1; page < max_page;) {
+        if (!quick_state_allocator_page_is_allocated(allocator_words, page)) {
+            page++;
+            continue;
+        }
+
+        const uint32_t start_page = page;
+        while ((page < max_page) && quick_state_allocator_page_is_allocated(allocator_words, page))
+            page++;
+
+        const Address address = start_page * QUICKSTATE_PAGE_SIZE;
+        unprotect_inner(mem, address, (page - start_page) * QUICKSTATE_PAGE_SIZE);
+    }
 }
 
 static bool restore_quick_state_allocation_map(EmuEnvState &emuenv, const QuickStateSlot &slot) {
@@ -2307,27 +2410,23 @@ static bool restore_quick_state_allocation_map(EmuEnvState &emuenv, const QuickS
         return false;
     }
 
-    for (uint32_t page = 1; page < slot.allocation_pages.size();) {
-        const uint32_t packed = slot.allocation_pages[page];
-        if (!quick_state_alloc_page_is_allocated(packed)) {
-            page++;
-            continue;
-        }
-
-        const uint32_t block_pages = std::max(quick_state_alloc_page_size(packed), 1U);
-        const uint32_t end_page = std::min<uint32_t>(page + block_pages, static_cast<uint32_t>(slot.allocation_pages.size()));
-        if (!quick_state_commit_guest_pages(mem, page, end_page)) {
-            LOG_WARN("Refused quickstate restore for {} because guest memory pages {}-{} could not be committed.", slot.title_id, page, end_page);
-            return false;
-        }
-        page = end_page;
+    std::vector<uint32_t> allocator_words = slot.allocator_words;
+    std::vector<uint32_t> allocation_pages = slot.allocation_pages;
+    const uint32_t normalized_thread_ranges = quick_state_normalize_thread_block_allocations(allocator_words, allocation_pages, slot.thread_contexts, emuenv.kernel);
+    if (normalized_thread_ranges > 0) {
+        LOG_INFO("Normalized {} saved thread stack/TLS allocation range(s) while restoring quickstate for {}.",
+            normalized_thread_ranges,
+            slot.title_id);
     }
+
+    if (!quick_state_commit_allocated_word_ranges(mem, allocator_words, slot.title_id))
+        return false;
 
     {
         const std::lock_guard<std::mutex> mem_lock(mem.generation_mutex);
-        mem.allocator.words = slot.allocator_words;
-        for (uint32_t page = 0; page < slot.allocation_pages.size(); page++)
-            unpack_quick_state_alloc_page(slot.allocation_pages[page], mem.alloc_table[page]);
+        mem.allocator.words = std::move(allocator_words);
+        for (uint32_t page = 0; page < allocation_pages.size(); page++)
+            unpack_quick_state_alloc_page(allocation_pages[page], mem.alloc_table[page]);
     }
 
     {
@@ -2335,18 +2434,7 @@ static bool restore_quick_state_allocation_map(EmuEnvState &emuenv, const QuickS
         mem.protect_tree.clear();
     }
 
-    for (uint32_t page = 1; page < slot.allocation_pages.size();) {
-        const uint32_t packed = slot.allocation_pages[page];
-        if (!quick_state_alloc_page_is_allocated(packed)) {
-            page++;
-            continue;
-        }
-
-        const uint32_t block_pages = std::max(quick_state_alloc_page_size(packed), 1U);
-        const Address address = page * QUICKSTATE_PAGE_SIZE;
-        unprotect_inner(mem, address, block_pages * QUICKSTATE_PAGE_SIZE);
-        page = std::min<uint32_t>(page + block_pages, static_cast<uint32_t>(slot.allocation_pages.size()));
-    }
+    quick_state_unprotect_allocated_word_ranges(mem, mem.allocator.words);
 
     protect_inner(mem, 0, mem.host_page_size, MemPerm::None);
 
