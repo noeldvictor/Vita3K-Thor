@@ -1610,11 +1610,12 @@ EXPORT(int, sceKernelPulseEventWithNotifyCallback) {
 
 EXPORT(SceInt32, sceKernelReceiveMsgPipe, SceUID msgPipeId, void *pRecvBuf, SceSize recvSize, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout) {
     TRACY_FUNC(sceKernelReceiveMsgPipe, msgPipeId, pRecvBuf, recvSize, waitMode, pResult, pTimeout);
-    const auto ret = msgpipe_recv(emuenv.kernel, export_name, thread_id, msgPipeId, waitMode, pRecvBuf, recvSize, pTimeout);
+    const auto ret = msgpipe_recv(emuenv.kernel, export_name, thread_id, msgPipeId, waitMode, pRecvBuf, recvSize, pResult, pTimeout);
     if (static_cast<int>(ret) < 0) {
         return ret;
     }
-    if (pResult) {
+    const auto thread = emuenv.kernel.get_thread(thread_id);
+    if (pResult && (!thread || !thread->has_deferred_import_wait())) {
         *pResult = ret;
     }
     return SCE_KERNEL_OK;
@@ -1647,11 +1648,12 @@ EXPORT(int, sceKernelRegisterThreadEventHandler, const char *name, SceUID thread
 
 EXPORT(SceInt32, sceKernelSendMsgPipe, SceUID msgPipeId, const void *pSendBuf, SceSize sendSize, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout) {
     TRACY_FUNC(sceKernelSendMsgPipe, msgPipeId, pSendBuf, sendSize, waitMode, pResult, pTimeout);
-    const auto ret = msgpipe_send(emuenv.kernel, export_name, thread_id, msgPipeId, waitMode, pSendBuf, sendSize, pTimeout);
+    const auto ret = msgpipe_send(emuenv.kernel, export_name, thread_id, msgPipeId, waitMode, pSendBuf, sendSize, pResult, pTimeout);
     if (static_cast<int>(ret) < 0) {
         return ret;
     }
-    if (pResult) {
+    const auto thread = emuenv.kernel.get_thread(thread_id);
+    if (pResult && (!thread || !thread->has_deferred_import_wait())) {
         *pResult = ret;
     }
     return SCE_KERNEL_OK;
@@ -1753,7 +1755,7 @@ EXPORT(int, sceKernelTryLockLwMutex_16XX, Ptr<SceKernelLwMutexWork> workarea, in
 
 EXPORT(int, sceKernelTryReceiveMsgPipe, SceUID msgpipe_id, char *recv_buf, SceSize msg_size, SceUInt32 wait_mode, SceSize *result) {
     TRACY_FUNC(sceKernelTryReceiveMsgPipe, msgpipe_id, recv_buf, msg_size, wait_mode, result);
-    const auto ret = msgpipe_recv(emuenv.kernel, export_name, thread_id, msgpipe_id, wait_mode | SCE_KERNEL_MSG_PIPE_MODE_DONT_WAIT, recv_buf, msg_size, 0);
+    const auto ret = msgpipe_recv(emuenv.kernel, export_name, thread_id, msgpipe_id, wait_mode | SCE_KERNEL_MSG_PIPE_MODE_DONT_WAIT, recv_buf, msg_size, result, 0);
     if (ret == 0) {
         return SCE_KERNEL_ERROR_MPP_EMPTY;
     }
@@ -1773,7 +1775,7 @@ EXPORT(int, sceKernelTrySendMsgPipe, SceUID msgPipeId, const void *pSendBuf, Sce
     STUBBED("");
     waitMode |= SCE_KERNEL_MSG_PIPE_MODE_DONT_WAIT;
     SceUInt32 pTimeout = 0;
-    const auto ret = msgpipe_send(emuenv.kernel, export_name, thread_id, msgPipeId, waitMode, pSendBuf, sendSize, &pTimeout);
+    const auto ret = msgpipe_send(emuenv.kernel, export_name, thread_id, msgPipeId, waitMode, pSendBuf, sendSize, pResult, &pTimeout);
     if (static_cast<int>(ret) < 0) {
         return ret;
     }

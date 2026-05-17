@@ -1813,7 +1813,7 @@ SceUID msgpipe_find(KernelState &kernel, const char *export_name, const char *pN
     return RET_ERROR(SCE_KERNEL_ERROR_UID_CANNOT_FIND_BY_NAME);
 }
 
-SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgPipeId, SceUInt32 waitMode, void *pRecvBuf, SceSize recvSize, SceUInt32 *pTimeout) {
+SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgPipeId, SceUInt32 waitMode, void *pRecvBuf, SceSize recvSize, SceSize *pResult, SceUInt32 *pTimeout) {
     assert(msgPipeId >= 0);
 
     const bool ASAP = !(waitMode & SCE_KERNEL_MSG_PIPE_MODE_FULL);
@@ -1853,7 +1853,17 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
             for (auto it = msgpipe->senders->begin(); it != msgpipe->senders->end(); ++it) {
                 auto threadInfo = (*it);
                 if (threadInfo.mp.request_size <= msgpipe->data_buffer.Free()) { // Found a thread we can service
-                    threadInfo.thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+                    if (threadInfo.deferred_import_wait) {
+                        const SceSize insertedSize = static_cast<SceSize>(msgpipe->data_buffer.Insert(threadInfo.mp.buffer, threadInfo.mp.transfer_size));
+                        if (threadInfo.mp.result)
+                            *threadInfo.mp.result = insertedSize;
+                        if (!threadInfo.thread->complete_deferred_import_wait(SCE_KERNEL_OK)) {
+                            const std::lock_guard<std::mutex> waiting_thread_lock(threadInfo.thread->mutex);
+                            threadInfo.thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+                        }
+                    } else {
+                        threadInfo.thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+                    }
 
                     msgpipe->senders->erase(it); // Erase other thread's info - done here to avoid race
                     break; // Should we try to signal other threads, too?
@@ -1874,7 +1884,17 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
         wait_data.thread = thread;
         wait_data.priority = thread->priority;
         wait_data.mp.request_size = (ASAP) ? 1 : recvSize; // If ASAP, we can read as low as 1 byte
+        wait_data.mp.transfer_size = recvSize;
+        wait_data.mp.buffer = pRecvBuf;
+        wait_data.mp.result = pResult;
+        wait_data.mp.wait_mode = waitMode;
         capture_wait_timeout(wait_data, pTimeout);
+
+        if (!pTimeout && thread->begin_deferred_import_wait()) {
+            wait_data.deferred_import_wait = true;
+            msgpipe->receivers->push(wait_data);
+            return SCE_KERNEL_OK;
+        }
 
         msgpipe->receivers->push(wait_data);
 
@@ -1923,7 +1943,7 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
 }
 
 // FIXME this should be SendVector!
-SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgPipeId, SceUInt32 waitMode, const void *pSendBuf, SceSize sendSize, SceUInt32 *pTimeout) {
+SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgPipeId, SceUInt32 waitMode, const void *pSendBuf, SceSize sendSize, SceSize *pResult, SceUInt32 *pTimeout) {
     assert(msgPipeId >= 0);
 
     const bool ASAP = !(waitMode & SCE_KERNEL_MSG_PIPE_MODE_FULL);
@@ -1946,8 +1966,21 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
     const auto wakeup_receivers = [&] { // TODO is this correct?
         if (!msgpipe->receivers->empty()) {
             for (auto it = msgpipe->receivers->begin(); it != msgpipe->receivers->end(); ++it) {
-                if ((*it).mp.request_size <= msgpipe->data_buffer.Used()) { // Found a thread we can service
-                    (*it).thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+                auto threadInfo = (*it);
+                if (threadInfo.mp.request_size <= msgpipe->data_buffer.Used()) { // Found a thread we can service
+                    if (threadInfo.deferred_import_wait) {
+                        const SceSize readSize = (threadInfo.mp.wait_mode & SCE_KERNEL_MSG_PIPE_MODE_DONT_REMOVE)
+                            ? static_cast<SceSize>(msgpipe->data_buffer.Peek(threadInfo.mp.buffer, threadInfo.mp.transfer_size))
+                            : static_cast<SceSize>(msgpipe->data_buffer.Remove(threadInfo.mp.buffer, threadInfo.mp.transfer_size));
+                        if (threadInfo.mp.result)
+                            *threadInfo.mp.result = readSize;
+                        if (!threadInfo.thread->complete_deferred_import_wait(SCE_KERNEL_OK)) {
+                            const std::lock_guard<std::mutex> waiting_thread_lock(threadInfo.thread->mutex);
+                            threadInfo.thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+                        }
+                    } else {
+                        threadInfo.thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+                    }
 
                     msgpipe->receivers->erase(it); // Erase other thread's info - done here to avoid race
                     break; // Should we try to signal other threads, too?
@@ -1978,7 +2011,17 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
         wait_data.thread = thread;
         wait_data.priority = thread->priority;
         wait_data.mp.request_size = (ASAP) ? 1 : sendSize; // If ASAP, we can insert as low as 1 byte
+        wait_data.mp.transfer_size = sendSize;
+        wait_data.mp.buffer = const_cast<void *>(pSendBuf);
+        wait_data.mp.result = pResult;
+        wait_data.mp.wait_mode = waitMode;
         capture_wait_timeout(wait_data, pTimeout);
+
+        if (!pTimeout && thread->begin_deferred_import_wait()) {
+            wait_data.deferred_import_wait = true;
+            msgpipe->senders->push(wait_data);
+            return SCE_KERNEL_OK;
+        }
 
         msgpipe->senders->push(wait_data);
 

@@ -1001,6 +1001,7 @@ constexpr uint32_t QUICKSTATE_COMPRESSION_NONE = 0;
 constexpr uint32_t QUICKSTATE_COMPRESSION_MINIZ = 1;
 constexpr auto QUICKSTATE_PAUSE_TIMEOUT = std::chrono::milliseconds(12000);
 constexpr auto QUICKSTATE_MUTEX_LOCK_TIMEOUT = std::chrono::milliseconds(500);
+constexpr auto QUICKSTATE_EXTRA_THREAD_EXIT_TIMEOUT = std::chrono::milliseconds(12000);
 
 static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvState &emuenv, const QuickStateSlot &slot);
 
@@ -2215,6 +2216,7 @@ static bool preflight_quick_state_restore_threads(EmuEnvState &emuenv, const Qui
                     colliding_thread->name,
                     thread_context.id,
                     thread_context.name);
+                colliding_thread->release_memory_blocks_for_quick_state();
                 colliding_thread->exit_delete(false);
                 if (!wait_for_quick_state_extra_threads_removed(emuenv.kernel, { thread_context.id })) {
                     LOG_WARN("Refused quickstate restore for {} because colliding current thread {} ({}) did not exit.",
@@ -2301,21 +2303,29 @@ static bool wait_for_quick_state_extra_threads_removed(KernelState &kernel, cons
     if (thread_ids.empty())
         return true;
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    const auto deadline = std::chrono::steady_clock::now() + QUICKSTATE_EXTRA_THREAD_EXIT_TIMEOUT;
     while (std::chrono::steady_clock::now() < deadline) {
         bool all_removed = true;
+        ThreadStatePtr thread_to_stop;
         {
             const std::lock_guard<std::mutex> kernel_lock(kernel.mutex);
             for (const SceUID thread_id : thread_ids) {
-                if (kernel.threads.contains(thread_id)) {
-                    all_removed = false;
-                    break;
-                }
+                const auto thread = kernel.threads.find(thread_id);
+                if (thread == kernel.threads.end())
+                    continue;
+
+                all_removed = false;
+                const std::lock_guard<std::mutex> thread_lock(thread->second->mutex);
+                if (thread->second->needs_quick_state_stop_pulse())
+                    thread_to_stop = thread->second;
+                break;
             }
         }
         if (all_removed)
             return true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        if (thread_to_stop && thread_to_stop->cpu)
+            stop(*thread_to_stop->cpu);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
     return false;
@@ -2334,16 +2344,12 @@ static bool remove_quick_state_extra_restore_threads(KernelState &kernel, const 
             thread->id,
             thread->name,
             title_id);
+        thread->release_memory_blocks_for_quick_state();
         thread->exit_delete(false);
     }
 
-    if (wait_for_quick_state_extra_threads_removed(kernel, thread_ids)) {
-        for (const auto &thread : extra_threads) {
-            if (thread)
-                thread->release_memory_blocks_for_quick_state();
-        }
+    if (wait_for_quick_state_extra_threads_removed(kernel, thread_ids))
         return true;
-    }
 
     quick_state_last_restore_detail = fmt::format("extra current restore threads did not exit: {}", quick_state_thread_list_detail(extra_threads));
     LOG_WARN("Refused quickstate restore for {} because {}.", title_id, quick_state_last_restore_detail);
@@ -5769,6 +5775,14 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
                 return false;
             }
             const std::lock_guard<std::mutex> mutex_lock(current->second->mutex);
+            if (!allow_live_host_state && saved_mutex.lightweight && current->second->workarea.address() != saved_mutex.workarea) {
+                LOG_INFO("Rebinding durable quickstate {} {} workarea from 0x{:08X} to saved 0x{:08X}.",
+                    kind,
+                    uid,
+                    current->second->workarea.address(),
+                    saved_mutex.workarea);
+                current->second->workarea = Ptr<SceKernelLwMutexWork>(saved_mutex.workarea);
+            }
             if (!quick_state_sync_identity_matches(*current->second, saved_mutex.name, saved_mutex.attr)
                 || quick_state_waiting_count(current->second->waiting_threads) != saved_mutex.waiting_count
                 || (saved_mutex.lightweight && current->second->workarea.address() != saved_mutex.workarea)) {
@@ -5938,6 +5952,8 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
             mutex->init_count = saved_mutex.init_count;
             mutex->lock_count = saved_mutex.lock_count;
             mutex->owner = resolve_owner(saved_mutex.owner);
+            if (saved_mutex.lightweight)
+                mutex->workarea = Ptr<SceKernelLwMutexWork>(saved_mutex.workarea);
         }
     };
     restore_mutex_map(emuenv.kernel.mutexes, snapshot.mutexes);

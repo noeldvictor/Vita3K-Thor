@@ -58,6 +58,10 @@ struct WaitingThreadData {
         // struct { }; // condvar
         struct { // msgpipe
             SceSize request_size;
+            SceSize transfer_size;
+            void *buffer;
+            SceSize *result;
+            SceUInt32 wait_mode;
         } mp;
     };
 
@@ -270,6 +274,6 @@ int eventflag_delete(KernelState &kernel, const char *export_name, SceUID thread
 // Message Pipe
 SceUID msgpipe_create(KernelState &kernel, const char *export_name, const char *name, SceUID thread_id, SceUInt attr, SceSize bufSize);
 SceUID msgpipe_find(KernelState &kernel, const char *export_name, const char *pName);
-SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgPipeId, SceUInt32 waitMode, void *pRecvBuf, SceSize recvSize, SceUInt32 *pTimeout);
-SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgPipeId, SceUInt32 waitMode, const void *pSendBuf, SceSize sendSize, SceUInt32 *pTimeout);
+SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgPipeId, SceUInt32 waitMode, void *pRecvBuf, SceSize recvSize, SceSize *pResult, SceUInt32 *pTimeout);
+SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgPipeId, SceUInt32 waitMode, const void *pSendBuf, SceSize sendSize, SceSize *pResult, SceUInt32 *pTimeout);
 SceInt32 msgpipe_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgpipe_id);

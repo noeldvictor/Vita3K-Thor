@@ -9,6 +9,8 @@ param(
     [int]$StartupSeconds = 10,
     [int]$AfterActionSeconds = 4,
     [int]$MarkerTimeoutSeconds = 90,
+    [ValidateRange(1, 100)]
+    [int]$Cycles = 1,
     [switch]$SkipBuild,
     [switch]$StopExisting,
     [switch]$KeepRunning
@@ -162,6 +164,7 @@ $summary.Add("Vita3K Thor Windows quickstate regression")
 $summary.Add("Started: $((Get-Date).ToString("o"))")
 $summary.Add("Commit: $(git -C $repoRoot rev-parse --short HEAD)")
 $summary.Add("Titles: $($TitleId -join ", ")")
+$summary.Add("Cycles: $Cycles")
 $summary.Add("")
 
 if ($StopExisting) {
@@ -177,24 +180,38 @@ if (-not $SkipBuild) {
 
 $failures = [System.Collections.Generic.List[string]]::new()
 
-foreach ($title in $TitleId) {
+$runs = @()
+for ($cycle = 1; $cycle -le $Cycles; $cycle++) {
+    foreach ($title in $TitleId) {
+        $runs += [pscustomobject]@{
+            Title = $title
+            Cycle = $cycle
+        }
+    }
+}
+
+foreach ($run in $runs) {
+    $title = $run.Title
+    $cycle = [int]$run.Cycle
     $titleSlug = Get-Slug $title
+    $prefixSlug = Get-Slug $CasePrefix
+    $cycleSlug = if ($Cycles -gt 1) { "$prefixSlug-cycle$cycle" } else { $prefixSlug }
     $stateFile = Join-Path $stateRoot "$title\slot0.thorstate"
     $captureMarker = Join-Path $stateRoot "$title\slot0.thorstate.capture.txt"
     $restoreMarker = Join-Path $stateRoot "$title\slot0.thorstate.restore.txt"
     if (-not (Test-Path -LiteralPath $stateFile)) {
-        $failures.Add("${title}: missing baseline state file $stateFile")
+        $failures.Add("${title} cycle ${cycle}: missing baseline state file $stateFile")
         continue
     }
 
-    $case1 = "$(Get-Slug $CasePrefix)-$titleSlug-durable-1"
-    $case2 = "$(Get-Slug $CasePrefix)-$titleSlug-durable-2"
+    $case1 = "$cycleSlug-$titleSlug-durable-1"
+    $case2 = "$cycleSlug-$titleSlug-durable-2"
     $control1 = Join-Path $repoRoot "tmp\vita3k-win-debug\$case1\render-control.txt"
     $control2 = Join-Path $repoRoot "tmp\vita3k-win-debug\$case2\render-control.txt"
     $stdout1 = Join-Path $repoRoot "tmp\vita3k-win-debug\$case1\vita3k.stdout.log"
     $stdout2 = Join-Path $repoRoot "tmp\vita3k-win-debug\$case2\vita3k.stdout.log"
 
-    $summary.Add("[$title] durable run 1: $case1")
+    $summary.Add("[$title cycle $cycle/$Cycles] durable run 1: $case1")
     $process = $null
     try {
         $process = Start-TitleRun $title $case1 $ConfigPath $BackendRenderer $TraceLimit $LogLevel
@@ -222,7 +239,7 @@ foreach ($title in $TitleId) {
         Start-Sleep -Seconds $AfterActionSeconds
         Assert-HealthyProcess $process "$title same-session load"
     } catch {
-        $failures.Add("$title run 1: $($_.Exception.Message)")
+        $failures.Add("$title cycle $cycle run 1: $($_.Exception.Message)")
     } finally {
         if (-not $KeepRunning) {
             Stop-Vita3KProcess $process
@@ -232,14 +249,14 @@ foreach ($title in $TitleId) {
     try {
         Assert-CleanLog $stdout1
     } catch {
-        $failures.Add("$title run 1 log: $($_.Exception.Message)")
+        $failures.Add("$title cycle $cycle run 1 log: $($_.Exception.Message)")
     }
 
     if (-not $KeepRunning) {
         Start-Sleep -Seconds 2
     }
 
-    $summary.Add("[$title] durable run 2: $case2")
+    $summary.Add("[$title cycle $cycle/$Cycles] durable run 2: $case2")
     $process = $null
     try {
         $process = Start-TitleRun $title $case2 $ConfigPath $BackendRenderer $TraceLimit $LogLevel
@@ -253,7 +270,7 @@ foreach ($title in $TitleId) {
         Start-Sleep -Seconds $AfterActionSeconds
         Assert-HealthyProcess $process "$title restart durable load"
     } catch {
-        $failures.Add("$title run 2: $($_.Exception.Message)")
+        $failures.Add("$title cycle $cycle run 2: $($_.Exception.Message)")
     } finally {
         if (-not $KeepRunning) {
             Stop-Vita3KProcess $process
@@ -263,7 +280,7 @@ foreach ($title in $TitleId) {
     try {
         Assert-CleanLog $stdout2
     } catch {
-        $failures.Add("$title run 2 log: $($_.Exception.Message)")
+        $failures.Add("$title cycle $cycle run 2 log: $($_.Exception.Message)")
     }
 }
 
@@ -281,4 +298,4 @@ if ($failures.Count -gt 0) {
 $summary.Add("Result: PASSED")
 $summary | Set-Content -LiteralPath $summaryPath -Encoding UTF8
 Write-Host "Quickstate regression summary: $summaryPath"
-Write-Host "Windows quickstate regression passed for: $($TitleId -join ", ")"
+Write-Host "Windows quickstate regression passed for: $($TitleId -join ", ") ($Cycles cycle(s))"
