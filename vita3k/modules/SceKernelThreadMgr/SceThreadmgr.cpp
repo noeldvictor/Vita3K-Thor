@@ -846,6 +846,36 @@ EXPORT(int, _sceKernelWaitSignalCB, uint32_t unknown, uint32_t delay, uint32_t t
 }
 
 static int wait_thread_end(ThreadStatePtr &waiter, ThreadStatePtr &target, int *stat) {
+    {
+        const std::unique_lock<std::mutex> thread_lock(target->mutex);
+        if (target->status == ThreadStatus::dormant) {
+            if (stat != nullptr) {
+                *stat = target->returned_value;
+            }
+            return 0;
+        }
+    }
+
+    if (waiter->begin_deferred_import_wait()) {
+        bool target_already_dormant = false;
+        uint32_t returned_value = 0;
+        {
+            const std::unique_lock<std::mutex> thread_lock(target->mutex);
+            if (target->status == ThreadStatus::dormant) {
+                target_already_dormant = true;
+                returned_value = target->returned_value;
+            } else {
+                target->waiting_threads.push_back(waiter);
+            }
+        }
+        if (target_already_dormant) {
+            if (stat != nullptr)
+                *stat = returned_value;
+            waiter->complete_deferred_import_wait(SCE_KERNEL_OK);
+        }
+        return 0;
+    }
+
     std::unique_lock<std::mutex> waiter_lock(waiter->mutex);
     {
         const std::unique_lock<std::mutex> thread_lock(target->mutex);
@@ -855,7 +885,6 @@ static int wait_thread_end(ThreadStatePtr &waiter, ThreadStatePtr &target, int *
             }
             return 0;
         }
-
         waiter->update_status(ThreadStatus::wait);
         target->waiting_threads.push_back(waiter);
     }

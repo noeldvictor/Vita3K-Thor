@@ -998,7 +998,7 @@ constexpr uint32_t QUICKSTATE_MAX_SECTION_COUNT = 64;
 constexpr uint64_t QUICKSTATE_MAX_SECTION_BYTES = 16 * 1024 * 1024;
 constexpr uint32_t QUICKSTATE_COMPRESSION_NONE = 0;
 constexpr uint32_t QUICKSTATE_COMPRESSION_MINIZ = 1;
-constexpr auto QUICKSTATE_PAUSE_TIMEOUT = std::chrono::milliseconds(3000);
+constexpr auto QUICKSTATE_PAUSE_TIMEOUT = std::chrono::milliseconds(12000);
 constexpr auto QUICKSTATE_MUTEX_LOCK_TIMEOUT = std::chrono::milliseconds(500);
 
 static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvState &emuenv, const QuickStateSlot &slot);
@@ -1636,19 +1636,15 @@ static bool wait_for_guest_threads_paused(KernelState &kernel, std::string_view 
     uint32_t stop_pulses = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         bool all_paused = true;
-        ThreadStatePtr late_running_thread;
+        ThreadStatePtr thread_to_stop;
         {
             const std::lock_guard<std::mutex> kernel_lock(kernel.mutex);
             for (const auto &[_, thread] : kernel.threads) {
                 const std::lock_guard<std::mutex> thread_lock(thread->mutex);
-                if (thread->status == ThreadStatus::run) {
+                if (!thread->is_quick_state_pause_quiesced()) {
                     all_paused = false;
-                    const ThreadStatus pause_snapshot_status = kernel.snapshot_thread_status_unlocked(thread->id, thread->status);
-                    if (pause_snapshot_status == ThreadStatus::run && thread->cpu) {
-                        stop(*thread->cpu);
-                    } else {
-                        late_running_thread = thread;
-                    }
+                    if (thread->needs_quick_state_stop_pulse())
+                        thread_to_stop = thread;
                     break;
                 }
             }
@@ -1657,9 +1653,10 @@ static bool wait_for_guest_threads_paused(KernelState &kernel, std::string_view 
         if (all_paused)
             return true;
 
-        if (late_running_thread && late_running_thread->cpu)
-            late_running_thread->suspend();
-        stop_pulses++;
+        if (thread_to_stop && thread_to_stop->cpu) {
+            stop(*thread_to_stop->cpu);
+            stop_pulses++;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
@@ -1668,7 +1665,7 @@ static bool wait_for_guest_threads_paused(KernelState &kernel, std::string_view 
         const std::lock_guard<std::mutex> kernel_lock(kernel.mutex);
         for (const auto &[thread_id, thread] : kernel.threads) {
             const std::lock_guard<std::mutex> thread_lock(thread->mutex);
-            if (thread->status != ThreadStatus::run)
+            if (thread->is_quick_state_pause_quiesced())
                 continue;
 
             running_threads.push_back(thread->quick_state_debug_summary());
@@ -5911,14 +5908,15 @@ static bool restore_quick_state_display_state(EmuEnvState &emuenv, const QuickSt
                     slot.title_id, saved_wait.thread_id, saved_wait.target_vcount, snapshot.vblank_count);
                 return false;
             }
-            if (!allow_live_host_state && !saved_wait.deferred_import_wait) {
+            const bool can_restore_as_deferred = saved_wait.deferred_import_wait || snapshot.vblank_callback_count == 0;
+            if (!allow_live_host_state && !can_restore_as_deferred) {
                 LOG_WARN("Refused display restore for {} because vblank wait thread {} needs a live host wait stack.",
                     slot.title_id, saved_wait.thread_id);
                 return false;
             }
-            if (saved_wait.deferred_import_wait)
+            if (can_restore_as_deferred)
                 thread->second->restore_deferred_import_wait();
-            restored_vblank_waits.push_back({ thread->second, saved_wait.target_vcount, saved_wait.deferred_import_wait });
+            restored_vblank_waits.push_back({ thread->second, saved_wait.target_vcount, can_restore_as_deferred });
         }
     }
 
@@ -6065,16 +6063,37 @@ static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const Qui
         return false;
     }
 
-    if (positions_by_fd.size() != emuenv.io.std_files.size()) {
+    for (const auto &[fd, position] : positions_by_fd) {
+        if (emuenv.io.tty_files.contains(fd) || emuenv.io.dir_entries.contains(fd)) {
+            LOG_WARN("Refused IO file-handle restore for {} because saved fd {} collides with an existing tty or directory handle.",
+                slot.title_id, fd);
+            quick_state_last_restore_detail = fmt::format("saved fd {} collides with an existing tty or directory handle", fd);
+            return false;
+        }
+    }
+
+    bool rebuild_file_handles = positions_by_fd.size() != emuenv.io.std_files.size();
+    if (!rebuild_file_handles) {
         for (const auto &[fd, position] : positions_by_fd) {
-            if (emuenv.io.tty_files.contains(fd) || emuenv.io.dir_entries.contains(fd)) {
-                LOG_WARN("Refused IO file-handle restore for {} because saved fd {} collides with an existing tty or directory handle.",
-                    slot.title_id, fd);
-                quick_state_last_restore_detail = fmt::format("saved fd {} collides with an existing tty or directory handle", fd);
-                return false;
+            const auto file = emuenv.io.std_files.find(fd);
+            if (file == emuenv.io.std_files.end()) {
+                rebuild_file_handles = true;
+                break;
+            }
+
+            const FileStats &current_file = file->second;
+            if (position.vita_path != current_file.get_vita_loc()
+                || position.translated_path != current_file.get_translated_path()
+                || position.host_path != current_file.get_system_location()
+                || position.open_mode != current_file.get_open_mode()
+                || position.memory_file != current_file.is_memory_file()) {
+                rebuild_file_handles = true;
+                break;
             }
         }
+    }
 
+    if (rebuild_file_handles) {
         StdFiles rebuilt_files;
         SceUID highest_fd = saved_next_fd;
         for (const auto &[fd, position] : positions_by_fd) {
@@ -6106,7 +6125,7 @@ static bool restore_quick_state_io_file_positions(EmuEnvState &emuenv, const Qui
     for (const auto &[fd, position] : positions_by_fd) {
         const auto file = emuenv.io.std_files.find(fd);
         if (file == emuenv.io.std_files.end()) {
-            LOG_WARN("Refused IO file-position restore for {} because fd {} is not open in the current session.", slot.title_id, fd);
+            LOG_WARN("Refused IO file-position restore for {} because fd {} is not open after file-handle reconciliation.", slot.title_id, fd);
             quick_state_last_restore_detail = fmt::format("fd {} is not open in the current session", fd);
             return false;
         }

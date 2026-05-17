@@ -123,10 +123,11 @@ int ThreadState::init(const char *name, Ptr<const void> entry_point, int init_pr
 
 void ThreadState::raise_waiting_threads() {
     for (const auto &t : waiting_threads) {
+        if (t->complete_deferred_import_wait(SCE_KERNEL_OK))
+            continue;
         const std::unique_lock<std::mutex> lock(t->mutex);
         assert(t->status == ThreadStatus::wait);
-        t->status = ThreadStatus::run;
-        t->status_cond.notify_all();
+        t->update_status(ThreadStatus::run, ThreadStatus::wait);
     }
     waiting_threads.clear();
 }
@@ -191,9 +192,12 @@ void ThreadState::exit_delete(bool exit) {
         stop(*cpu);
     }
 
-    // Wake if thread waiting on status_cond
-    if (status == ThreadStatus::wait)
-        update_status(ThreadStatus::run);
+    // Removing a thread must unwind any host wait even while quickstate restore
+    // has globally paused guest execution. Normal wake paths remain pause-aware.
+    if (status == ThreadStatus::wait) {
+        status = ThreadStatus::run;
+        status_cond.notify_all();
+    }
 
     // Wake if thread waiting on sceKernelWaitSignal
     signal.send();
@@ -461,6 +465,17 @@ void ThreadState::update_status(ThreadStatus status, std::optional<ThreadStatus>
     if (expected)
         assert(expected.value() == this->status);
 
+    if (status == ThreadStatus::run && kernel.is_threads_paused()) {
+        deferred_resume_after_pause = true;
+        if (this->status == ThreadStatus::wait && (to_do == ThreadToDo::run || to_do == ThreadToDo::step)) {
+            this->status = ThreadStatus::run;
+            to_do = ThreadToDo::suspend;
+            status_cond.notify_all();
+            return;
+        }
+        status = ThreadStatus::suspend;
+    }
+
     this->status = status;
     status_cond.notify_all();
 
@@ -490,6 +505,17 @@ void ThreadState::resume(bool step) {
         to_do = step ? ThreadToDo::step : ThreadToDo::run;
     }
     something_to_do.notify_one();
+}
+
+bool ThreadState::is_quick_state_pause_quiesced() const {
+    return status != ThreadStatus::run
+        && to_do != ThreadToDo::run
+        && to_do != ThreadToDo::step
+        && active_import_nid.load(std::memory_order_relaxed) == 0;
+}
+
+bool ThreadState::needs_quick_state_stop_pulse() const {
+    return status == ThreadStatus::run && cpu != nullptr;
 }
 
 bool ThreadState::begin_deferred_import_wait() {
@@ -580,10 +606,16 @@ bool ThreadState::consume_deferred_import_return() {
 
 void ThreadState::resume_after_pause_if_needed(bool saved_running_before_pause) {
     const std::lock_guard<std::mutex> lock(mutex);
-    const bool should_resume = saved_running_before_pause || deferred_resume_after_pause;
+    const bool deferred_resume = deferred_resume_after_pause;
+    const bool should_resume = saved_running_before_pause || deferred_resume;
     deferred_resume_after_pause = false;
     if (!should_resume)
         return;
+
+    if (deferred_resume) {
+        status = ThreadStatus::run;
+        status_cond.notify_all();
+    }
 
     if (to_do == ThreadToDo::wait || to_do == ThreadToDo::suspend) {
         to_do = ThreadToDo::run;

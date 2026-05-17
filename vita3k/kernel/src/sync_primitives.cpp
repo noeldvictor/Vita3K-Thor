@@ -1853,8 +1853,7 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
             for (auto it = msgpipe->senders->begin(); it != msgpipe->senders->end(); ++it) {
                 auto threadInfo = (*it);
                 if (threadInfo.mp.request_size <= msgpipe->data_buffer.Free()) { // Found a thread we can service
-                    threadInfo.thread->status = ThreadStatus::run;
-                    threadInfo.thread->status_cond.notify_one();
+                    threadInfo.thread->update_status(ThreadStatus::run, ThreadStatus::wait);
 
                     msgpipe->senders->erase(it); // Erase other thread's info - done here to avoid race
                     break; // Should we try to signal other threads, too?

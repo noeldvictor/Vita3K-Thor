@@ -118,6 +118,8 @@ struct ThreadState {
 
     void suspend();
     void resume(bool step = false);
+    bool is_quick_state_pause_quiesced() const;
+    bool needs_quick_state_stop_pulse() const;
     bool begin_deferred_import_wait();
     bool restore_deferred_import_wait();
     void clear_deferred_import_wait_for_restore();

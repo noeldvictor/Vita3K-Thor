@@ -96,13 +96,15 @@ bool wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePt
     if (!wait_thread)
         return false;
 
-    if (!is_cb) {
+    {
         const std::lock_guard<std::mutex> guard(display.mutex);
-        if (target_vcount <= display.vblank_count)
-            return false;
-        if (wait_thread->begin_deferred_import_wait()) {
-            display.vblank_wait_infos.push_back({ wait_thread, target_vcount, true });
-            return true;
+        if (!is_cb || display.vblank_callbacks.empty()) {
+            if (target_vcount <= display.vblank_count)
+                return false;
+            if (wait_thread->begin_deferred_import_wait()) {
+                display.vblank_wait_infos.push_back({ wait_thread, target_vcount, true });
+                return true;
+            }
         }
     }
 
