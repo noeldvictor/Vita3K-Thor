@@ -326,7 +326,7 @@ static bool quick_state_parse_address_text(const std::string &text, Address &out
     return true;
 }
 
-static bool quick_state_parse_indexed_player(const std::map<std::string, std::string> &values, const size_t index, std::map<std::string, std::string> &fields, std::string *detail) {
+static bool quick_state_parse_indexed_player(const std::map<std::string, std::string> &values, const size_t index, const bool require_v2_fields, std::map<std::string, std::string> &fields, std::string *detail) {
     const std::string key = fmt::format("player.{}", index);
     const auto value = values.find(key);
     if (value == values.end()) {
@@ -374,12 +374,30 @@ static bool quick_state_parse_indexed_player(const std::map<std::string, std::st
         }
     }
 
+    if (require_v2_fields) {
+        static constexpr const char *required_v2_fields[] = {
+            "last_video_time_us",
+            "last_audio_timestamp",
+            "last_audio_time_us",
+            "video_packets",
+            "audio_packets",
+            "cursor_restore",
+        };
+        for (const char *field : required_v2_fields) {
+            if (!fields.contains(field)) {
+                if (detail)
+                    *detail = fmt::format("player {} v2 field '{}' is missing", index, field);
+                return false;
+            }
+        }
+    }
+
     return true;
 }
 
 std::string quick_state_snapshot_text(EmuEnvState &emuenv) {
     std::ostringstream text;
-    text << "schema=thor.avplayer.v1\n";
+    text << "schema=thor.avplayer.v2\n";
 
     AvPlayerState *state = emuenv.kernel.obj_store.get_if<AvPlayerState>();
     if (!state) {
@@ -423,9 +441,15 @@ std::string quick_state_snapshot_text(EmuEnvState &emuenv) {
              << ";paused=" << player_info->paused
              << ";last_frame_age_us=" << last_frame_age_us
              << ";last_timestamp=" << player_state.last_timestamp
+             << ";last_video_time_us=" << player_state.last_video_time_us
+             << ";last_audio_timestamp=" << player_state.last_audio_timestamp
+             << ";last_audio_time_us=" << player_state.last_audio_time_us
              << ";last_channels=" << player_state.last_channels
              << ";last_sample_rate=" << player_state.last_sample_rate
              << ";last_sample_count=" << player_state.last_sample_count
+             << ";video_packets=" << player_state.video_packet_count
+             << ";audio_packets=" << player_state.audio_packet_count
+             << ";cursor_restore=seek-prime"
              << ";general_user=" << player_info->memory_allocator.user_data
              << ";general_allocator=0x" << std::hex << player_info->memory_allocator.general_allocator.address()
              << ";general_deallocator=0x" << player_info->memory_allocator.general_deallocator.address()
@@ -455,11 +479,12 @@ std::string quick_state_snapshot_text(EmuEnvState &emuenv) {
 
 bool quick_state_validate_snapshot_values(const std::map<std::string, std::string> &values, size_t *player_count, size_t *active_player_count, std::string *detail) {
     const auto schema = values.find("schema");
-    if (schema == values.end() || schema->second != "thor.avplayer.v1") {
+    if (schema == values.end() || (schema->second != "thor.avplayer.v1" && schema->second != "thor.avplayer.v2")) {
         if (detail)
             *detail = "AVPlayer section schema is invalid";
         return false;
     }
+    const bool schema_v2 = schema->second == "thor.avplayer.v2";
 
     uint64_t parsed_players = 0;
     uint64_t parsed_active = 0;
@@ -478,18 +503,20 @@ bool quick_state_validate_snapshot_values(const std::map<std::string, std::strin
     if (active_player_count)
         *active_player_count = static_cast<size_t>(parsed_active);
 
+    size_t actual_active_players = 0;
     for (size_t index = 0; index < static_cast<size_t>(parsed_players); index++) {
         std::map<std::string, std::string> fields;
-        if (!quick_state_parse_indexed_player(values, index, fields, detail))
+        if (!quick_state_parse_indexed_player(values, index, schema_v2, fields, detail))
             return false;
 
         uint32_t parsed_u32 = 0;
         uint64_t parsed_u64 = 0;
         Address parsed_address = 0;
         bool parsed_bool = false;
+        bool active = false;
         std::string decoded_path;
         if (!quick_state_parse_u32_text(fields.at("handle"), parsed_u32) || parsed_u32 == 0
-            || !quick_state_parse_bool_text(fields.at("active"), parsed_bool)
+            || !quick_state_parse_bool_text(fields.at("active"), active)
             || !quick_state_unhex_string(fields.at("playing"), decoded_path)
             || !quick_state_parse_u64_text(fields.at("queued"), parsed_u64) || parsed_u64 > 64
             || !quick_state_parse_u32_text(fields.at("video_ring"), parsed_u32)
@@ -521,6 +548,31 @@ bool quick_state_validate_snapshot_values(const std::map<std::string, std::strin
             return false;
         }
 
+        if (active != !decoded_path.empty()) {
+            if (detail)
+                *detail = fmt::format("AVPlayer player {} active flag does not match playing path", index);
+            return false;
+        }
+        if (active)
+            actual_active_players++;
+        if (!schema_v2 && active) {
+            if (detail)
+                *detail = fmt::format("AVPlayer player {} uses old v1 active movie cursor without exact restore metadata", index);
+            return false;
+        }
+        if (schema_v2) {
+            if (!quick_state_parse_u64_text(fields.at("last_video_time_us"), parsed_u64)
+                || !quick_state_parse_u64_text(fields.at("last_audio_timestamp"), parsed_u64)
+                || !quick_state_parse_u64_text(fields.at("last_audio_time_us"), parsed_u64)
+                || !quick_state_parse_u32_text(fields.at("video_packets"), parsed_u32)
+                || !quick_state_parse_u32_text(fields.at("audio_packets"), parsed_u32)
+                || fields.at("cursor_restore") != "seek-prime") {
+                if (detail)
+                    *detail = fmt::format("AVPlayer player {} v2 cursor metadata is invalid", index);
+                return false;
+            }
+        }
+
         uint64_t queued = 0;
         quick_state_parse_u64_text(fields.at("queued"), queued);
         for (size_t queue_index = 0; queue_index < static_cast<size_t>(queued); queue_index++) {
@@ -543,6 +595,12 @@ bool quick_state_validate_snapshot_values(const std::map<std::string, std::strin
         }
     }
 
+    if (actual_active_players != static_cast<size_t>(parsed_active)) {
+        if (detail)
+            *detail = fmt::format("AVPlayer active player count {} does not match header {}", actual_active_players, parsed_active);
+        return false;
+    }
+
     return true;
 }
 
@@ -550,6 +608,7 @@ bool quick_state_restore_snapshot(EmuEnvState &emuenv, const std::map<std::strin
     size_t player_count = 0;
     if (!quick_state_validate_snapshot_values(values, &player_count, nullptr, detail))
         return false;
+    const bool schema_v2 = values.at("schema") == "thor.avplayer.v2";
 
     AvPlayerState *state = emuenv.kernel.obj_store.get_if<AvPlayerState>();
     if (!state) {
@@ -566,7 +625,7 @@ bool quick_state_restore_snapshot(EmuEnvState &emuenv, const std::map<std::strin
     PlayerStates restored_players;
     for (size_t index = 0; index < player_count; index++) {
         std::map<std::string, std::string> fields;
-        if (!quick_state_parse_indexed_player(values, index, fields, detail))
+        if (!quick_state_parse_indexed_player(values, index, schema_v2, fields, detail))
             return false;
 
         uint32_t handle = 0;
@@ -608,6 +667,15 @@ bool quick_state_restore_snapshot(EmuEnvState &emuenv, const std::map<std::strin
             return false;
         }
         player_info->last_frame_time = now > parsed_u64 ? now - parsed_u64 : now;
+        if (schema_v2) {
+            if (!quick_state_parse_u64_text(fields.at("last_video_time_us"), player_state.last_video_time_us)
+                || !quick_state_parse_u64_text(fields.at("last_audio_timestamp"), player_state.last_audio_timestamp)
+                || !quick_state_parse_u64_text(fields.at("last_audio_time_us"), player_state.last_audio_time_us)) {
+                if (detail)
+                    *detail = fmt::format("AVPlayer player {} v2 cursor restore fields are invalid", index);
+                return false;
+            }
+        }
 
         if (!quick_state_parse_u32_text(fields.at("general_user"), player_info->memory_allocator.user_data)
             || !quick_state_parse_address_text(fields.at("general_allocator"), parsed_address)) {

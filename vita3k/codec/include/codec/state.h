@@ -251,9 +251,14 @@ struct PlayerQuickState {
     uint64_t time_of_last_frame = 0;
     uint64_t framerate_microseconds = 0;
     uint64_t last_timestamp = 0;
+    uint64_t last_video_time_us = 0;
+    uint64_t last_audio_timestamp = 0;
+    uint64_t last_audio_time_us = 0;
     uint32_t last_channels = 0;
     uint32_t last_sample_rate = 0;
     uint32_t last_sample_count = 0;
+    uint32_t video_packet_count = 0;
+    uint32_t audio_packet_count = 0;
 };
 
 struct PlayerState {
@@ -273,16 +278,26 @@ struct PlayerState {
     uint64_t framerate_microseconds = 0;
 
     uint64_t last_timestamp = 0;
+    uint64_t last_video_time_us = 0;
+    uint64_t last_audio_timestamp = 0;
+    uint64_t last_audio_time_us = 0;
     uint32_t last_channels = 0;
     uint32_t last_sample_rate = 0;
     uint32_t last_sample_count = 0;
 
+    bool restored_video_frame_ready = false;
+    uint64_t restored_video_frame_timestamp = 0;
+    uint64_t restored_video_frame_time_us = 0;
+    std::vector<uint8_t> restored_video_frame;
+
     DecoderSize get_size();
     uint64_t get_framerate_microseconds();
+    uint64_t stream_timestamp_to_microseconds(int32_t stream_id, uint64_t timestamp) const;
 
     void pop_video();
     void free_video();
     bool switch_video(const std::string &path);
+    bool prime_video_frame_at_or_after(uint64_t target_timestamp, std::string *detail = nullptr);
 
     bool next_packet(int32_t stream_id);
 

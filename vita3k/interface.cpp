@@ -1458,6 +1458,8 @@ struct QuickStateAvPlayerSnapshot {
     bool valid = false;
     size_t player_count = 0;
     size_t active_player_count = 0;
+    std::string schema;
+    bool exact_cursor_restore = false;
     std::string detail;
 };
 
@@ -1504,6 +1506,8 @@ struct QuickStateRestoreManifest {
     size_t gxm_notification_waits = 0;
     size_t avplayer_players = 0;
     size_t avplayer_active_players = 0;
+    std::string avplayer_schema;
+    bool avplayer_exact_cursor_restore = false;
     QuickStateKernelObjectCounts kernel;
     QuickStateIOCounts io;
     std::vector<std::string> missing_serializers;
@@ -4506,6 +4510,8 @@ static bool quick_state_parse_avplayer_snapshot_section(const QuickStateSlot &sl
     }
 
     const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    snapshot.schema = schema == values.end() ? "" : schema->second;
     std::string detail;
     if (!sce_avplayer::quick_state_validate_snapshot_values(values, &snapshot.player_count, &snapshot.active_player_count, &detail)) {
         snapshot.detail = detail.empty() ? "AVPlayer host-state section is invalid" : detail;
@@ -4513,6 +4519,7 @@ static bool quick_state_parse_avplayer_snapshot_section(const QuickStateSlot &sl
     }
 
     snapshot.valid = true;
+    snapshot.exact_cursor_restore = snapshot.schema == "thor.avplayer.v2" || snapshot.active_player_count == 0;
     return true;
 }
 
@@ -4696,6 +4703,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     manifest.avplayer_state_restorable = quick_state_parse_avplayer_snapshot_section(slot, avplayer_snapshot);
     manifest.avplayer_players = avplayer_snapshot.player_count;
     manifest.avplayer_active_players = avplayer_snapshot.active_player_count;
+    manifest.avplayer_schema = avplayer_snapshot.schema;
+    manifest.avplayer_exact_cursor_restore = avplayer_snapshot.exact_cursor_restore;
     manifest.ngs_state_restorable = quick_state_parse_ngs_snapshot_header(slot);
     manifest.kernel = quick_state_count_kernel_objects(emuenv);
     manifest.io = quick_state_count_io_objects(emuenv);
@@ -4742,6 +4751,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         manifest.missing_serializers.push_back("gxm-program-host-state");
     if (!manifest.avplayer_state_restorable && manifest.avplayer_threads > 0)
         manifest.missing_serializers.push_back("avplayer-movie-state");
+    if (manifest.avplayer_state_restorable && manifest.avplayer_active_players > 0 && !manifest.avplayer_exact_cursor_restore)
+        manifest.missing_serializers.push_back("avplayer-exact-cursor");
     if (!manifest.ngs_state_restorable && quick_state_needs_ngs_durable_restore(emuenv, slot))
         manifest.missing_serializers.push_back("ngs-host-state");
     if (!manifest.io_file_positions_restorable) {
@@ -8703,6 +8714,8 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "GXM shader program host-state restore layer: " << (manifest.gxm_program_host_state_restorable ? "ready" : "missing") << "\n";
     marker << "Audio scalar restore layer: " << (manifest.audio_state_restorable ? "ready" : "missing") << "\n";
     marker << "AVPlayer host-state restore layer: " << (manifest.avplayer_state_restorable ? "ready" : "missing") << "\n";
+    marker << "AVPlayer schema: " << (manifest.avplayer_schema.empty() ? "missing" : manifest.avplayer_schema) << "\n";
+    marker << "AVPlayer exact cursor restore: " << (manifest.avplayer_exact_cursor_restore ? "ready" : "missing") << "\n";
     marker << "AVPlayer players: " << manifest.avplayer_players << " (" << manifest.avplayer_active_players << " active)\n";
     marker << "NGS host-state restore layer: " << (manifest.ngs_state_restorable ? "ready" : "missing") << "\n";
     marker << "Block reason: " << manifest.block_reason << "\n";
@@ -8788,6 +8801,8 @@ static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickSta
     marker << "GXM shader program host-state restore layer: " << (manifest.gxm_program_host_state_restorable ? "ready" : "missing") << "\n";
     marker << "Audio scalar restore layer: " << (manifest.audio_state_restorable ? "ready" : "missing") << "\n";
     marker << "AVPlayer host-state restore layer: " << (manifest.avplayer_state_restorable ? "ready" : "missing") << "\n";
+    marker << "AVPlayer schema: " << (manifest.avplayer_schema.empty() ? "missing" : manifest.avplayer_schema) << "\n";
+    marker << "AVPlayer exact cursor restore: " << (manifest.avplayer_exact_cursor_restore ? "ready" : "missing") << "\n";
     marker << "AVPlayer players: " << manifest.avplayer_players << " (" << manifest.avplayer_active_players << " active)\n";
     marker << "NGS host-state restore layer: " << (manifest.ngs_state_restorable ? "ready" : "missing") << "\n";
     marker << "Block reason: " << manifest.block_reason << "\n";
