@@ -10357,7 +10357,7 @@ void runtime_request_undo_load_state(EmuEnvState &emuenv) {
     }
 
     LOG_INFO("Loaded disk-backed quickstate load-undo slot for {} from {}", title_id, quick_state_load_undo_file(emuenv, title_id));
-    runtime_restore_quick_state_slot(emuenv, undo_slot, true, "durable-undo", "load-undo", true);
+    runtime_restore_quick_state_slot(emuenv, undo_slot, true, "durable-undo", "load-undo", false);
 }
 
 static std::string runtime_control_trim(std::string_view text) {
