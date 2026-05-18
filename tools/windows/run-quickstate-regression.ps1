@@ -163,6 +163,8 @@ function Add-MarkerDigest([System.Collections.Generic.List[string]]$Summary, [st
         "^Sysmem VM blocks:",
         "^Fiber tracked fibers:",
         "^Fiber active threads:",
+        "^SharedFb created:",
+        "^SharedFb memsize:",
         "^Display vblank waits:",
         "^Display vblank callbacks:",
         "^GXM display queue entries:",

@@ -52,6 +52,7 @@
 #include <modules/SceAvPlayer/quick_state.h>
 #include <modules/SceFiber/quick_state.h>
 #include <modules/SceJpeg/quick_state.h>
+#include <modules/SceSharedFb/quick_state.h>
 #include <modules/SceSysmem/quick_state.h>
 #include <modules/SceVideodec/quick_state.h>
 #include <motion/event_handler.h>
@@ -1509,6 +1510,16 @@ struct QuickStateFiberSnapshot {
     std::string detail;
 };
 
+struct QuickStateSharedFbSnapshot {
+    bool valid = false;
+    bool created = false;
+    uint32_t memsize = 0;
+    uint32_t base1 = 0;
+    uint32_t base2 = 0;
+    std::string schema;
+    std::string detail;
+};
+
 struct QuickStateRestoreManifest {
     uint32_t format_version = QUICKSTATE_VERSION;
     uint64_t guest_memory_bytes = 0;
@@ -1527,6 +1538,7 @@ struct QuickStateRestoreManifest {
     bool io_overlays_restorable = false;
     bool sysmem_state_restorable = false;
     bool fiber_state_restorable = false;
+    bool sharedfb_state_restorable = false;
     bool sync_primitives_restorable = false;
     bool sync_wait_queue_metadata_complete = false;
     bool display_state_restorable = false;
@@ -1553,6 +1565,11 @@ struct QuickStateRestoreManifest {
     size_t fiber_count = 0;
     size_t fiber_active_threads = 0;
     std::string fiber_schema;
+    bool sharedfb_created = false;
+    uint32_t sharedfb_memsize = 0;
+    uint32_t sharedfb_base1 = 0;
+    uint32_t sharedfb_base2 = 0;
+    std::string sharedfb_schema;
     size_t display_wait_entries = 0;
     size_t display_callback_entries = 0;
     size_t kernel_callback_entries = 0;
@@ -4632,6 +4649,27 @@ static bool quick_state_parse_fiber_snapshot_section(const QuickStateSlot &slot,
     return true;
 }
 
+static bool quick_state_parse_sharedfb_snapshot_section(const QuickStateSlot &slot, QuickStateSharedFbSnapshot &snapshot) {
+    snapshot = {};
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.sharedfb");
+    if (!section || section->version != 1) {
+        snapshot.detail = "SharedFb host-state section is missing";
+        return false;
+    }
+
+    const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    snapshot.schema = schema == values.end() ? "" : schema->second;
+    std::string detail;
+    if (!sce_sharedfb::quick_state_validate_snapshot_values(values, &snapshot.created, &snapshot.memsize, &snapshot.base1, &snapshot.base2, &detail)) {
+        snapshot.detail = detail.empty() ? "SharedFb host-state section is invalid" : detail;
+        return false;
+    }
+
+    snapshot.valid = true;
+    return true;
+}
+
 static bool quick_state_parse_audiodec_snapshot_section(const QuickStateSlot &slot, QuickStateAudiodecSnapshot &snapshot) {
     snapshot = {};
     const QuickStateSection *section = quick_state_find_section(slot, "thor.audiodec");
@@ -4854,6 +4892,13 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     manifest.fiber_count = fiber_snapshot.fiber_count;
     manifest.fiber_active_threads = fiber_snapshot.active_thread_count;
     manifest.fiber_schema = fiber_snapshot.schema;
+    QuickStateSharedFbSnapshot sharedfb_snapshot;
+    manifest.sharedfb_state_restorable = quick_state_parse_sharedfb_snapshot_section(slot, sharedfb_snapshot);
+    manifest.sharedfb_created = sharedfb_snapshot.created;
+    manifest.sharedfb_memsize = sharedfb_snapshot.memsize;
+    manifest.sharedfb_base1 = sharedfb_snapshot.base1;
+    manifest.sharedfb_base2 = sharedfb_snapshot.base2;
+    manifest.sharedfb_schema = sharedfb_snapshot.schema;
     QuickStateSyncSnapshot sync_snapshot;
     manifest.sync_primitives_restorable = quick_state_parse_sync_primitives_section(slot, sync_snapshot);
     if (manifest.sync_primitives_restorable) {
@@ -4933,6 +4978,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         manifest.missing_serializers.push_back("sysmem-state");
     if (!manifest.fiber_state_restorable)
         manifest.missing_serializers.push_back("fiber-state");
+    if (!manifest.sharedfb_state_restorable)
+        manifest.missing_serializers.push_back("sharedfb-state");
     if (!manifest.kernel_callbacks_restorable && manifest.kernel_callback_entries > 0)
         manifest.missing_serializers.push_back("kernel-callbacks");
     if (!manifest.display_state_restorable) {
@@ -4988,6 +5035,7 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         && manifest.kernel_callbacks_restorable
         && manifest.sysmem_state_restorable
         && manifest.fiber_state_restorable
+        && manifest.sharedfb_state_restorable
         && manifest.sync_primitives_restorable
         && manifest.io_file_positions_restorable
         && manifest.display_state_restorable
@@ -5991,6 +6039,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         "thor.kernel.objects",
         "thor.sysmem",
         "thor.fiber",
+        "thor.sharedfb",
         "thor.io.vfs",
         "thor.display",
         "thor.gxm",
@@ -6322,6 +6371,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
 
     sections.push_back(quick_state_make_text_section("thor.sysmem", sce_sysmem::quick_state_snapshot_text(emuenv)));
     sections.push_back(quick_state_make_text_section("thor.fiber", sce_fiber::quick_state_snapshot_text(emuenv)));
+    sections.push_back(quick_state_make_text_section("thor.sharedfb", sce_sharedfb::quick_state_snapshot_text(emuenv)));
 
     {
         std::ostringstream text;
@@ -6570,6 +6620,33 @@ static bool restore_quick_state_fiber_state(EmuEnvState &emuenv, const QuickStat
         slot.title_id,
         snapshot.fiber_count,
         snapshot.active_thread_count);
+    return true;
+}
+
+static bool restore_quick_state_sharedfb_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.sharedfb");
+    if (!section || section->version != 1) {
+        LOG_WARN("Refused SharedFb restore for {} because the thor.sharedfb section is missing.", slot.title_id);
+        quick_state_last_restore_detail = "SharedFb host-state section is missing";
+        return false;
+    }
+
+    const auto values = quick_state_parse_text_section(*section);
+    std::string detail;
+    if (!sce_sharedfb::quick_state_restore_snapshot(emuenv, values, &detail)) {
+        quick_state_last_restore_detail = detail.empty() ? "SharedFb host-state restore failed" : detail;
+        LOG_WARN("Refused SharedFb restore for {} because {}.", slot.title_id, quick_state_last_restore_detail);
+        return false;
+    }
+
+    QuickStateSharedFbSnapshot snapshot;
+    quick_state_parse_sharedfb_snapshot_section(slot, snapshot);
+    LOG_INFO("Restored SharedFb host snapshot for {} (created={}, memsize={}, base1=0x{:x}, base2=0x{:x}).",
+        slot.title_id,
+        snapshot.created,
+        snapshot.memsize,
+        snapshot.base1,
+        snapshot.base2);
     return true;
 }
 
@@ -8891,6 +8968,12 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         return fail_quick_state_restore();
     }
 
+    if (!restore_quick_state_sharedfb_state(emuenv, slot)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "SharedFb host-state restore failed";
+        return fail_quick_state_restore();
+    }
+
     if (!allow_live_host_state && !restore_quick_state_gxm_state(emuenv, slot)) {
         if (quick_state_last_restore_detail.empty())
             quick_state_last_restore_detail = "GXM host-state restore failed";
@@ -9118,6 +9201,12 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "Fiber schema: " << (manifest.fiber_schema.empty() ? "missing" : manifest.fiber_schema) << "\n";
     marker << "Fiber tracked fibers: " << manifest.fiber_count << "\n";
     marker << "Fiber active threads: " << manifest.fiber_active_threads << "\n";
+    marker << "SharedFb host-state restore layer: " << (manifest.sharedfb_state_restorable ? "ready" : "missing") << "\n";
+    marker << "SharedFb schema: " << (manifest.sharedfb_schema.empty() ? "missing" : manifest.sharedfb_schema) << "\n";
+    marker << "SharedFb created: " << (manifest.sharedfb_created ? "yes" : "no") << "\n";
+    marker << "SharedFb memsize: " << manifest.sharedfb_memsize << "\n";
+    marker << "SharedFb base1: 0x" << std::hex << manifest.sharedfb_base1 << "\n";
+    marker << "SharedFb base2: 0x" << manifest.sharedfb_base2 << std::dec << "\n";
     marker << "Display scalar restore layer: " << (manifest.display_state_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank wait restore layer: " << (manifest.display_vblank_waits_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank waits: " << manifest.display_wait_entries << "\n";
@@ -9233,6 +9322,12 @@ static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickSta
     marker << "Fiber schema: " << (manifest.fiber_schema.empty() ? "missing" : manifest.fiber_schema) << "\n";
     marker << "Fiber tracked fibers: " << manifest.fiber_count << "\n";
     marker << "Fiber active threads: " << manifest.fiber_active_threads << "\n";
+    marker << "SharedFb host-state restore layer: " << (manifest.sharedfb_state_restorable ? "ready" : "missing") << "\n";
+    marker << "SharedFb schema: " << (manifest.sharedfb_schema.empty() ? "missing" : manifest.sharedfb_schema) << "\n";
+    marker << "SharedFb created: " << (manifest.sharedfb_created ? "yes" : "no") << "\n";
+    marker << "SharedFb memsize: " << manifest.sharedfb_memsize << "\n";
+    marker << "SharedFb base1: 0x" << std::hex << manifest.sharedfb_base1 << "\n";
+    marker << "SharedFb base2: 0x" << manifest.sharedfb_base2 << std::dec << "\n";
     marker << "Display scalar restore layer: " << (manifest.display_state_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank wait restore layer: " << (manifest.display_vblank_waits_restorable ? "ready" : "missing") << "\n";
     marker << "GXM host-state restore layer: " << (manifest.gxm_state_restorable ? "ready" : "missing") << "\n";
