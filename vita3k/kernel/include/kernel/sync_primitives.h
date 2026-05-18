@@ -232,6 +232,7 @@ SceInt32 timer_set(KernelState &kernel, const char *export_name, SceUID thread_i
 SceInt32 timer_start(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID timer_handle);
 SceInt32 timer_stop(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID timer_handle);
 void timer_schedule_deferred_event(const KernelState &kernel, const TimerPtr &timer);
+void timer_schedule_deferred_timeout(const KernelState &kernel, const TimerPtr &timer, const ThreadStatePtr &thread, SceUInt32 timeout_value);
 
 // Mutex
 SceUID mutex_create(SceUID *uid_out, KernelState &kernel, MemState &mem, const char *export_name, const char *name, SceUID thread_id, SceUInt attr, int init_count, Ptr<SceKernelLwMutexWork> workarea, SyncWeight weight);

@@ -279,6 +279,29 @@ void rwlock_schedule_deferred_timeout(const KernelState &kernel, const RWLockPtr
     }).detach();
 }
 
+void timer_schedule_deferred_timeout(const KernelState &kernel, const TimerPtr &timer, const ThreadStatePtr &thread, const SceUInt32 timeout_value) {
+    std::thread([&kernel, timer, thread, timeout_value]() {
+        std::this_thread::sleep_for(std::chrono::microseconds{ kernel_speed_to_host_us(kernel, timeout_value) });
+
+        const std::lock_guard<std::mutex> timer_lock(timer->mutex);
+        auto data_it = timer->waiting_threads->find(thread);
+        if (data_it == timer->waiting_threads->end())
+            return;
+
+        const WaitingThreadData data = *data_it;
+        if (!data.deferred_import_wait || !data.timeout)
+            return;
+
+        if (remaining_timeout_us(kernel, data) > 0)
+            return;
+
+        *data.timeout = 0;
+        timer->waiting_threads->erase(data_it);
+        timer->condvar.notify_all();
+        thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_TIMEOUT));
+    }).detach();
+}
+
 inline static int handle_timeout(const KernelState &kernel, const ThreadStatePtr &thread, std::unique_lock<std::mutex> &thread_lock,
     std::unique_lock<std::mutex> &primitive_lock, WaitingThreadQueuePtr &queue,
     const ThreadDataQueueInterator<WaitingThreadData> &data_it, const char *export_name,
@@ -646,6 +669,8 @@ void timer_schedule_deferred_event(const KernelState &kernel, const TimerPtr &ti
                 *data.result_pattern = SCE_KERNEL_EVENT_TIMER;
             if (data.user_data)
                 *data.user_data = 0;
+            if (data.timeout)
+                *data.timeout = remaining_timeout_us(kernel, data);
 
             timer->waiting_threads->erase(it);
             data.thread->complete_deferred_import_wait(SCE_KERNEL_OK);
@@ -698,9 +723,6 @@ SceInt32 timer_waitorpoll(KernelState &kernel, const char *export_name, SceUID t
             timer->waiting_threads->size());
     }
 
-    if (timeout)
-        LOG_WARN_ONCE("Ignoring timeout");
-
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
 
     std::unique_lock<std::mutex> lock(timer->mutex);
@@ -743,11 +765,17 @@ SceInt32 timer_waitorpoll(KernelState &kernel, const char *export_name, SceUID t
         data.user_data = user_data;
         data.priority = thread->priority;
         capture_wait_timeout(data, timeout);
+        capture_wait_timeout_start(data);
+
+        if (timeout && *timeout == 0)
+            return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
 
         if (thread->begin_deferred_import_wait()) {
             data.deferred_import_wait = true;
             timer->waiting_threads->push(data);
             timer_schedule_deferred_event(kernel, timer);
+            if (timeout)
+                timer_schedule_deferred_timeout(kernel, timer, thread, data.timeout_value);
             return SCE_KERNEL_OK;
         }
 
@@ -756,18 +784,43 @@ SceInt32 timer_waitorpoll(KernelState &kernel, const char *export_name, SceUID t
         const auto data_it = timer->waiting_threads->push(data);
 
         bool got_event = false;
+        bool timed_out = false;
         while (!got_event) {
-            uint64_t wait_time = timer->next_event - current_time;
+            const uint64_t remaining_timeout = timeout ? remaining_timeout_us(kernel, data) : std::numeric_limits<uint64_t>::max();
+            if (timeout && remaining_timeout == 0) {
+                timed_out = true;
+                break;
+            }
+
+            uint64_t event_wait = std::numeric_limits<uint64_t>::max();
+            if (timer->next_event != std::numeric_limits<uint64_t>::max())
+                event_wait = timer->next_event > current_time ? timer->next_event - current_time : 0;
+            const uint64_t wait_time = std::min(event_wait, remaining_timeout);
             // wait before we got an event and we are the first thread in the waiting list
-            timer->condvar.wait_for(lock, std::chrono::microseconds(wait_time), [&] {
-                return (*timer->waiting_threads->begin()).thread->id == thread_id;
-            });
+            const auto is_ready_to_check = [&] {
+                return !timer->waiting_threads->empty() && (*timer->waiting_threads->begin()).thread->id == thread_id;
+            };
+            if (wait_time == std::numeric_limits<uint64_t>::max()) {
+                timer->condvar.wait(lock, is_ready_to_check);
+            } else {
+                timer->condvar.wait_for(lock, std::chrono::microseconds(wait_time), is_ready_to_check);
+            }
             current_time = get_current_time();
-            got_event = timer->event_set || current_time > timer->next_event;
+            got_event = timer->event_set || (timer->next_event != std::numeric_limits<uint64_t>::max() && current_time > timer->next_event);
         }
 
-        timer->waiting_threads->pop();
         thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+
+        if (timed_out) {
+            *timeout = 0;
+            timer->waiting_threads->erase(data_it);
+            timer->condvar.notify_all();
+            return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+        }
+
+        if (timeout)
+            *timeout = remaining_timeout_us(kernel, data);
+        timer->waiting_threads->pop();
 
         timer->event_set = !timer->is_pulse && !(timer->attr & SCE_KERNEL_EVENT_ATTR_AUTO_RESET);
         set_next_event();

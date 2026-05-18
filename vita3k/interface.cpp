@@ -6634,6 +6634,8 @@ static bool quick_state_restore_deferred_timer_waits(EmuEnvState &emuenv, const 
 
         thread->second->restore_deferred_import_wait();
         timer->waiting_threads->push(data);
+        if (data.timeout && data.timeout_value > 0)
+            timer_schedule_deferred_timeout(emuenv.kernel, timer, thread->second, data.timeout_value);
     }
 
     timer_schedule_deferred_event(emuenv.kernel, timer);
