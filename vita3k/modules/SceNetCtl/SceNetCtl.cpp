@@ -363,6 +363,36 @@ static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {
     LOG_INFO("Adhoc thread stopped");
 }
 
+void netctl_stop_adhoc_thread(EmuEnvState &emuenv) {
+    {
+        const std::lock_guard<std::mutex> lock(emuenv.netctl.mutex);
+        emuenv.netctl.adhocThreadRun = false;
+        emuenv.netctl.adhocCondVarReady = false;
+        emuenv.netctl.adhocCondVar.notify_all();
+    }
+
+    if (emuenv.netctl.adhocThread.joinable())
+        emuenv.netctl.adhocThread.join();
+}
+
+void netctl_start_adhoc_thread(EmuEnvState &emuenv, int thread_id) {
+    if (emuenv.netctl.adhocThreadRun.load())
+        return;
+
+    if (emuenv.netctl.adhocThread.joinable())
+        netctl_stop_adhoc_thread(emuenv);
+
+    {
+        const std::lock_guard<std::mutex> lock(emuenv.netctl.mutex);
+        if (emuenv.netctl.adhocThreadRun.load())
+            return;
+        emuenv.netctl.adhocCondVarReady = false;
+        emuenv.netctl.adhocThreadRun = true;
+    }
+
+    emuenv.netctl.adhocThread = std::thread(adhoc_thread, std::ref(emuenv), thread_id);
+}
+
 EXPORT(int, sceNetCtlAdhocDisconnect) {
     TRACY_FUNC(sceNetCtlAdhocDisconnect);
     if (!emuenv.netctl.inited)
@@ -730,13 +760,14 @@ EXPORT(int, sceNetCtlInit) {
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_TERMINATED);
     }
 
-    const std::lock_guard<std::mutex> lock(emuenv.netctl.mutex);
-    emuenv.netctl.adhocCallbacks.fill({ 0, 0 });
-    emuenv.netctl.callbacks.fill({ 0, 0 });
+    {
+        const std::lock_guard<std::mutex> lock(emuenv.netctl.mutex);
+        emuenv.netctl.adhocCallbacks.fill({ 0, 0 });
+        emuenv.netctl.callbacks.fill({ 0, 0 });
+        emuenv.netctl.inited = true;
+    }
 
-    emuenv.netctl.inited = true;
-    emuenv.netctl.adhocThreadRun = true;
-    emuenv.netctl.adhocThread = std::thread(adhoc_thread, std::ref(emuenv), thread_id);
+    netctl_start_adhoc_thread(emuenv, thread_id);
 
     return STUBBED("Stub");
 }
@@ -746,16 +777,7 @@ EXPORT(void, sceNetCtlTerm) {
     STUBBED("Stub");
     emuenv.netctl.inited = false;
 
-    {
-        const std::lock_guard<std::mutex> lock(emuenv.netctl.mutex);
-        emuenv.netctl.adhocThreadRun = false;
-        emuenv.netctl.adhocCondVarReady = false;
-        emuenv.netctl.adhocCondVar.notify_all();
-    }
-
-    if (emuenv.netctl.adhocThread.joinable())
-        emuenv.netctl.adhocThread.join();
-
+    netctl_stop_adhoc_thread(emuenv);
     emuenv.netctl.adhocState = SCE_NET_CTL_STATE_DISCONNECTED;
     emuenv.netctl.adhocEvent = SCE_NET_CTL_EVENT_TYPE_NONE;
     emuenv.netctl.lastNotifiedAdhocEvent = SCE_NET_CTL_EVENT_TYPE_NONE;

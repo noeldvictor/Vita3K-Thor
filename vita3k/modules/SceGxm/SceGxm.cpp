@@ -1342,7 +1342,69 @@ struct SceGxmRenderTarget {
     std::uint16_t height;
     std::uint16_t scenesPerFrame;
     SceUID driverMemBlock;
+    SceGxmRenderTargetParams saved_params{};
+    uint32_t host_state_magic = 0;
+    uint64_t host_generation = 0;
 };
+
+static constexpr uint32_t GXM_RENDER_TARGET_HOST_STATE_MAGIC = 0x54485247; // GRHT
+
+static SceGxmRenderTargetParams gxmRenderTargetParamsFromLegacyState(const SceGxmRenderTarget &rt) {
+    SceGxmRenderTargetParams params{};
+    params.width = rt.width;
+    params.height = rt.height;
+    params.scenesPerFrame = rt.scenesPerFrame;
+    params.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
+    params.driverMemBlock = rt.driverMemBlock;
+    return params;
+}
+
+static bool gxmValidRenderTargetParams(const SceGxmRenderTargetParams &params) {
+    return params.width > 0 && params.height > 0 && params.scenesPerFrame > 0;
+}
+
+static void gxmRememberRenderTargetHostState(SceGxmRenderTarget *rt, const SceGxmRenderTargetParams &params) {
+    if (!rt)
+        return;
+
+    rt->saved_params = params;
+    rt->width = params.width;
+    rt->height = params.height;
+    rt->scenesPerFrame = params.scenesPerFrame;
+    rt->driverMemBlock = params.driverMemBlock;
+    rt->host_state_magic = GXM_RENDER_TARGET_HOST_STATE_MAGIC;
+    rt->host_generation = gxmHostGeneration();
+}
+
+static bool gxmEnsureRenderTargetHostState(EmuEnvState &emuenv, SceGxmRenderTarget *rt) {
+    if (!rt)
+        return false;
+
+    if (rt->host_generation == gxmHostGeneration() && rt->renderer)
+        return true;
+
+    const bool has_saved_state = rt->host_state_magic == GXM_RENDER_TARGET_HOST_STATE_MAGIC && gxmValidRenderTargetParams(rt->saved_params);
+    const SceGxmRenderTargetParams saved_params = has_saved_state ? rt->saved_params : gxmRenderTargetParamsFromLegacyState(*rt);
+    if (!gxmValidRenderTargetParams(saved_params)) {
+        LOG_ERROR("Failed to rebuild restored GXM render target host state: missing saved parameters.");
+        return false;
+    }
+
+    new (rt) SceGxmRenderTarget();
+    if (!renderer::create_render_target(*emuenv.renderer, rt->renderer, &saved_params)) {
+        LOG_ERROR("Failed to rebuild restored GXM render target renderer data.");
+        return false;
+    }
+
+    gxmRememberRenderTargetHostState(rt, saved_params);
+    LOG_INFO("Rebuilt GXM render target host state for restored target at 0x{:X} ({}x{}, scenes={}, msaa={}).",
+        reinterpret_cast<uintptr_t>(rt),
+        rt->width,
+        rt->height,
+        rt->scenesPerFrame,
+        static_cast<uint16_t>(saved_params.multisampleMode));
+    return true;
+}
 
 typedef std::uint32_t VertexCacheHash;
 
@@ -1796,6 +1858,11 @@ EXPORT(int, sceGxmBeginScene, SceGxmContext *context, uint32_t flags, const SceG
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
     }
 
+    SceGxmRenderTarget *mutable_render_target = const_cast<SceGxmRenderTarget *>(renderTarget);
+    if (!gxmEnsureRenderTargetHostState(emuenv, mutable_render_target)) {
+        return RET_ERROR(SCE_GXM_ERROR_DRIVER);
+    }
+
     if (context->state.type != SCE_GXM_CONTEXT_TYPE_IMMEDIATE) {
         return RET_ERROR(SCE_GXM_ERROR_INVALID_VALUE);
     }
@@ -1837,11 +1904,11 @@ EXPORT(int, sceGxmBeginScene, SceGxmContext *context, uint32_t flags, const SceG
         *depth_stencil_surface_copy = *depthStencil;
     }
 
-    renderer::set_context(*emuenv.renderer, context->renderer.get(), renderTarget->renderer.get(), color_surface_copy,
+    renderer::set_context(*emuenv.renderer, context->renderer.get(), mutable_render_target->renderer.get(), color_surface_copy,
         depth_stencil_surface_copy);
 
-    const std::uint32_t xmax = (validRegion ? validRegion->xMax : renderTarget->width - 1);
-    const std::uint32_t ymax = (validRegion ? validRegion->yMax : renderTarget->height - 1);
+    const std::uint32_t xmax = (validRegion ? validRegion->xMax : mutable_render_target->width - 1);
+    const std::uint32_t ymax = (validRegion ? validRegion->yMax : mutable_render_target->height - 1);
 
     CALL_EXPORT(sceGxmSetDefaultRegionClipAndViewport, context, xmax, ymax);
     return 0;
@@ -2222,15 +2289,13 @@ EXPORT(int, sceGxmCreateRenderTarget, const SceGxmRenderTargetParams *params, Pt
     }
 
     SceGxmRenderTarget *const rt = renderTarget->get(emuenv.mem);
+    new (rt) SceGxmRenderTarget();
     if (!renderer::create_render_target(*emuenv.renderer, rt->renderer, params)) {
         free(emuenv.mem, *renderTarget);
         return RET_ERROR(SCE_GXM_ERROR_DRIVER);
     }
 
-    rt->width = params->width;
-    rt->height = params->height;
-    rt->scenesPerFrame = params->scenesPerFrame;
-    rt->driverMemBlock = params->driverMemBlock;
+    gxmRememberRenderTargetHostState(rt, *params);
 
     return 0;
 }
@@ -2399,7 +2464,13 @@ EXPORT(int, sceGxmDestroyRenderTarget, Ptr<SceGxmRenderTarget> renderTarget) {
     if (!renderTarget.valid(mem))
         return RET_ERROR(SCE_GXM_ERROR_DRIVER);
 
-    renderer::destroy_render_target(*emuenv.renderer, renderTarget.get(mem)->renderer);
+    SceGxmRenderTarget *rt = renderTarget.get(mem);
+    if (rt->host_generation == gxmHostGeneration() && rt->renderer) {
+        renderer::destroy_render_target(*emuenv.renderer, rt->renderer);
+    } else {
+        LOG_INFO("Skipping stale restored GXM render target host destroy for target at 0x{:X}.",
+            static_cast<uint32_t>(renderTarget.address()));
+    }
 
     free(mem, renderTarget);
 

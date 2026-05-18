@@ -22,6 +22,7 @@
 #include <app/functions.h>
 #include <audio/state.h>
 #include <bgm_player/functions.h>
+#include <camera/state.h>
 #include <config/state.h>
 #include <cpu/functions.h>
 #include <ctime>
@@ -32,6 +33,7 @@
 #include <display/state.h>
 #include <gui/functions.h>
 #include <gxm/state.h>
+#include <http/state.h>
 #include <io/functions.h>
 #include <io/vfs.h>
 #include <kernel/state.h>
@@ -39,6 +41,8 @@
 #include <mem/ptr.h>
 #include <ngs/state.h>
 #include <ngs/system.h>
+#include <net/state.h>
+#include <np/state.h>
 #include <packages/functions.h>
 #include <packages/license.h>
 #include <packages/pkg.h>
@@ -56,8 +60,10 @@
 #include <modules/SceSysmem/quick_state.h>
 #include <modules/SceVideodec/quick_state.h>
 #include <motion/event_handler.h>
+#include <motion/state.h>
 #include <string>
 #include <touch/functions.h>
+#include <touch/state.h>
 #include <util/fs.h>
 #include <util/log.h>
 #include <util/string_utils.h>
@@ -66,6 +72,7 @@
 #include <gui/imgui_impl_sdl.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cctype>
@@ -1520,6 +1527,90 @@ struct QuickStateSharedFbSnapshot {
     std::string detail;
 };
 
+struct QuickStateAddressPair {
+    Address first = 0;
+    Address second = 0;
+};
+
+struct QuickStateNpTrophyContextSnapshot {
+    bool valid = false;
+    int32_t id = 0;
+    int32_t trophy_file_stream = 0;
+    uint32_t lang = 0;
+    uint32_t group_count = 0;
+    uint32_t trophy_count = 0;
+    int32_t platinum_trophy_id = 0;
+    std::string trophy_progress_output_file_path;
+    std::vector<uint8_t> comm_id_data;
+    uint32_t comm_id_num = 0;
+    std::vector<uint8_t> trophy_progress;
+    std::vector<uint8_t> trophy_availability;
+    std::vector<uint8_t> trophy_count_by_group;
+    std::vector<uint8_t> unlock_timestamps;
+    std::vector<uint8_t> trophy_kinds;
+};
+
+struct QuickStateHostServicesSnapshot {
+    bool valid = false;
+    bool exact_restore = false;
+    bool np_inited = false;
+    bool np_trophy_inited = false;
+    uint32_t np_state_cb_id = 0;
+    std::vector<uint8_t> np_comm_id_data;
+    uint32_t np_comm_id_num = 0;
+    std::map<int32_t, QuickStateAddressPair> np_callbacks;
+    size_t np_trophy_contexts = 0;
+    size_t np_trophy_valid_contexts = 0;
+    std::vector<QuickStateNpTrophyContextSnapshot> np_trophy_context_snapshots;
+    bool http_inited = false;
+    bool http_ssl_inited = false;
+    uint32_t http_default_response_header_size = 0;
+    int32_t http_next_template = 0;
+    int32_t http_next_connection = 0;
+    int32_t http_next_request = 0;
+    size_t http_templates = 0;
+    size_t http_connections = 0;
+    size_t http_requests = 0;
+    size_t http_guest_pointers = 0;
+    bool http_ssl_context_active = false;
+    bool net_inited = false;
+    int32_t net_next_id = 0;
+    int32_t net_next_epoll_id = 0;
+    int32_t net_state = 0;
+    int32_t net_resolver_id = 0;
+    int32_t net_current_addr_index = 0;
+    uint32_t net_broadcast_addr = 0;
+    uint32_t net_addr = 0;
+    size_t net_sockets = 0;
+    size_t net_epolls = 0;
+    bool netctl_inited = false;
+    bool netctl_adhoc_thread_running = false;
+    uint32_t netctl_adhoc_state = 0;
+    uint32_t netctl_adhoc_event = 0;
+    uint32_t netctl_last_notified_adhoc_event = 0;
+    size_t netctl_adhoc_peers = 0;
+    std::array<QuickStateAddressPair, 8> netctl_callbacks{};
+    std::array<QuickStateAddressPair, 8> netctl_adhoc_callbacks{};
+    bool dialog_active = false;
+    uint32_t dialog_type = 0;
+    uint32_t dialog_status = 0;
+    uint32_t dialog_substatus = 0;
+    uint32_t dialog_result = 0;
+    int32_t camera_active_device = 0;
+    bool camera_front_opened = false;
+    bool camera_front_started = false;
+    bool camera_back_opened = false;
+    bool camera_back_started = false;
+    uint32_t touch_front_mode = 0;
+    uint32_t touch_back_mode = 0;
+    bool motion_sampling = false;
+    uint32_t motion_last_counter = 0;
+    uint64_t motion_last_gyro_timestamp = 0;
+    uint64_t motion_last_accel_timestamp = 0;
+    std::string schema;
+    std::string detail;
+};
+
 struct QuickStateRestoreManifest {
     uint32_t format_version = QUICKSTATE_VERSION;
     uint64_t guest_memory_bytes = 0;
@@ -1539,6 +1630,8 @@ struct QuickStateRestoreManifest {
     bool sysmem_state_restorable = false;
     bool fiber_state_restorable = false;
     bool sharedfb_state_restorable = false;
+    bool host_services_state_restorable = false;
+    bool host_services_exact_restore = false;
     bool sync_primitives_restorable = false;
     bool sync_wait_queue_metadata_complete = false;
     bool display_state_restorable = false;
@@ -1570,6 +1663,32 @@ struct QuickStateRestoreManifest {
     uint32_t sharedfb_base1 = 0;
     uint32_t sharedfb_base2 = 0;
     std::string sharedfb_schema;
+    bool np_inited = false;
+    size_t np_callbacks = 0;
+    bool np_trophy_inited = false;
+    size_t np_trophy_contexts = 0;
+    size_t np_trophy_valid_contexts = 0;
+    bool http_inited = false;
+    bool http_ssl_inited = false;
+    size_t http_templates = 0;
+    size_t http_connections = 0;
+    size_t http_requests = 0;
+    size_t http_guest_pointers = 0;
+    bool http_ssl_context_active = false;
+    bool net_inited = false;
+    size_t net_sockets = 0;
+    size_t net_epolls = 0;
+    bool netctl_inited = false;
+    bool netctl_adhoc_thread_running = false;
+    size_t netctl_adhoc_peers = 0;
+    uint32_t netctl_adhoc_state = 0;
+    uint32_t netctl_adhoc_event = 0;
+    size_t netctl_callbacks = 0;
+    size_t netctl_adhoc_callbacks = 0;
+    bool dialog_active = false;
+    bool camera_active = false;
+    bool motion_sampling = false;
+    std::string host_services_schema;
     size_t display_wait_entries = 0;
     size_t display_callback_entries = 0;
     size_t kernel_callback_entries = 0;
@@ -4733,6 +4852,276 @@ static bool quick_state_parse_jpeg_snapshot_section(const QuickStateSlot &slot, 
     return true;
 }
 
+static size_t quick_state_count_netctl_callbacks(const std::array<SceNetCtlCallback, 8> &callbacks) {
+    return static_cast<size_t>(std::count_if(callbacks.begin(), callbacks.end(), [](const SceNetCtlCallback &callback) {
+        return callback.pc != 0 || callback.arg != 0;
+    }));
+}
+
+static size_t quick_state_count_address_pairs(const std::array<QuickStateAddressPair, 8> &callbacks) {
+    return static_cast<size_t>(std::count_if(callbacks.begin(), callbacks.end(), [](const QuickStateAddressPair &callback) {
+        return callback.first != 0 || callback.second != 0;
+    }));
+}
+
+static bool quick_state_parse_index_from_key(const std::string &key, const std::string_view prefix, int32_t &index) {
+    if (key.rfind(prefix, 0) != 0 || key.size() <= prefix.size())
+        return false;
+    return quick_state_parse_i32_text(key.substr(prefix.size()), index);
+}
+
+static bool quick_state_parse_address_pair_fields(const std::string &text, const char *first_name, const char *second_name, QuickStateAddressPair &pair) {
+    const auto fields = quick_state_parse_semicolon_fields(text);
+    uint64_t first = 0;
+    uint64_t second = 0;
+    if (!fields.contains(first_name)
+        || !fields.contains(second_name)
+        || !quick_state_parse_u64_text(fields.at(first_name), first, 0)
+        || !quick_state_parse_u64_text(fields.at(second_name), second, 0)
+        || first > std::numeric_limits<Address>::max()
+        || second > std::numeric_limits<Address>::max()) {
+        return false;
+    }
+    pair.first = static_cast<Address>(first);
+    pair.second = static_cast<Address>(second);
+    return true;
+}
+
+static std::string quick_state_hex_string(const std::string &text) {
+    return quick_state_bytes_to_hex(std::vector<uint8_t>(text.begin(), text.end()));
+}
+
+static bool quick_state_parse_hex_string(const std::string &text, std::string &out) {
+    std::vector<uint8_t> bytes;
+    if (!quick_state_parse_hex_bytes(text, bytes))
+        return false;
+    out.assign(bytes.begin(), bytes.end());
+    return true;
+}
+
+static bool quick_state_parse_comm_id_fields(const std::map<std::string, std::string> &fields, const char *data_name, const char *num_name, std::vector<uint8_t> &data, uint32_t &num) {
+    return fields.contains(data_name)
+        && fields.contains(num_name)
+        && quick_state_parse_hex_bytes(fields.at(data_name), data)
+        && data.size() == 9
+        && quick_state_parse_u32_text(fields.at(num_name), num)
+        && num <= 0xFF;
+}
+
+static bool quick_state_parse_trophy_context_snapshot(const std::map<std::string, std::string> &values, const size_t index, QuickStateNpTrophyContextSnapshot &context) {
+    context = {};
+    const std::string prefix = fmt::format("np.trophy_context.{}", index);
+    const auto fields_value = values.find(prefix);
+    if (fields_value == values.end())
+        return false;
+
+    const auto fields = quick_state_parse_semicolon_fields(fields_value->second);
+    if (!fields.contains("valid")
+        || !fields.contains("id")
+        || !fields.contains("stream")
+        || !fields.contains("lang")
+        || !fields.contains("group_count")
+        || !fields.contains("trophy_count")
+        || !fields.contains("platinum")
+        || !fields.contains("progress_path")
+        || !quick_state_parse_bool_text(fields.at("valid"), context.valid)
+        || !quick_state_parse_i32_text(fields.at("id"), context.id)
+        || !quick_state_parse_i32_text(fields.at("stream"), context.trophy_file_stream)
+        || !quick_state_parse_u32_text(fields.at("lang"), context.lang)
+        || !quick_state_parse_u32_text(fields.at("group_count"), context.group_count)
+        || !quick_state_parse_u32_text(fields.at("trophy_count"), context.trophy_count)
+        || !quick_state_parse_i32_text(fields.at("platinum"), context.platinum_trophy_id)
+        || !quick_state_parse_hex_string(fields.at("progress_path"), context.trophy_progress_output_file_path)
+        || !quick_state_parse_comm_id_fields(fields, "comm_id_data", "comm_id_num", context.comm_id_data, context.comm_id_num)) {
+        return false;
+    }
+
+    const auto progress = values.find(prefix + ".progress");
+    const auto availability = values.find(prefix + ".availability");
+    const auto groups = values.find(prefix + ".groups");
+    const auto timestamps = values.find(prefix + ".unlock_timestamps");
+    const auto kinds = values.find(prefix + ".kinds");
+    if (progress == values.end()
+        || availability == values.end()
+        || groups == values.end()
+        || timestamps == values.end()
+        || kinds == values.end()
+        || !quick_state_parse_hex_bytes(progress->second, context.trophy_progress)
+        || !quick_state_parse_hex_bytes(availability->second, context.trophy_availability)
+        || !quick_state_parse_hex_bytes(groups->second, context.trophy_count_by_group)
+        || !quick_state_parse_hex_bytes(timestamps->second, context.unlock_timestamps)
+        || !quick_state_parse_hex_bytes(kinds->second, context.trophy_kinds)) {
+        return false;
+    }
+
+    return context.id >= 0
+        && context.trophy_progress.size() == sizeof(np::trophy::TrophyFlagArray)
+        && context.trophy_availability.size() == sizeof(np::trophy::TrophyFlagArray)
+        && context.trophy_count_by_group.size() == sizeof(std::array<uint32_t, np::trophy::MAX_GROUPS>)
+        && context.unlock_timestamps.size() == sizeof(std::array<uint64_t, np::trophy::MAX_TROPHIES>)
+        && context.trophy_kinds.size() == sizeof(std::array<np::trophy::SceNpTrophyGrade, np::trophy::MAX_TROPHIES>);
+}
+
+static bool quick_state_parse_host_services_snapshot_section(const QuickStateSlot &slot, QuickStateHostServicesSnapshot &snapshot) {
+    snapshot = {};
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.host-services");
+    if (!section || section->version != 1) {
+        snapshot.detail = "host service state section is missing";
+        return false;
+    }
+
+    const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    if (schema == values.end() || schema->second != "thor.host-services.v1") {
+        snapshot.detail = "host service state schema is invalid";
+        return false;
+    }
+    snapshot.schema = schema->second;
+
+    size_t expected_np_callbacks = 0;
+    if (!values.contains("np_inited") || !quick_state_parse_bool_text(values.at("np_inited"), snapshot.np_inited)
+        || !values.contains("np_state_cb_id") || !quick_state_parse_u32_text(values.at("np_state_cb_id"), snapshot.np_state_cb_id)
+        || !values.contains("np_comm_id_data") || !quick_state_parse_hex_bytes(values.at("np_comm_id_data"), snapshot.np_comm_id_data) || snapshot.np_comm_id_data.size() != 9
+        || !values.contains("np_comm_id_num") || !quick_state_parse_u32_text(values.at("np_comm_id_num"), snapshot.np_comm_id_num) || snapshot.np_comm_id_num > 0xFF
+        || !quick_state_parse_size(values, "np_callbacks", expected_np_callbacks)
+        || !values.contains("np_trophy_inited") || !quick_state_parse_bool_text(values.at("np_trophy_inited"), snapshot.np_trophy_inited)
+        || !quick_state_parse_size(values, "np_trophy_contexts", snapshot.np_trophy_contexts)
+        || !quick_state_parse_size(values, "np_trophy_valid_contexts", snapshot.np_trophy_valid_contexts)
+        || snapshot.np_trophy_valid_contexts > snapshot.np_trophy_contexts) {
+        snapshot.detail = "NP host service state is invalid";
+        return false;
+    }
+    snapshot.np_trophy_context_snapshots.resize(snapshot.np_trophy_contexts);
+    size_t parsed_valid_trophy_contexts = 0;
+    for (size_t i = 0; i < snapshot.np_trophy_contexts; i++) {
+        if (!quick_state_parse_trophy_context_snapshot(values, i, snapshot.np_trophy_context_snapshots[i])) {
+            snapshot.detail = fmt::format("NP trophy context {} state is invalid", i);
+            return false;
+        }
+        if (snapshot.np_trophy_context_snapshots[i].valid)
+            parsed_valid_trophy_contexts++;
+    }
+    if (parsed_valid_trophy_contexts != snapshot.np_trophy_valid_contexts) {
+        snapshot.detail = "NP trophy valid context count is invalid";
+        return false;
+    }
+
+    for (const auto &[key, value] : values) {
+        int32_t callback_id = 0;
+        if (!quick_state_parse_index_from_key(key, "np.callback.", callback_id))
+            continue;
+        if (callback_id <= 0)
+            return false;
+        QuickStateAddressPair callback;
+        if (!quick_state_parse_address_pair_fields(value, "pc", "data", callback))
+            return false;
+        snapshot.np_callbacks[callback_id] = callback;
+    }
+    if (snapshot.np_callbacks.size() != expected_np_callbacks) {
+        snapshot.detail = "NP callback count is invalid";
+        return false;
+    }
+
+    if (!values.contains("http_inited") || !quick_state_parse_bool_text(values.at("http_inited"), snapshot.http_inited)
+        || !values.contains("http_ssl_inited") || !quick_state_parse_bool_text(values.at("http_ssl_inited"), snapshot.http_ssl_inited)
+        || !values.contains("http_default_response_header_size") || !quick_state_parse_u32_text(values.at("http_default_response_header_size"), snapshot.http_default_response_header_size)
+        || !values.contains("http_next_template") || !quick_state_parse_i32_text(values.at("http_next_template"), snapshot.http_next_template)
+        || !values.contains("http_next_connection") || !quick_state_parse_i32_text(values.at("http_next_connection"), snapshot.http_next_connection)
+        || !values.contains("http_next_request") || !quick_state_parse_i32_text(values.at("http_next_request"), snapshot.http_next_request)
+        || !quick_state_parse_size(values, "http_templates", snapshot.http_templates)
+        || !quick_state_parse_size(values, "http_connections", snapshot.http_connections)
+        || !quick_state_parse_size(values, "http_requests", snapshot.http_requests)
+        || !quick_state_parse_size(values, "http_guest_pointers", snapshot.http_guest_pointers)
+        || !values.contains("http_ssl_context_active") || !quick_state_parse_bool_text(values.at("http_ssl_context_active"), snapshot.http_ssl_context_active)) {
+        snapshot.detail = "HTTP host service state is invalid";
+        return false;
+    }
+
+    if (!values.contains("net_inited") || !quick_state_parse_bool_text(values.at("net_inited"), snapshot.net_inited)
+        || !values.contains("net_next_id") || !quick_state_parse_i32_text(values.at("net_next_id"), snapshot.net_next_id)
+        || !values.contains("net_next_epoll_id") || !quick_state_parse_i32_text(values.at("net_next_epoll_id"), snapshot.net_next_epoll_id)
+        || !values.contains("net_state") || !quick_state_parse_i32_text(values.at("net_state"), snapshot.net_state)
+        || !values.contains("net_resolver_id") || !quick_state_parse_i32_text(values.at("net_resolver_id"), snapshot.net_resolver_id)
+        || !values.contains("net_current_addr_index") || !quick_state_parse_i32_text(values.at("net_current_addr_index"), snapshot.net_current_addr_index)
+        || !values.contains("net_broadcast_addr") || !quick_state_parse_u32_text(values.at("net_broadcast_addr"), snapshot.net_broadcast_addr)
+        || !values.contains("net_addr") || !quick_state_parse_u32_text(values.at("net_addr"), snapshot.net_addr)
+        || !quick_state_parse_size(values, "net_sockets", snapshot.net_sockets)
+        || !quick_state_parse_size(values, "net_epolls", snapshot.net_epolls)) {
+        snapshot.detail = "net host service state is invalid";
+        return false;
+    }
+
+    size_t expected_netctl_callbacks = 0;
+    size_t expected_netctl_adhoc_callbacks = 0;
+    if (!values.contains("netctl_inited") || !quick_state_parse_bool_text(values.at("netctl_inited"), snapshot.netctl_inited)
+        || !values.contains("netctl_adhoc_thread_running") || !quick_state_parse_bool_text(values.at("netctl_adhoc_thread_running"), snapshot.netctl_adhoc_thread_running)
+        || !values.contains("netctl_adhoc_state") || !quick_state_parse_u32_text(values.at("netctl_adhoc_state"), snapshot.netctl_adhoc_state)
+        || !values.contains("netctl_adhoc_event") || !quick_state_parse_u32_text(values.at("netctl_adhoc_event"), snapshot.netctl_adhoc_event)
+        || !values.contains("netctl_last_notified_adhoc_event") || !quick_state_parse_u32_text(values.at("netctl_last_notified_adhoc_event"), snapshot.netctl_last_notified_adhoc_event)
+        || !quick_state_parse_size(values, "netctl_adhoc_peers", snapshot.netctl_adhoc_peers)
+        || !quick_state_parse_size(values, "netctl_callbacks", expected_netctl_callbacks)
+        || !quick_state_parse_size(values, "netctl_adhoc_callbacks", expected_netctl_adhoc_callbacks)) {
+        snapshot.detail = "netctl host service state is invalid";
+        return false;
+    }
+    size_t parsed_netctl_callbacks = 0;
+    size_t parsed_netctl_adhoc_callbacks = 0;
+    for (size_t i = 0; i < snapshot.netctl_callbacks.size(); i++) {
+        const auto value = values.find(fmt::format("netctl.callback.{}", i));
+        if (value == values.end() || !quick_state_parse_address_pair_fields(value->second, "pc", "arg", snapshot.netctl_callbacks[i]))
+            return false;
+        if (snapshot.netctl_callbacks[i].first != 0 || snapshot.netctl_callbacks[i].second != 0)
+            parsed_netctl_callbacks++;
+    }
+    for (size_t i = 0; i < snapshot.netctl_adhoc_callbacks.size(); i++) {
+        const auto value = values.find(fmt::format("netctl.adhoc_callback.{}", i));
+        if (value == values.end() || !quick_state_parse_address_pair_fields(value->second, "pc", "arg", snapshot.netctl_adhoc_callbacks[i]))
+            return false;
+        if (snapshot.netctl_adhoc_callbacks[i].first != 0 || snapshot.netctl_adhoc_callbacks[i].second != 0)
+            parsed_netctl_adhoc_callbacks++;
+    }
+    if (parsed_netctl_callbacks != expected_netctl_callbacks || parsed_netctl_adhoc_callbacks != expected_netctl_adhoc_callbacks) {
+        snapshot.detail = "netctl callback count is invalid";
+        return false;
+    }
+
+    if (!values.contains("dialog_active") || !quick_state_parse_bool_text(values.at("dialog_active"), snapshot.dialog_active)
+        || !values.contains("dialog_type") || !quick_state_parse_u32_text(values.at("dialog_type"), snapshot.dialog_type)
+        || !values.contains("dialog_status") || !quick_state_parse_u32_text(values.at("dialog_status"), snapshot.dialog_status)
+        || !values.contains("dialog_substatus") || !quick_state_parse_u32_text(values.at("dialog_substatus"), snapshot.dialog_substatus)
+        || !values.contains("dialog_result") || !quick_state_parse_u32_text(values.at("dialog_result"), snapshot.dialog_result)
+        || !values.contains("camera_active_device") || !quick_state_parse_i32_text(values.at("camera_active_device"), snapshot.camera_active_device)) {
+        snapshot.detail = "dialog/camera host service state is invalid";
+        return false;
+    }
+    if (!values.contains("camera_front_opened") || !quick_state_parse_bool_text(values.at("camera_front_opened"), snapshot.camera_front_opened)
+        || !values.contains("camera_front_started") || !quick_state_parse_bool_text(values.at("camera_front_started"), snapshot.camera_front_started)
+        || !values.contains("camera_back_opened") || !quick_state_parse_bool_text(values.at("camera_back_opened"), snapshot.camera_back_opened)
+        || !values.contains("camera_back_started") || !quick_state_parse_bool_text(values.at("camera_back_started"), snapshot.camera_back_started)
+        || !values.contains("touch_front_mode") || !quick_state_parse_u32_text(values.at("touch_front_mode"), snapshot.touch_front_mode)
+        || !values.contains("touch_back_mode") || !quick_state_parse_u32_text(values.at("touch_back_mode"), snapshot.touch_back_mode)
+        || !values.contains("motion_sampling") || !quick_state_parse_bool_text(values.at("motion_sampling"), snapshot.motion_sampling)
+        || !values.contains("motion_last_counter") || !quick_state_parse_u32_text(values.at("motion_last_counter"), snapshot.motion_last_counter)
+        || !values.contains("motion_last_gyro_timestamp") || !quick_state_parse_u64_text(values.at("motion_last_gyro_timestamp"), snapshot.motion_last_gyro_timestamp)
+        || !values.contains("motion_last_accel_timestamp") || !quick_state_parse_u64_text(values.at("motion_last_accel_timestamp"), snapshot.motion_last_accel_timestamp)) {
+        snapshot.detail = "input host service state is invalid";
+        return false;
+    }
+
+    const bool active_http = snapshot.http_templates > 0 || snapshot.http_connections > 0 || snapshot.http_requests > 0
+        || snapshot.http_guest_pointers > 0 || snapshot.http_ssl_context_active;
+    const bool active_net = snapshot.net_sockets > 0 || snapshot.net_epolls > 0;
+    const bool active_netctl_adhoc = snapshot.netctl_adhoc_peers > 0;
+    const bool active_camera = snapshot.camera_front_opened || snapshot.camera_front_started || snapshot.camera_back_opened || snapshot.camera_back_started;
+    snapshot.exact_restore = !snapshot.dialog_active
+        && !active_http
+        && !active_net
+        && !active_netctl_adhoc
+        && !active_camera;
+    snapshot.valid = true;
+    return true;
+}
+
 static std::string quick_state_thread_status_name(const ThreadStatus status) {
     switch (status) {
     case ThreadStatus::run:
@@ -4899,6 +5288,35 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     manifest.sharedfb_base1 = sharedfb_snapshot.base1;
     manifest.sharedfb_base2 = sharedfb_snapshot.base2;
     manifest.sharedfb_schema = sharedfb_snapshot.schema;
+    QuickStateHostServicesSnapshot host_services_snapshot;
+    manifest.host_services_state_restorable = quick_state_parse_host_services_snapshot_section(slot, host_services_snapshot);
+    manifest.host_services_exact_restore = host_services_snapshot.exact_restore;
+    manifest.host_services_schema = host_services_snapshot.schema;
+    manifest.np_inited = host_services_snapshot.np_inited;
+    manifest.np_callbacks = host_services_snapshot.np_callbacks.size();
+    manifest.np_trophy_inited = host_services_snapshot.np_trophy_inited;
+    manifest.np_trophy_contexts = host_services_snapshot.np_trophy_contexts;
+    manifest.np_trophy_valid_contexts = host_services_snapshot.np_trophy_valid_contexts;
+    manifest.http_inited = host_services_snapshot.http_inited;
+    manifest.http_ssl_inited = host_services_snapshot.http_ssl_inited;
+    manifest.http_templates = host_services_snapshot.http_templates;
+    manifest.http_connections = host_services_snapshot.http_connections;
+    manifest.http_requests = host_services_snapshot.http_requests;
+    manifest.http_guest_pointers = host_services_snapshot.http_guest_pointers;
+    manifest.http_ssl_context_active = host_services_snapshot.http_ssl_context_active;
+    manifest.net_inited = host_services_snapshot.net_inited;
+    manifest.net_sockets = host_services_snapshot.net_sockets;
+    manifest.net_epolls = host_services_snapshot.net_epolls;
+    manifest.netctl_inited = host_services_snapshot.netctl_inited;
+    manifest.netctl_adhoc_thread_running = host_services_snapshot.netctl_adhoc_thread_running;
+    manifest.netctl_adhoc_peers = host_services_snapshot.netctl_adhoc_peers;
+    manifest.netctl_adhoc_state = host_services_snapshot.netctl_adhoc_state;
+    manifest.netctl_adhoc_event = host_services_snapshot.netctl_adhoc_event;
+    manifest.netctl_callbacks = quick_state_count_address_pairs(host_services_snapshot.netctl_callbacks);
+    manifest.netctl_adhoc_callbacks = quick_state_count_address_pairs(host_services_snapshot.netctl_adhoc_callbacks);
+    manifest.dialog_active = host_services_snapshot.dialog_active;
+    manifest.camera_active = host_services_snapshot.camera_front_opened || host_services_snapshot.camera_front_started || host_services_snapshot.camera_back_opened || host_services_snapshot.camera_back_started;
+    manifest.motion_sampling = host_services_snapshot.motion_sampling;
     QuickStateSyncSnapshot sync_snapshot;
     manifest.sync_primitives_restorable = quick_state_parse_sync_primitives_section(slot, sync_snapshot);
     if (manifest.sync_primitives_restorable) {
@@ -4980,6 +5398,10 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         manifest.missing_serializers.push_back("fiber-state");
     if (!manifest.sharedfb_state_restorable)
         manifest.missing_serializers.push_back("sharedfb-state");
+    if (!manifest.host_services_state_restorable)
+        manifest.missing_serializers.push_back("host-service-state");
+    if (manifest.host_services_state_restorable && !manifest.host_services_exact_restore)
+        manifest.missing_serializers.push_back("host-service-active-state");
     if (!manifest.kernel_callbacks_restorable && manifest.kernel_callback_entries > 0)
         manifest.missing_serializers.push_back("kernel-callbacks");
     if (!manifest.display_state_restorable) {
@@ -5036,6 +5458,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         && manifest.sysmem_state_restorable
         && manifest.fiber_state_restorable
         && manifest.sharedfb_state_restorable
+        && manifest.host_services_state_restorable
+        && manifest.host_services_exact_restore
         && manifest.sync_primitives_restorable
         && manifest.io_file_positions_restorable
         && manifest.display_state_restorable
@@ -6040,6 +6464,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         "thor.sysmem",
         "thor.fiber",
         "thor.sharedfb",
+        "thor.host-services",
         "thor.io.vfs",
         "thor.display",
         "thor.gxm",
@@ -6375,6 +6800,116 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
 
     {
         std::ostringstream text;
+        text << "schema=thor.host-services.v1\n";
+        text << "np_inited=" << emuenv.np.inited << "\n";
+        text << "np_state_cb_id=" << emuenv.np.state_cb_id << "\n";
+        text << "np_comm_id_data=" << quick_state_bytes_to_hex(quick_state_bytes_from_raw(emuenv.np.comm_id.data, sizeof(emuenv.np.comm_id.data))) << "\n";
+        text << "np_comm_id_num=" << static_cast<uint32_t>(emuenv.np.comm_id.num) << "\n";
+        text << "np_callbacks=" << emuenv.np.cbs.size() << "\n";
+        for (const auto &[callback_id, callback] : emuenv.np.cbs) {
+            text << "np.callback." << callback_id
+                 << "=pc=0x" << std::hex << callback.pc
+                 << ";data=0x" << callback.data << std::dec
+                 << "\n";
+        }
+        {
+            const std::lock_guard<std::mutex> trophy_lock(emuenv.np.trophy_state.access_mutex);
+            const size_t valid_trophy_contexts = static_cast<size_t>(std::count_if(emuenv.np.trophy_state.contexts.begin(), emuenv.np.trophy_state.contexts.end(), [](const np::trophy::Context &context) {
+                return context.valid;
+            }));
+            text << "np_trophy_inited=" << emuenv.np.trophy_state.inited << "\n";
+            text << "np_trophy_contexts=" << emuenv.np.trophy_state.contexts.size() << "\n";
+            text << "np_trophy_valid_contexts=" << valid_trophy_contexts << "\n";
+            for (size_t i = 0; i < emuenv.np.trophy_state.contexts.size(); i++) {
+                const auto &context = emuenv.np.trophy_state.contexts[i];
+                text << "np.trophy_context." << i
+                     << "=valid=" << context.valid
+                     << ";id=" << context.id
+                     << ";stream=" << context.trophy_file_stream
+                     << ";lang=" << context.lang
+                     << ";group_count=" << context.group_count
+                     << ";trophy_count=" << context.trophy_count
+                     << ";platinum=" << context.platinum_trophy_id
+                     << ";progress_path=" << quick_state_hex_string(context.trophy_progress_output_file_path)
+                     << ";comm_id_data=" << quick_state_bytes_to_hex(quick_state_bytes_from_raw(context.comm_id.data, sizeof(context.comm_id.data)))
+                     << ";comm_id_num=" << static_cast<uint32_t>(context.comm_id.num)
+                     << "\n";
+                text << "np.trophy_context." << i << ".progress=" << quick_state_bytes_to_hex(quick_state_bytes_from_raw(context.trophy_progress, sizeof(context.trophy_progress))) << "\n";
+                text << "np.trophy_context." << i << ".availability=" << quick_state_bytes_to_hex(quick_state_bytes_from_raw(context.trophy_availability, sizeof(context.trophy_availability))) << "\n";
+                text << "np.trophy_context." << i << ".groups=" << quick_state_bytes_to_hex(quick_state_bytes_from_raw(context.trophy_count_by_group.data(), context.trophy_count_by_group.size() * sizeof(context.trophy_count_by_group[0]))) << "\n";
+                text << "np.trophy_context." << i << ".unlock_timestamps=" << quick_state_bytes_to_hex(quick_state_bytes_from_raw(context.unlock_timestamps.data(), context.unlock_timestamps.size() * sizeof(context.unlock_timestamps[0]))) << "\n";
+                text << "np.trophy_context." << i << ".kinds=" << quick_state_bytes_to_hex(quick_state_bytes_from_raw(context.trophy_kinds.data(), context.trophy_kinds.size() * sizeof(context.trophy_kinds[0]))) << "\n";
+            }
+        }
+
+        text << "http_inited=" << emuenv.http.inited << "\n";
+        text << "http_ssl_inited=" << emuenv.http.sslInited << "\n";
+        text << "http_default_response_header_size=" << emuenv.http.defaultResponseHeaderSize << "\n";
+        text << "http_next_template=" << emuenv.http.next_temp << "\n";
+        text << "http_next_connection=" << emuenv.http.next_conn << "\n";
+        text << "http_next_request=" << emuenv.http.next_req << "\n";
+        text << "http_templates=" << emuenv.http.templates.size() << "\n";
+        text << "http_connections=" << emuenv.http.connections.size() << "\n";
+        text << "http_requests=" << emuenv.http.requests.size() << "\n";
+        text << "http_guest_pointers=" << emuenv.http.guestPointers.size() << "\n";
+        text << "http_ssl_context_active=" << (emuenv.http.ssl_ctx != nullptr) << "\n";
+
+        text << "net_inited=" << emuenv.net.inited << "\n";
+        text << "net_next_id=" << emuenv.net.next_id << "\n";
+        text << "net_next_epoll_id=" << emuenv.net.next_epoll_id << "\n";
+        text << "net_state=" << emuenv.net.state << "\n";
+        text << "net_resolver_id=" << emuenv.net.resolver_id << "\n";
+        text << "net_current_addr_index=" << emuenv.net.current_addr_index << "\n";
+        text << "net_broadcast_addr=" << emuenv.net.broadcastAddr << "\n";
+        text << "net_addr=" << emuenv.net.netAddr << "\n";
+        text << "net_sockets=" << emuenv.net.socks.size() << "\n";
+        text << "net_epolls=" << emuenv.net.epolls.size() << "\n";
+        {
+            const std::lock_guard<std::mutex> netctl_lock(emuenv.netctl.mutex);
+            text << "netctl_inited=" << emuenv.netctl.inited << "\n";
+            text << "netctl_adhoc_thread_running=" << emuenv.netctl.adhocThreadRun.load() << "\n";
+            text << "netctl_adhoc_state=" << static_cast<uint32_t>(emuenv.netctl.adhocState) << "\n";
+            text << "netctl_adhoc_event=" << static_cast<uint32_t>(emuenv.netctl.adhocEvent) << "\n";
+            text << "netctl_last_notified_adhoc_event=" << static_cast<uint32_t>(emuenv.netctl.lastNotifiedAdhocEvent) << "\n";
+            text << "netctl_adhoc_peers=" << emuenv.netctl.adhocPeers.size() << "\n";
+            text << "netctl_callbacks=" << quick_state_count_netctl_callbacks(emuenv.netctl.callbacks) << "\n";
+            for (size_t i = 0; i < emuenv.netctl.callbacks.size(); i++) {
+                const auto &callback = emuenv.netctl.callbacks[i];
+                text << "netctl.callback." << i << "=pc=0x" << std::hex << callback.pc << ";arg=0x" << callback.arg << std::dec << "\n";
+            }
+            text << "netctl_adhoc_callbacks=" << quick_state_count_netctl_callbacks(emuenv.netctl.adhocCallbacks) << "\n";
+            for (size_t i = 0; i < emuenv.netctl.adhocCallbacks.size(); i++) {
+                const auto &callback = emuenv.netctl.adhocCallbacks[i];
+                text << "netctl.adhoc_callback." << i << "=pc=0x" << std::hex << callback.pc << ";arg=0x" << callback.arg << std::dec << "\n";
+            }
+        }
+
+        const bool dialog_active = emuenv.common_dialog.type != NO_DIALOG || emuenv.common_dialog.status != SCE_COMMON_DIALOG_STATUS_NONE;
+        text << "dialog_active=" << dialog_active << "\n";
+        text << "dialog_type=" << static_cast<uint32_t>(emuenv.common_dialog.type) << "\n";
+        text << "dialog_status=" << static_cast<uint32_t>(emuenv.common_dialog.status) << "\n";
+        text << "dialog_substatus=" << static_cast<uint32_t>(emuenv.common_dialog.substatus) << "\n";
+        text << "dialog_result=" << static_cast<uint32_t>(emuenv.common_dialog.result) << "\n";
+
+        text << "camera_active_device=" << static_cast<int32_t>(emuenv.camera.active_camera) << "\n";
+        text << "camera_front_opened=" << emuenv.camera.front()->is_opened << "\n";
+        text << "camera_front_started=" << emuenv.camera.front()->is_started << "\n";
+        text << "camera_back_opened=" << emuenv.camera.back()->is_opened << "\n";
+        text << "camera_back_started=" << emuenv.camera.back()->is_started << "\n";
+        text << "touch_front_mode=" << static_cast<uint32_t>(emuenv.touch.touch_mode[0]) << "\n";
+        text << "touch_back_mode=" << static_cast<uint32_t>(emuenv.touch.touch_mode[1]) << "\n";
+        {
+            const std::lock_guard<std::mutex> motion_lock(emuenv.motion.mutex);
+            text << "motion_sampling=" << emuenv.motion.is_sampling << "\n";
+            text << "motion_last_counter=" << emuenv.motion.last_counter << "\n";
+            text << "motion_last_gyro_timestamp=" << emuenv.motion.last_gyro_timestamp << "\n";
+            text << "motion_last_accel_timestamp=" << emuenv.motion.last_accel_timestamp << "\n";
+        }
+        sections.push_back(quick_state_make_text_section("thor.host-services", text));
+    }
+
+    {
+        std::ostringstream text;
         text << "schema=thor.display.v1\n";
         text << "speed_percent=" << emuenv.display.speed_percent.load() << "\n";
         text << "vblank_count=" << emuenv.display.vblank_count.load() << "\n";
@@ -6647,6 +7182,180 @@ static bool restore_quick_state_sharedfb_state(EmuEnvState &emuenv, const QuickS
         snapshot.memsize,
         snapshot.base1,
         snapshot.base2);
+    return true;
+}
+
+static np::CommunicationID quick_state_make_np_comm_id(const std::vector<uint8_t> &data, const uint32_t num) {
+    np::CommunicationID comm_id{};
+    if (!data.empty())
+        std::memcpy(comm_id.data, data.data(), std::min(data.size(), sizeof(comm_id.data)));
+    comm_id.term = '\0';
+    comm_id.num = static_cast<uint8_t>(num);
+    comm_id.dummy = 0;
+    return comm_id;
+}
+
+static bool restore_quick_state_trophy_contexts(EmuEnvState &emuenv, const QuickStateHostServicesSnapshot &snapshot) {
+    std::vector<np::trophy::Context> restored_contexts;
+    restored_contexts.reserve(snapshot.np_trophy_context_snapshots.size());
+
+    for (const QuickStateNpTrophyContextSnapshot &saved_context : snapshot.np_trophy_context_snapshots) {
+        const np::CommunicationID comm_id = quick_state_make_np_comm_id(saved_context.comm_id_data, saved_context.comm_id_num);
+        if (saved_context.valid) {
+            const SceUID trophy_stream = static_cast<SceUID>(saved_context.trophy_file_stream);
+            const SceOff trophy_stream_offset = tell_file(emuenv.io, trophy_stream, "quick_state_restore_trophy_context");
+            if (trophy_stream_offset < 0) {
+                quick_state_last_restore_detail = fmt::format("NP trophy context {} stream {} is not open", saved_context.id, trophy_stream);
+                return false;
+            }
+
+            np::trophy::Context context(comm_id, &emuenv.io, trophy_stream, saved_context.trophy_progress_output_file_path);
+            context.id = saved_context.id;
+            context.valid = saved_context.valid;
+            context.pref_path = emuenv.pref_path;
+            context.lang = saved_context.lang;
+            context.group_count = saved_context.group_count;
+            context.trophy_count = saved_context.trophy_count;
+            context.platinum_trophy_id = saved_context.platinum_trophy_id;
+            const bool seeked_to_header = seek_file(trophy_stream, 0, SCE_SEEK_SET, emuenv.io, "quick_state_restore_trophy_context") >= 0;
+            const bool parsed_header = seeked_to_header && context.trophy_file.header_parse();
+            const bool restored_position = seek_file(trophy_stream, trophy_stream_offset, SCE_SEEK_SET, emuenv.io, "quick_state_restore_trophy_context") >= 0;
+            if (!parsed_header) {
+                quick_state_last_restore_detail = fmt::format("NP trophy context {} TRP header could not be reparsed", saved_context.id);
+                return false;
+            }
+            if (!restored_position) {
+                quick_state_last_restore_detail = fmt::format("NP trophy context {} stream position could not be restored", saved_context.id);
+                return false;
+            }
+            std::memcpy(context.trophy_progress, saved_context.trophy_progress.data(), sizeof(context.trophy_progress));
+            std::memcpy(context.trophy_availability, saved_context.trophy_availability.data(), sizeof(context.trophy_availability));
+            std::memcpy(context.trophy_count_by_group.data(), saved_context.trophy_count_by_group.data(), context.trophy_count_by_group.size() * sizeof(context.trophy_count_by_group[0]));
+            std::memcpy(context.unlock_timestamps.data(), saved_context.unlock_timestamps.data(), context.unlock_timestamps.size() * sizeof(context.unlock_timestamps[0]));
+            std::memcpy(context.trophy_kinds.data(), saved_context.trophy_kinds.data(), context.trophy_kinds.size() * sizeof(context.trophy_kinds[0]));
+            restored_contexts.push_back(std::move(context));
+        } else {
+            np::trophy::Context context;
+            context.valid = false;
+            context.id = saved_context.id;
+            context.comm_id = comm_id;
+            context.trophy_file_stream = static_cast<SceUID>(saved_context.trophy_file_stream);
+            context.trophy_progress_output_file_path = saved_context.trophy_progress_output_file_path;
+            context.io = &emuenv.io;
+            context.pref_path = emuenv.pref_path;
+            context.lang = saved_context.lang;
+            restored_contexts.push_back(std::move(context));
+        }
+    }
+
+    emuenv.np.trophy_state.contexts = std::move(restored_contexts);
+    return true;
+}
+
+static bool restore_quick_state_host_services_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    QuickStateHostServicesSnapshot snapshot;
+    if (!quick_state_parse_host_services_snapshot_section(slot, snapshot)) {
+        quick_state_last_restore_detail = snapshot.detail.empty() ? "host service state section is missing or invalid" : snapshot.detail;
+        LOG_WARN("Refused host service restore for {} because {}.", slot.title_id, quick_state_last_restore_detail);
+        return false;
+    }
+    if (!snapshot.exact_restore) {
+        quick_state_last_restore_detail = "active host service state needs a serializer";
+        LOG_WARN("Refused host service restore for {} because active host services still need exact serializers (np_trophy_contexts={}, http_requests={}, net_sockets={}, netctl_peers={}, dialog_active={}, camera_active={}).",
+            slot.title_id,
+            snapshot.np_trophy_contexts,
+            snapshot.http_requests,
+            snapshot.net_sockets,
+            snapshot.netctl_adhoc_peers,
+            snapshot.dialog_active,
+            snapshot.camera_front_opened || snapshot.camera_front_started || snapshot.camera_back_opened || snapshot.camera_back_started);
+        return false;
+    }
+
+    emuenv.np.inited = snapshot.np_inited;
+    emuenv.np.comm_id = quick_state_make_np_comm_id(snapshot.np_comm_id_data, snapshot.np_comm_id_num);
+    emuenv.np.state_cb_id = static_cast<SceUID>(snapshot.np_state_cb_id);
+    emuenv.np.cbs.clear();
+    for (const auto &[callback_id, callback] : snapshot.np_callbacks) {
+        emuenv.np.cbs.emplace(callback_id, SceNpServiceStateCallback{
+                                         .pc = callback.first,
+                                         .data = callback.second,
+                                     });
+    }
+    {
+        const std::lock_guard<std::mutex> trophy_lock(emuenv.np.trophy_state.access_mutex);
+        emuenv.np.trophy_state.inited = snapshot.np_trophy_inited;
+        if (!restore_quick_state_trophy_contexts(emuenv, snapshot))
+            return false;
+    }
+
+    emuenv.http.inited = snapshot.http_inited;
+    emuenv.http.sslInited = snapshot.http_ssl_inited;
+    emuenv.http.defaultResponseHeaderSize = static_cast<SceInt>(snapshot.http_default_response_header_size);
+    emuenv.http.next_temp = snapshot.http_next_template;
+    emuenv.http.next_conn = snapshot.http_next_connection;
+    emuenv.http.next_req = snapshot.http_next_request;
+    emuenv.http.templates.clear();
+    emuenv.http.connections.clear();
+    emuenv.http.requests.clear();
+    emuenv.http.guestPointers.clear();
+    emuenv.http.ssl_ctx = nullptr;
+
+    emuenv.net.inited = snapshot.net_inited;
+    emuenv.net.next_id = snapshot.net_next_id;
+    emuenv.net.next_epoll_id = snapshot.net_next_epoll_id;
+    emuenv.net.state = snapshot.net_state;
+    emuenv.net.resolver_id = snapshot.net_resolver_id;
+    emuenv.net.current_addr_index = snapshot.net_current_addr_index;
+    emuenv.net.broadcastAddr = snapshot.net_broadcast_addr;
+    emuenv.net.netAddr = snapshot.net_addr;
+    emuenv.net.socks.clear();
+    emuenv.net.epolls.clear();
+    netctl_stop_adhoc_thread(emuenv);
+    {
+        const std::lock_guard<std::mutex> netctl_lock(emuenv.netctl.mutex);
+        emuenv.netctl.inited = snapshot.netctl_inited;
+        for (size_t i = 0; i < emuenv.netctl.callbacks.size(); i++) {
+            emuenv.netctl.callbacks[i].pc = snapshot.netctl_callbacks[i].first;
+            emuenv.netctl.callbacks[i].arg = snapshot.netctl_callbacks[i].second;
+        }
+        for (size_t i = 0; i < emuenv.netctl.adhocCallbacks.size(); i++) {
+            emuenv.netctl.adhocCallbacks[i].pc = snapshot.netctl_adhoc_callbacks[i].first;
+            emuenv.netctl.adhocCallbacks[i].arg = snapshot.netctl_adhoc_callbacks[i].second;
+        }
+        emuenv.netctl.adhocPeers.clear();
+        emuenv.netctl.adhocState = static_cast<SceNetCtlState>(snapshot.netctl_adhoc_state);
+        emuenv.netctl.adhocEvent = static_cast<SceNetCtlEventType>(snapshot.netctl_adhoc_event);
+        emuenv.netctl.lastNotifiedAdhocEvent = static_cast<SceNetCtlEventType>(snapshot.netctl_last_notified_adhoc_event);
+    }
+    if (snapshot.netctl_adhoc_thread_running)
+        netctl_start_adhoc_thread(emuenv, emuenv.main_thread_id);
+
+    emuenv.common_dialog.type = static_cast<DialogType>(snapshot.dialog_type);
+    emuenv.common_dialog.status = static_cast<SceCommonDialogStatus>(snapshot.dialog_status);
+    emuenv.common_dialog.substatus = static_cast<SceCommonDialogStatus>(snapshot.dialog_substatus);
+    emuenv.common_dialog.result = static_cast<SceCommonDialogResult>(snapshot.dialog_result);
+
+    emuenv.camera.active_camera = static_cast<SceCameraDevice>(snapshot.camera_active_device);
+    emuenv.camera.front()->is_opened = snapshot.camera_front_opened;
+    emuenv.camera.front()->is_started = snapshot.camera_front_started;
+    emuenv.camera.back()->is_opened = snapshot.camera_back_opened;
+    emuenv.camera.back()->is_started = snapshot.camera_back_started;
+    emuenv.touch.touch_mode[0] = static_cast<SceTouchSamplingState>(snapshot.touch_front_mode);
+    emuenv.touch.touch_mode[1] = static_cast<SceTouchSamplingState>(snapshot.touch_back_mode);
+    {
+        const std::lock_guard<std::mutex> motion_lock(emuenv.motion.mutex);
+        emuenv.motion.is_sampling = snapshot.motion_sampling;
+        emuenv.motion.last_counter = snapshot.motion_last_counter;
+        emuenv.motion.last_gyro_timestamp = snapshot.motion_last_gyro_timestamp;
+        emuenv.motion.last_accel_timestamp = snapshot.motion_last_accel_timestamp;
+    }
+
+    LOG_INFO("Restored host service snapshot for {} (np_callbacks={}, netctl_callbacks={}, motion_sampling={}).",
+        slot.title_id,
+        snapshot.np_callbacks.size(),
+        quick_state_count_address_pairs(snapshot.netctl_callbacks),
+        snapshot.motion_sampling);
     return true;
 }
 
@@ -7556,11 +8265,16 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
                     saved_mutex.workarea);
                 current->second->workarea = Ptr<SceKernelLwMutexWork>(saved_mutex.workarea);
             }
+            const bool rebuild_deferred_waiters = saved_mutex.waiting_count > 0
+                && quick_state_wait_queue_entries_restorable_without_live_host(snapshot, kind, uid, saved_mutex.waiting_count);
+            const size_t current_waiting = quick_state_waiting_count(current->second->waiting_threads);
+            const bool current_waiters_deferred = quick_state_wait_queue_contains_only_deferred_current_waiters(current->second->waiting_threads);
             if (!quick_state_sync_identity_matches(*current->second, saved_mutex.name, saved_mutex.attr)
-                || quick_state_waiting_count(current->second->waiting_threads) != saved_mutex.waiting_count
+                || (!rebuild_deferred_waiters && current_waiting != saved_mutex.waiting_count)
+                || (rebuild_deferred_waiters && !current_waiters_deferred)
                 || (saved_mutex.lightweight && current->second->workarea.address() != saved_mutex.workarea)) {
                 LOG_WARN("Refused sync primitive restore for {} because {} {} does not match the saved identity.", slot.title_id, kind, uid);
-                quick_state_last_restore_detail = fmt::format("{} {} does not match the saved identity; saved name='{}' attr={} waiting={} owner={} workarea=0x{:08X} current name='{}' attr={} waiting={} owner={} workarea=0x{:08X}",
+                quick_state_last_restore_detail = fmt::format("{} {} does not match the saved identity; saved name='{}' attr={} waiting={} owner={} workarea=0x{:08X} rebuild_deferred={} current name='{}' attr={} waiting={} owner={} workarea=0x{:08X} current_waiters_deferred={}",
                     kind,
                     uid,
                     saved_mutex.name,
@@ -7568,11 +8282,13 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
                     saved_mutex.waiting_count,
                     saved_mutex.owner,
                     saved_mutex.workarea,
+                    rebuild_deferred_waiters,
                     current->second->name,
                     current->second->attr,
-                    quick_state_waiting_count(current->second->waiting_threads),
+                    current_waiting,
                     current->second->owner ? current->second->owner->id : 0,
-                    current->second->workarea.address());
+                    current->second->workarea.address(),
+                    current_waiters_deferred);
                 return false;
             }
             if (saved_mutex.owner != 0 && !resolve_owner(saved_mutex.owner)) {
@@ -9016,6 +9732,12 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         return fail_quick_state_restore();
     }
 
+    if (!restore_quick_state_host_services_state(emuenv, slot)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "host service restore failed";
+        return fail_quick_state_restore();
+    }
+
     if (!restore_quick_state_display_state(emuenv, slot, matched_threads, allow_live_host_state)) {
         quick_state_last_restore_detail = "display restore failed";
         return fail_quick_state_restore();
@@ -9207,6 +9929,27 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "SharedFb memsize: " << manifest.sharedfb_memsize << "\n";
     marker << "SharedFb base1: 0x" << std::hex << manifest.sharedfb_base1 << "\n";
     marker << "SharedFb base2: 0x" << manifest.sharedfb_base2 << std::dec << "\n";
+    marker << "Host services restore layer: " << (manifest.host_services_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Host services exact restore: " << (manifest.host_services_exact_restore ? "ready" : "missing") << "\n";
+    marker << "Host services schema: " << (manifest.host_services_schema.empty() ? "missing" : manifest.host_services_schema) << "\n";
+    marker << "NP initialized: " << (manifest.np_inited ? "yes" : "no") << "\n";
+    marker << "NP callbacks: " << manifest.np_callbacks << "\n";
+    marker << "NP trophy contexts: " << manifest.np_trophy_contexts << " (" << manifest.np_trophy_valid_contexts << " valid)\n";
+    marker << "HTTP initialized: " << (manifest.http_inited ? "yes" : "no") << "\n";
+    marker << "HTTP SSL initialized: " << (manifest.http_ssl_inited ? "yes" : "no") << "\n";
+    marker << "HTTP SSL context active: " << (manifest.http_ssl_context_active ? "yes" : "no") << "\n";
+    marker << "HTTP active handles: templates=" << manifest.http_templates << " connections=" << manifest.http_connections << " requests=" << manifest.http_requests << "\n";
+    marker << "HTTP guest pointers: " << manifest.http_guest_pointers << "\n";
+    marker << "Net initialized: " << (manifest.net_inited ? "yes" : "no") << "\n";
+    marker << "Net active handles: sockets=" << manifest.net_sockets << " epolls=" << manifest.net_epolls << "\n";
+    marker << "NetCtl initialized: " << (manifest.netctl_inited ? "yes" : "no") << "\n";
+    marker << "NetCtl adhoc thread running: " << (manifest.netctl_adhoc_thread_running ? "yes" : "no") << "\n";
+    marker << "NetCtl adhoc peers: " << manifest.netctl_adhoc_peers << "\n";
+    marker << "NetCtl adhoc state/event: " << manifest.netctl_adhoc_state << "/" << manifest.netctl_adhoc_event << "\n";
+    marker << "NetCtl callbacks: " << manifest.netctl_callbacks << " adhoc=" << manifest.netctl_adhoc_callbacks << "\n";
+    marker << "Dialog active: " << (manifest.dialog_active ? "yes" : "no") << "\n";
+    marker << "Camera active: " << (manifest.camera_active ? "yes" : "no") << "\n";
+    marker << "Motion sampling: " << (manifest.motion_sampling ? "yes" : "no") << "\n";
     marker << "Display scalar restore layer: " << (manifest.display_state_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank wait restore layer: " << (manifest.display_vblank_waits_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank waits: " << manifest.display_wait_entries << "\n";
@@ -9328,6 +10071,24 @@ static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickSta
     marker << "SharedFb memsize: " << manifest.sharedfb_memsize << "\n";
     marker << "SharedFb base1: 0x" << std::hex << manifest.sharedfb_base1 << "\n";
     marker << "SharedFb base2: 0x" << manifest.sharedfb_base2 << std::dec << "\n";
+    marker << "Host services restore layer: " << (manifest.host_services_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Host services exact restore: " << (manifest.host_services_exact_restore ? "ready" : "missing") << "\n";
+    marker << "NP callbacks: " << manifest.np_callbacks << "\n";
+    marker << "NP trophy contexts: " << manifest.np_trophy_contexts << " (" << manifest.np_trophy_valid_contexts << " valid)\n";
+    marker << "HTTP initialized: " << (manifest.http_inited ? "yes" : "no") << "\n";
+    marker << "HTTP SSL initialized: " << (manifest.http_ssl_inited ? "yes" : "no") << "\n";
+    marker << "HTTP SSL context active: " << (manifest.http_ssl_context_active ? "yes" : "no") << "\n";
+    marker << "HTTP active handles: templates=" << manifest.http_templates << " connections=" << manifest.http_connections << " requests=" << manifest.http_requests << "\n";
+    marker << "HTTP guest pointers: " << manifest.http_guest_pointers << "\n";
+    marker << "Net initialized: " << (manifest.net_inited ? "yes" : "no") << "\n";
+    marker << "Net active handles: sockets=" << manifest.net_sockets << " epolls=" << manifest.net_epolls << "\n";
+    marker << "NetCtl initialized: " << (manifest.netctl_inited ? "yes" : "no") << "\n";
+    marker << "NetCtl adhoc thread running: " << (manifest.netctl_adhoc_thread_running ? "yes" : "no") << "\n";
+    marker << "NetCtl adhoc peers: " << manifest.netctl_adhoc_peers << "\n";
+    marker << "NetCtl adhoc state/event: " << manifest.netctl_adhoc_state << "/" << manifest.netctl_adhoc_event << "\n";
+    marker << "NetCtl callbacks: " << manifest.netctl_callbacks << " adhoc=" << manifest.netctl_adhoc_callbacks << "\n";
+    marker << "Dialog active: " << (manifest.dialog_active ? "yes" : "no") << "\n";
+    marker << "Camera active: " << (manifest.camera_active ? "yes" : "no") << "\n";
     marker << "Display scalar restore layer: " << (manifest.display_state_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank wait restore layer: " << (manifest.display_vblank_waits_restorable ? "ready" : "missing") << "\n";
     marker << "GXM host-state restore layer: " << (manifest.gxm_state_restorable ? "ready" : "missing") << "\n";

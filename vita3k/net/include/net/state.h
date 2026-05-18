@@ -28,6 +28,8 @@
 #include <mutex>
 #include <thread>
 
+struct EmuEnvState;
+
 typedef std::map<int, SocketPtr> NetSockets;
 typedef std::map<int, EpollPtr> NetEpolls;
 
@@ -68,3 +70,6 @@ struct NetCtlState {
             adhocThread.join();
     }
 };
+
+void netctl_start_adhoc_thread(EmuEnvState &emuenv, int thread_id);
+void netctl_stop_adhoc_thread(EmuEnvState &emuenv);
