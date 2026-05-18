@@ -36,7 +36,7 @@
       "name": "UPPERS title/load smoke",
       "slug": "uppers",
       "case": "uppers-render-regression",
-      "titleId": "UPPERS",
+      "titleId": "PCSG00633",
       "path": "/storage/2664-21DE/Roms/psvita/Uppers (English v0.97)[vita3k].zip",
       "expected": "Reach title/load UI cleanly. Gameplay proof requires a working save-modal automation path or a known gameplay save.",
       "knownBlocker": "The Android save-load confirmation modal may stop accepting touch/controller input; classify as blocked, not passed, if InputDispatcher reports not responsive or the modal remains.",
