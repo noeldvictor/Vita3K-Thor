@@ -50,6 +50,7 @@
 #include <modules/module_parent.h>
 #include <modules/SceAudiodec/quick_state.h>
 #include <modules/SceAvPlayer/quick_state.h>
+#include <modules/SceFiber/quick_state.h>
 #include <modules/SceJpeg/quick_state.h>
 #include <modules/SceSysmem/quick_state.h>
 #include <modules/SceVideodec/quick_state.h>
@@ -1500,6 +1501,14 @@ struct QuickStateSysmemSnapshot {
     std::string detail;
 };
 
+struct QuickStateFiberSnapshot {
+    bool valid = false;
+    size_t fiber_count = 0;
+    size_t active_thread_count = 0;
+    std::string schema;
+    std::string detail;
+};
+
 struct QuickStateRestoreManifest {
     uint32_t format_version = QUICKSTATE_VERSION;
     uint64_t guest_memory_bytes = 0;
@@ -1517,6 +1526,7 @@ struct QuickStateRestoreManifest {
     bool io_directory_handles_restorable = false;
     bool io_overlays_restorable = false;
     bool sysmem_state_restorable = false;
+    bool fiber_state_restorable = false;
     bool sync_primitives_restorable = false;
     bool sync_wait_queue_metadata_complete = false;
     bool display_state_restorable = false;
@@ -1540,6 +1550,9 @@ struct QuickStateRestoreManifest {
     size_t sysmem_blocks = 0;
     size_t sysmem_vm_blocks = 0;
     std::string sysmem_schema;
+    size_t fiber_count = 0;
+    size_t fiber_active_threads = 0;
+    std::string fiber_schema;
     size_t display_wait_entries = 0;
     size_t display_callback_entries = 0;
     size_t kernel_callback_entries = 0;
@@ -4598,6 +4611,27 @@ static bool quick_state_parse_sysmem_snapshot_section(const QuickStateSlot &slot
     return true;
 }
 
+static bool quick_state_parse_fiber_snapshot_section(const QuickStateSlot &slot, QuickStateFiberSnapshot &snapshot) {
+    snapshot = {};
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.fiber");
+    if (!section || section->version != 1) {
+        snapshot.detail = "Fiber host-state section is missing";
+        return false;
+    }
+
+    const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    snapshot.schema = schema == values.end() ? "" : schema->second;
+    std::string detail;
+    if (!sce_fiber::quick_state_validate_snapshot_values(values, &snapshot.fiber_count, &snapshot.active_thread_count, &detail)) {
+        snapshot.detail = detail.empty() ? "Fiber host-state section is invalid" : detail;
+        return false;
+    }
+
+    snapshot.valid = true;
+    return true;
+}
+
 static bool quick_state_parse_audiodec_snapshot_section(const QuickStateSlot &slot, QuickStateAudiodecSnapshot &snapshot) {
     snapshot = {};
     const QuickStateSection *section = quick_state_find_section(slot, "thor.audiodec");
@@ -4815,6 +4849,11 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     manifest.sysmem_blocks = sysmem_snapshot.block_count;
     manifest.sysmem_vm_blocks = sysmem_snapshot.vm_block_count;
     manifest.sysmem_schema = sysmem_snapshot.schema;
+    QuickStateFiberSnapshot fiber_snapshot;
+    manifest.fiber_state_restorable = quick_state_parse_fiber_snapshot_section(slot, fiber_snapshot);
+    manifest.fiber_count = fiber_snapshot.fiber_count;
+    manifest.fiber_active_threads = fiber_snapshot.active_thread_count;
+    manifest.fiber_schema = fiber_snapshot.schema;
     QuickStateSyncSnapshot sync_snapshot;
     manifest.sync_primitives_restorable = quick_state_parse_sync_primitives_section(slot, sync_snapshot);
     if (manifest.sync_primitives_restorable) {
@@ -4892,6 +4931,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         manifest.missing_serializers.push_back("kernel-thread-metadata");
     if (!manifest.sysmem_state_restorable)
         manifest.missing_serializers.push_back("sysmem-state");
+    if (!manifest.fiber_state_restorable)
+        manifest.missing_serializers.push_back("fiber-state");
     if (!manifest.kernel_callbacks_restorable && manifest.kernel_callback_entries > 0)
         manifest.missing_serializers.push_back("kernel-callbacks");
     if (!manifest.display_state_restorable) {
@@ -4946,6 +4987,7 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         && manifest.thread_metadata_restorable
         && manifest.kernel_callbacks_restorable
         && manifest.sysmem_state_restorable
+        && manifest.fiber_state_restorable
         && manifest.sync_primitives_restorable
         && manifest.io_file_positions_restorable
         && manifest.display_state_restorable
@@ -5948,6 +5990,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         "thor.timing",
         "thor.kernel.objects",
         "thor.sysmem",
+        "thor.fiber",
         "thor.io.vfs",
         "thor.display",
         "thor.gxm",
@@ -6278,6 +6321,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
     }
 
     sections.push_back(quick_state_make_text_section("thor.sysmem", sce_sysmem::quick_state_snapshot_text(emuenv)));
+    sections.push_back(quick_state_make_text_section("thor.fiber", sce_fiber::quick_state_snapshot_text(emuenv)));
 
     {
         std::ostringstream text;
@@ -6501,6 +6545,31 @@ static bool restore_quick_state_sysmem_state(EmuEnvState &emuenv, const QuickSta
         slot.title_id,
         snapshot.block_count,
         snapshot.vm_block_count);
+    return true;
+}
+
+static bool restore_quick_state_fiber_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.fiber");
+    if (!section || section->version != 1) {
+        LOG_WARN("Refused Fiber restore for {} because the thor.fiber section is missing.", slot.title_id);
+        quick_state_last_restore_detail = "Fiber host-state section is missing";
+        return false;
+    }
+
+    const auto values = quick_state_parse_text_section(*section);
+    std::string detail;
+    if (!sce_fiber::quick_state_restore_snapshot(emuenv, values, &detail)) {
+        quick_state_last_restore_detail = detail.empty() ? "Fiber host-state restore failed" : detail;
+        LOG_WARN("Refused Fiber restore for {} because {}.", slot.title_id, quick_state_last_restore_detail);
+        return false;
+    }
+
+    QuickStateFiberSnapshot snapshot;
+    quick_state_parse_fiber_snapshot_section(slot, snapshot);
+    LOG_INFO("Restored Fiber host snapshot for {} (fibers={}, active_threads={}).",
+        slot.title_id,
+        snapshot.fiber_count,
+        snapshot.active_thread_count);
     return true;
 }
 
@@ -8812,8 +8881,15 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         }
     }
 
+    sce_fiber::quick_state_discard_live_host_state(emuenv);
     for (const auto &page : slot.memory_pages)
         std::memcpy(Ptr<uint8_t>(page.address).get(emuenv.mem), page.bytes.data(), page.bytes.size());
+
+    if (!restore_quick_state_fiber_state(emuenv, slot)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "Fiber host-state restore failed";
+        return fail_quick_state_restore();
+    }
 
     if (!allow_live_host_state && !restore_quick_state_gxm_state(emuenv, slot)) {
         if (quick_state_last_restore_detail.empty())
@@ -9038,6 +9114,10 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "Sysmem schema: " << (manifest.sysmem_schema.empty() ? "missing" : manifest.sysmem_schema) << "\n";
     marker << "Sysmem blocks: " << manifest.sysmem_blocks << "\n";
     marker << "Sysmem VM blocks: " << manifest.sysmem_vm_blocks << "\n";
+    marker << "Fiber host-state restore layer: " << (manifest.fiber_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Fiber schema: " << (manifest.fiber_schema.empty() ? "missing" : manifest.fiber_schema) << "\n";
+    marker << "Fiber tracked fibers: " << manifest.fiber_count << "\n";
+    marker << "Fiber active threads: " << manifest.fiber_active_threads << "\n";
     marker << "Display scalar restore layer: " << (manifest.display_state_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank wait restore layer: " << (manifest.display_vblank_waits_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank waits: " << manifest.display_wait_entries << "\n";
@@ -9149,6 +9229,10 @@ static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickSta
     marker << "Sysmem schema: " << (manifest.sysmem_schema.empty() ? "missing" : manifest.sysmem_schema) << "\n";
     marker << "Sysmem blocks: " << manifest.sysmem_blocks << "\n";
     marker << "Sysmem VM blocks: " << manifest.sysmem_vm_blocks << "\n";
+    marker << "Fiber host-state restore layer: " << (manifest.fiber_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Fiber schema: " << (manifest.fiber_schema.empty() ? "missing" : manifest.fiber_schema) << "\n";
+    marker << "Fiber tracked fibers: " << manifest.fiber_count << "\n";
+    marker << "Fiber active threads: " << manifest.fiber_active_threads << "\n";
     marker << "Display scalar restore layer: " << (manifest.display_state_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank wait restore layer: " << (manifest.display_vblank_waits_restorable ? "ready" : "missing") << "\n";
     marker << "GXM host-state restore layer: " << (manifest.gxm_state_restorable ? "ready" : "missing") << "\n";

@@ -161,6 +161,8 @@ function Add-MarkerDigest([System.Collections.Generic.List[string]]$Summary, [st
         "^FIOS overlays:",
         "^Sysmem blocks:",
         "^Sysmem VM blocks:",
+        "^Fiber tracked fibers:",
+        "^Fiber active threads:",
         "^Display vblank waits:",
         "^Display vblank callbacks:",
         "^GXM display queue entries:",
