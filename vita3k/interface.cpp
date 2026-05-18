@@ -48,6 +48,7 @@
 #include <renderer/texture_cache.h>
 
 #include <modules/module_parent.h>
+#include <modules/SceAudiodec/quick_state.h>
 #include <modules/SceAvPlayer/quick_state.h>
 #include <modules/SceVideodec/quick_state.h>
 #include <motion/event_handler.h>
@@ -1464,6 +1465,15 @@ struct QuickStateAvPlayerSnapshot {
     std::string detail;
 };
 
+struct QuickStateAudiodecSnapshot {
+    bool valid = false;
+    size_t decoder_count = 0;
+    size_t library_count = 0;
+    std::string schema;
+    bool exact_restore = false;
+    std::string detail;
+};
+
 struct QuickStateVideodecSnapshot {
     bool valid = false;
     size_t decoder_count = 0;
@@ -1494,6 +1504,7 @@ struct QuickStateRestoreManifest {
     bool gxm_state_restorable = false;
     bool gxm_program_host_state_restorable = false;
     bool audio_state_restorable = false;
+    bool audiodec_state_restorable = false;
     bool avplayer_state_restorable = false;
     bool videodec_state_restorable = false;
     bool ngs_state_restorable = false;
@@ -1513,6 +1524,10 @@ struct QuickStateRestoreManifest {
     size_t gxm_display_queue_waiters = 0;
     size_t gxm_pending_display_callbacks = 0;
     size_t gxm_notification_waits = 0;
+    size_t audiodec_decoders = 0;
+    size_t audiodec_libraries = 0;
+    std::string audiodec_schema;
+    bool audiodec_exact_restore = false;
     size_t avplayer_players = 0;
     size_t avplayer_active_players = 0;
     std::string avplayer_schema;
@@ -4534,6 +4549,27 @@ static bool quick_state_parse_avplayer_snapshot_section(const QuickStateSlot &sl
     return true;
 }
 
+static bool quick_state_parse_audiodec_snapshot_section(const QuickStateSlot &slot, QuickStateAudiodecSnapshot &snapshot) {
+    snapshot = {};
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.audiodec");
+    if (!section || section->version != 1) {
+        snapshot.detail = "Audiodec host-state section is missing";
+        return false;
+    }
+
+    const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    snapshot.schema = schema == values.end() ? "" : schema->second;
+    std::string detail;
+    if (!sce_audiodec::quick_state_validate_snapshot_values(values, &snapshot.decoder_count, &snapshot.library_count, &snapshot.exact_restore, &detail)) {
+        snapshot.detail = detail.empty() ? "Audiodec host-state section is invalid" : detail;
+        return false;
+    }
+
+    snapshot.valid = true;
+    return true;
+}
+
 static bool quick_state_parse_videodec_snapshot_section(const QuickStateSlot &slot, QuickStateVideodecSnapshot &snapshot) {
     snapshot = {};
     const QuickStateSection *section = quick_state_find_section(slot, "thor.videodec");
@@ -4731,6 +4767,12 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     manifest.gxm_program_host_state_restorable = quick_state_parse_gxm_program_host_snapshot_header(slot);
     QuickStateAudioSnapshot audio_snapshot;
     manifest.audio_state_restorable = quick_state_parse_audio_snapshot_section(slot, audio_snapshot);
+    QuickStateAudiodecSnapshot audiodec_snapshot;
+    manifest.audiodec_state_restorable = quick_state_parse_audiodec_snapshot_section(slot, audiodec_snapshot);
+    manifest.audiodec_decoders = audiodec_snapshot.decoder_count;
+    manifest.audiodec_libraries = audiodec_snapshot.library_count;
+    manifest.audiodec_schema = audiodec_snapshot.schema;
+    manifest.audiodec_exact_restore = audiodec_snapshot.exact_restore;
     QuickStateAvPlayerSnapshot avplayer_snapshot;
     manifest.avplayer_state_restorable = quick_state_parse_avplayer_snapshot_section(slot, avplayer_snapshot);
     manifest.avplayer_players = avplayer_snapshot.player_count;
@@ -4781,6 +4823,10 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     }
     if (!manifest.audio_state_restorable)
         manifest.missing_serializers.push_back("audio-state");
+    if (!manifest.audiodec_state_restorable)
+        manifest.missing_serializers.push_back("audiodec-state");
+    if (manifest.audiodec_state_restorable && manifest.audiodec_decoders > 0 && !manifest.audiodec_exact_restore)
+        manifest.missing_serializers.push_back("audiodec-exact-state");
     if (!manifest.gxm_state_restorable)
         manifest.missing_serializers.push_back("gxm-state");
     if (!manifest.gxm_program_host_state_restorable)
@@ -4804,6 +4850,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     if (!manifest.timing_restorable)
         manifest.missing_serializers.push_back("timing-clocks");
     const bool videodec_sections_ready = manifest.videodec_state_restorable || manifest.avplayer_threads == 0;
+    const bool audiodec_sections_ready = manifest.audiodec_state_restorable
+        && (manifest.audiodec_exact_restore || manifest.audiodec_decoders == 0);
     const bool live_host_sections_ready = (manifest.same_pause_restore_available || manifest.live_host_restore_available)
         && manifest.timing_restorable
         && manifest.thread_metadata_restorable
@@ -4814,6 +4862,7 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         && manifest.gxm_state_restorable
         && manifest.gxm_program_host_state_restorable
         && manifest.audio_state_restorable
+        && audiodec_sections_ready
         && manifest.avplayer_state_restorable
         && videodec_sections_ready;
     const bool durable_restore_ready = manifest.missing_serializers.empty() && !slot.restore_requires_same_pause;
@@ -5812,6 +5861,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         "thor.gxm",
         "thor.gxm.program-host",
         "thor.audio",
+        "thor.audiodec",
         "thor.avplayer",
         "thor.videodec",
         "thor.ngs",
@@ -6298,6 +6348,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         sections.push_back(quick_state_make_text_section("thor.audio", text));
     }
 
+    sections.push_back(quick_state_make_text_section("thor.audiodec", sce_audiodec::quick_state_snapshot_text(emuenv)));
     sections.push_back(quick_state_make_text_section("thor.avplayer", sce_avplayer::quick_state_snapshot_text(emuenv)));
     sections.push_back(quick_state_make_text_section("thor.videodec", sce_videodec::quick_state_snapshot_text(emuenv)));
 
@@ -8133,6 +8184,32 @@ static bool restore_quick_state_avplayer_state(EmuEnvState &emuenv, const QuickS
     return true;
 }
 
+static bool restore_quick_state_audiodec_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.audiodec");
+    if (!section || section->version != 1) {
+        LOG_WARN("Refused Audiodec restore for {} because the thor.audiodec section is missing.", slot.title_id);
+        quick_state_last_restore_detail = "Audiodec host-state section is missing";
+        return false;
+    }
+
+    const auto values = quick_state_parse_text_section(*section);
+    std::string detail;
+    if (!sce_audiodec::quick_state_restore_snapshot(emuenv, values, &detail)) {
+        quick_state_last_restore_detail = detail.empty() ? "Audiodec host-state restore failed" : detail;
+        LOG_WARN("Refused Audiodec restore for {} because {}.", slot.title_id, quick_state_last_restore_detail);
+        return false;
+    }
+
+    QuickStateAudiodecSnapshot snapshot;
+    quick_state_parse_audiodec_snapshot_section(slot, snapshot);
+    LOG_INFO("Restored Audiodec host snapshot for {} (libraries={}, decoders={}, exact={}).",
+        slot.title_id,
+        snapshot.library_count,
+        snapshot.decoder_count,
+        snapshot.exact_restore);
+    return true;
+}
+
 static bool restore_quick_state_videodec_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
     const QuickStateSection *section = quick_state_find_section(slot, "thor.videodec");
     if (!section || section->version != 1) {
@@ -8637,6 +8714,12 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         return fail_quick_state_restore();
     }
 
+    if (!restore_quick_state_audiodec_state(emuenv, slot)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "Audiodec restore failed";
+        return fail_quick_state_restore();
+    }
+
     if (!restore_quick_state_videodec_state(emuenv, slot)) {
         if (quick_state_last_restore_detail.empty())
             quick_state_last_restore_detail = "Videodec restore failed";
@@ -8804,6 +8887,11 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "GXM notification waits: " << manifest.gxm_notification_waits << "\n";
     marker << "GXM shader program host-state restore layer: " << (manifest.gxm_program_host_state_restorable ? "ready" : "missing") << "\n";
     marker << "Audio scalar restore layer: " << (manifest.audio_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Audiodec host-state restore layer: " << (manifest.audiodec_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Audiodec schema: " << (manifest.audiodec_schema.empty() ? "missing" : manifest.audiodec_schema) << "\n";
+    marker << "Audiodec libraries: " << manifest.audiodec_libraries << "\n";
+    marker << "Audiodec decoders: " << manifest.audiodec_decoders << "\n";
+    marker << "Audiodec exact restore: " << (manifest.audiodec_exact_restore ? "ready" : "missing") << "\n";
     marker << "AVPlayer host-state restore layer: " << (manifest.avplayer_state_restorable ? "ready" : "missing") << "\n";
     marker << "AVPlayer schema: " << (manifest.avplayer_schema.empty() ? "missing" : manifest.avplayer_schema) << "\n";
     marker << "AVPlayer exact cursor restore: " << (manifest.avplayer_exact_cursor_restore ? "ready" : "missing") << "\n";
@@ -8899,6 +8987,11 @@ static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickSta
     marker << "GXM notification waits: " << manifest.gxm_notification_waits << "\n";
     marker << "GXM shader program host-state restore layer: " << (manifest.gxm_program_host_state_restorable ? "ready" : "missing") << "\n";
     marker << "Audio scalar restore layer: " << (manifest.audio_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Audiodec host-state restore layer: " << (manifest.audiodec_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Audiodec schema: " << (manifest.audiodec_schema.empty() ? "missing" : manifest.audiodec_schema) << "\n";
+    marker << "Audiodec libraries: " << manifest.audiodec_libraries << "\n";
+    marker << "Audiodec decoders: " << manifest.audiodec_decoders << "\n";
+    marker << "Audiodec exact restore: " << (manifest.audiodec_exact_restore ? "ready" : "missing") << "\n";
     marker << "AVPlayer host-state restore layer: " << (manifest.avplayer_state_restorable ? "ready" : "missing") << "\n";
     marker << "AVPlayer schema: " << (manifest.avplayer_schema.empty() ? "missing" : manifest.avplayer_schema) << "\n";
     marker << "AVPlayer exact cursor restore: " << (manifest.avplayer_exact_cursor_restore ? "ready" : "missing") << "\n";
