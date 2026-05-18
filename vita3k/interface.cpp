@@ -6837,8 +6837,8 @@ static bool quick_state_restore_deferred_msgpipe_waits(EmuEnvState &emuenv, cons
     quick_state_clear_wait_queue(queue);
     for (uint32_t index = 0; index < expected_count; index++) {
         const QuickStateSyncWaitQueueEntry *entry = quick_state_find_wait_queue_entry(snapshot, kind, uid, index);
-        if (!entry || entry->timeout != 0) {
-            quick_state_last_restore_detail = fmt::format("{} {} waiter {} has unsupported timeout state", kind, uid, index);
+        if (!entry) {
+            quick_state_last_restore_detail = fmt::format("{} {} waiter {} is missing", kind, uid, index);
             return false;
         }
 
