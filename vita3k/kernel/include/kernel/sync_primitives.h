@@ -239,6 +239,7 @@ int mutex_try_lock(KernelState &kernel, MemState &mem, const char *export_name, 
 int mutex_unlock(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID mutexid, int unlock_count, SyncWeight weight);
 int mutex_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID mutexid, SyncWeight weight);
 MutexPtr mutex_get(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID mutexid, SyncWeight weight);
+void mutex_schedule_deferred_timeout(const KernelState &kernel, const MutexPtr &mutex, const ThreadStatePtr &thread, SceUInt32 timeout_value);
 
 // RWLock
 SceUID rwlock_create(KernelState &kernel, MemState &mem, const char *export_name, const char *name, SceUID thread_id, SceUInt32 attr);
@@ -260,6 +261,7 @@ SceUID condvar_create(SceUID *uid_out, KernelState &kernel, const char *export_n
 int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID condid, SceUInt *timeout, SyncWeight weight);
 int condvar_signal(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID condid, Condvar::SignalTarget signal_target, SyncWeight weight);
 int condvar_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID condid, SyncWeight weight);
+void condvar_schedule_deferred_timeout(const KernelState &kernel, const CondvarPtr &condvar, const ThreadStatePtr &thread, SceUInt32 timeout_value);
 
 // Event Flag
 SceUID eventflag_clear(KernelState &kernel, const char *export_name, SceUID evfId, SceUInt32 bitPattern);

@@ -187,6 +187,50 @@ void msgpipe_schedule_deferred_timeout(const KernelState &kernel, const MsgPipeP
     }).detach();
 }
 
+void mutex_schedule_deferred_timeout(const KernelState &kernel, const MutexPtr &mutex, const ThreadStatePtr &thread, const SceUInt32 timeout_value) {
+    std::thread([&kernel, mutex, thread, timeout_value]() {
+        std::this_thread::sleep_for(std::chrono::microseconds{ kernel_speed_to_host_us(kernel, timeout_value) });
+
+        const std::lock_guard<std::mutex> mutex_lock(mutex->mutex);
+        auto data_it = mutex->waiting_threads->find(thread);
+        if (data_it == mutex->waiting_threads->end())
+            return;
+
+        const WaitingThreadData data = *data_it;
+        if (!data.deferred_import_wait || !data.timeout)
+            return;
+
+        if (remaining_timeout_us(kernel, data) > 0)
+            return;
+
+        *data.timeout = 0;
+        mutex->waiting_threads->erase(data_it);
+        thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_TIMEOUT));
+    }).detach();
+}
+
+void condvar_schedule_deferred_timeout(const KernelState &kernel, const CondvarPtr &condvar, const ThreadStatePtr &thread, const SceUInt32 timeout_value) {
+    std::thread([&kernel, condvar, thread, timeout_value]() {
+        std::this_thread::sleep_for(std::chrono::microseconds{ kernel_speed_to_host_us(kernel, timeout_value) });
+
+        const std::lock_guard<std::mutex> condvar_lock(condvar->mutex);
+        auto data_it = condvar->waiting_threads->find(thread);
+        if (data_it == condvar->waiting_threads->end())
+            return;
+
+        const WaitingThreadData data = *data_it;
+        if (!data.deferred_import_wait || !data.timeout)
+            return;
+
+        if (remaining_timeout_us(kernel, data) > 0)
+            return;
+
+        *data.timeout = 0;
+        condvar->waiting_threads->erase(data_it);
+        thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_TIMEOUT));
+    }).detach();
+}
+
 inline static int handle_timeout(const KernelState &kernel, const ThreadStatePtr &thread, std::unique_lock<std::mutex> &thread_lock,
     std::unique_lock<std::mutex> &primitive_lock, WaitingThreadQueuePtr &queue,
     const ThreadDataQueueInterator<WaitingThreadData> &data_it, const char *export_name,
@@ -769,15 +813,27 @@ inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char
             return RET_ERROR(SCE_KERNEL_ERROR_MUTEX_FAILED_TO_OWN);
         }
 
-        // Sleep thread!
-        std::unique_lock<std::mutex> thread_lock(thread->mutex);
-        thread->update_status(ThreadStatus::wait, ThreadStatus::run);
-
         WaitingThreadData data;
         data.thread = thread;
         data.lock_count = lock_count;
         data.priority = thread->priority;
         capture_wait_timeout(data, timeout);
+        capture_wait_timeout_start(data);
+
+        if (timeout && *timeout == 0)
+            return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+
+        if (thread->begin_deferred_import_wait()) {
+            data.deferred_import_wait = true;
+            mutex->waiting_threads->push(data);
+            if (timeout)
+                mutex_schedule_deferred_timeout(kernel, mutex, thread, data.timeout_value);
+            return SCE_KERNEL_OK;
+        }
+
+        // Sleep thread!
+        std::unique_lock<std::mutex> thread_lock(thread->mutex);
+        thread->update_status(ThreadStatus::wait, ThreadStatus::run);
 
         const auto data_it = mutex->waiting_threads->push(data);
         thread_lock.unlock();
@@ -842,6 +898,8 @@ inline static int mutex_unlock_impl(KernelState &kernel, MemState &mem, const ch
                 mutex->waiting_threads->pop();
                 mutex->lock_count += waiting_lock_count;
                 mutex->owner = waiting_thread;
+                if (waiting_thread_data.timeout)
+                    *waiting_thread_data.timeout = remaining_timeout_us(kernel, waiting_thread_data);
 
                 if (!waiting_thread->complete_deferred_import_wait(SCE_KERNEL_OK)) {
                     const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
@@ -1380,10 +1438,16 @@ int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, Sc
     data.thread = thread;
     data.priority = thread->priority;
     capture_wait_timeout(data, timeout);
+    capture_wait_timeout_start(data);
 
-    if (!timeout && thread->begin_deferred_import_wait()) {
+    if (timeout && *timeout == 0)
+        return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+
+    if (thread->begin_deferred_import_wait()) {
         data.deferred_import_wait = true;
         condvar->waiting_threads->push(data);
+        if (timeout)
+            condvar_schedule_deferred_timeout(kernel, condvar, thread, data.timeout_value);
         return SCE_KERNEL_OK;
     }
 
@@ -1418,6 +1482,12 @@ static void condvar_finish_wait(KernelState &kernel, MemState &mem, const char *
     }
 
     const std::lock_guard<std::mutex> mutex_lock(mutex->mutex);
+    SceUInt32 remaining_timeout = 0;
+    if (waiting_thread_data.timeout) {
+        remaining_timeout = remaining_timeout_us(kernel, waiting_thread_data);
+        *waiting_thread_data.timeout = remaining_timeout;
+    }
+
     const bool is_recursive = (mutex->attr & SCE_KERNEL_MUTEX_ATTR_RECURSIVE) != 0;
     if (mutex->lock_count == 0 || (mutex->owner == waiting_thread && is_recursive)) {
         mutex->lock_count += 1;
@@ -1433,12 +1503,22 @@ static void condvar_finish_wait(KernelState &kernel, MemState &mem, const char *
         return;
     }
 
+    if (waiting_thread_data.timeout && remaining_timeout == 0) {
+        waiting_thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_TIMEOUT));
+        return;
+    }
+
     WaitingThreadData mutex_wait;
     mutex_wait.thread = waiting_thread;
     mutex_wait.lock_count = 1;
     mutex_wait.priority = waiting_thread_data.priority;
     mutex_wait.deferred_import_wait = true;
+    mutex_wait.timeout = waiting_thread_data.timeout;
+    mutex_wait.timeout_value = remaining_timeout;
+    capture_wait_timeout_start(mutex_wait);
     mutex->waiting_threads->push(mutex_wait);
+    if (mutex_wait.timeout)
+        mutex_schedule_deferred_timeout(kernel, mutex, waiting_thread, mutex_wait.timeout_value);
 }
 
 int condvar_signal(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID condid, Condvar::SignalTarget signal_target, SyncWeight weight) {

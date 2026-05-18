@@ -4459,9 +4459,11 @@ static bool quick_state_wait_queue_entry_restorable_without_live_host(const Quic
             return true;
         if (entry.kind == "msgpipe_sender" || entry.kind == "msgpipe_receiver")
             return true;
+        if (entry.kind == "mutex" || entry.kind == "lwmutex")
+            return true;
         if (entry.kind == "condvar"
             || entry.kind == "lwcondvar") {
-            return entry.timeout == 0;
+            return true;
         }
         return false;
     }
@@ -6009,6 +6011,49 @@ static bool quick_state_restore_deferred_eventflag_waits(EmuEnvState &emuenv, co
     return true;
 }
 
+static bool quick_state_restore_deferred_mutex_waits(EmuEnvState &emuenv, const QuickStateSyncSnapshot &snapshot, const std::map<SceUID, ThreadStatePtr> &threads_by_saved_id, const SceUID uid, const QuickStateSyncMutex &saved_mutex, const MutexPtr &mutex, const char *kind) {
+    if (saved_mutex.waiting_count == 0)
+        return true;
+    if (!quick_state_wait_queue_entries_restorable_without_live_host(snapshot, kind, uid, saved_mutex.waiting_count))
+        return true;
+
+    if (!quick_state_wait_queue_contains_only_deferred_current_waiters(mutex->waiting_threads)) {
+        quick_state_last_restore_detail = fmt::format("{} {} has non-deferred current waiters", kind, uid);
+        return false;
+    }
+
+    quick_state_clear_wait_queue(mutex->waiting_threads);
+    for (uint32_t index = 0; index < saved_mutex.waiting_count; index++) {
+        const QuickStateSyncWaitQueueEntry *entry = quick_state_find_wait_queue_entry(snapshot, kind, uid, index);
+        if (!entry)
+            return false;
+
+        const auto thread = threads_by_saved_id.find(entry->thread_id);
+        if (thread == threads_by_saved_id.end() || !thread->second) {
+            quick_state_last_restore_detail = fmt::format("{} {} waiter thread {} was not matched", kind, uid, entry->thread_id);
+            return false;
+        }
+
+        WaitingThreadData data;
+        data.thread = thread->second;
+        data.priority = entry->priority;
+        data.lock_count = entry->lock_count;
+        data.timeout_value = entry->timeout_value;
+        data.timeout_start_host_us = quick_state_host_time_us();
+        data.deferred_import_wait = true;
+        if (!quick_state_restore_u32_pointer(emuenv.mem, entry->timeout, data.timeout)) {
+            quick_state_last_restore_detail = fmt::format("{} {} waiter {} timeout pointer 0x{:X} is invalid", kind, uid, index, entry->timeout);
+            return false;
+        }
+
+        thread->second->restore_deferred_import_wait();
+        mutex->waiting_threads->push(data);
+        if (data.timeout && data.timeout_value > 0)
+            mutex_schedule_deferred_timeout(emuenv.kernel, mutex, thread->second, data.timeout_value);
+    }
+    return true;
+}
+
 static bool quick_state_restore_deferred_condvar_waits(EmuEnvState &emuenv, const QuickStateSyncSnapshot &snapshot, const std::map<SceUID, ThreadStatePtr> &threads_by_saved_id, const SceUID uid, const QuickStateSyncCondvar &saved_condvar, const CondvarPtr &condvar, const char *kind) {
     if (saved_condvar.waiting_count == 0)
         return true;
@@ -6023,10 +6068,8 @@ static bool quick_state_restore_deferred_condvar_waits(EmuEnvState &emuenv, cons
     quick_state_clear_wait_queue(condvar->waiting_threads);
     for (uint32_t index = 0; index < saved_condvar.waiting_count; index++) {
         const QuickStateSyncWaitQueueEntry *entry = quick_state_find_wait_queue_entry(snapshot, kind, uid, index);
-        if (!entry || entry->timeout != 0) {
-            quick_state_last_restore_detail = fmt::format("{} {} waiter {} has unsupported timeout state", kind, uid, index);
+        if (!entry)
             return false;
-        }
 
         const auto thread = threads_by_saved_id.find(entry->thread_id);
         if (thread == threads_by_saved_id.end() || !thread->second) {
@@ -6047,6 +6090,8 @@ static bool quick_state_restore_deferred_condvar_waits(EmuEnvState &emuenv, cons
 
         thread->second->restore_deferred_import_wait();
         condvar->waiting_threads->push(data);
+        if (data.timeout && data.timeout_value > 0)
+            condvar_schedule_deferred_timeout(emuenv.kernel, condvar, thread->second, data.timeout_value);
     }
     return true;
 }
@@ -6614,10 +6659,15 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
             mutex->owner = resolve_owner(saved_mutex.owner);
             if (saved_mutex.lightweight)
                 mutex->workarea = Ptr<SceKernelLwMutexWork>(saved_mutex.workarea);
+            if (!quick_state_restore_deferred_mutex_waits(emuenv, snapshot, threads_by_saved_id, uid, saved_mutex, mutex, saved_mutex.lightweight ? "lwmutex" : "mutex"))
+                return false;
         }
+        return true;
     };
-    restore_mutex_map(emuenv.kernel.mutexes, snapshot.mutexes);
-    restore_mutex_map(emuenv.kernel.lwmutexes, snapshot.lwmutexes);
+    if (!restore_mutex_map(emuenv.kernel.mutexes, snapshot.mutexes)
+        || !restore_mutex_map(emuenv.kernel.lwmutexes, snapshot.lwmutexes)) {
+        return false;
+    }
 
     for (const auto &[uid, saved_eventflag] : snapshot.eventflags) {
         auto &eventflag = emuenv.kernel.eventflags.at(uid);
