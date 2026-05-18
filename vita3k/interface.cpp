@@ -6536,6 +6536,7 @@ static bool quick_state_restore_deferred_semaphore_waits(EmuEnvState &emuenv, co
         data.signal = entry->signal;
         data.timeout_value = entry->timeout_value;
         data.timeout_start_host_us = quick_state_host_time_us();
+        data.wait_generation = emuenv.kernel.next_wait_generation();
         data.deferred_import_wait = true;
         data.was_canceled = std::make_shared<bool>(false);
         if (!quick_state_restore_u32_pointer(emuenv.mem, entry->timeout, data.timeout)) {
@@ -6546,7 +6547,7 @@ static bool quick_state_restore_deferred_semaphore_waits(EmuEnvState &emuenv, co
         thread->second->restore_deferred_import_wait();
         semaphore->waiting_threads->push(data);
         if (data.timeout && data.timeout_value > 0)
-            semaphore_schedule_deferred_timeout(emuenv.kernel, semaphore, thread->second, data.timeout_value);
+            semaphore_schedule_deferred_timeout(emuenv.kernel, semaphore, thread->second, data.timeout_value, data.wait_generation);
     }
     return true;
 }
@@ -6580,6 +6581,7 @@ static bool quick_state_restore_deferred_simple_event_waits(EmuEnvState &emuenv,
         data.pattern = entry->pattern;
         data.timeout_value = entry->timeout_value;
         data.timeout_start_host_us = quick_state_host_time_us();
+        data.wait_generation = emuenv.kernel.next_wait_generation();
         data.deferred_import_wait = true;
         if (!quick_state_restore_u32_pointer(emuenv.mem, entry->timeout, data.timeout)
             || !quick_state_restore_u32_pointer(emuenv.mem, entry->result_pattern, data.result_pattern)
@@ -6591,7 +6593,7 @@ static bool quick_state_restore_deferred_simple_event_waits(EmuEnvState &emuenv,
         thread->second->restore_deferred_import_wait();
         event->waiting_threads->push(data);
         if (data.timeout && data.timeout_value > 0)
-            simple_event_schedule_deferred_timeout(emuenv.kernel, event, thread->second, data.timeout_value);
+            simple_event_schedule_deferred_timeout(emuenv.kernel, event, thread->second, data.timeout_value, data.wait_generation);
     }
     return true;
 }
@@ -6624,6 +6626,7 @@ static bool quick_state_restore_deferred_timer_waits(EmuEnvState &emuenv, const 
         data.priority = entry->priority;
         data.timeout_value = entry->timeout_value;
         data.timeout_start_host_us = quick_state_host_time_us();
+        data.wait_generation = emuenv.kernel.next_wait_generation();
         data.deferred_import_wait = true;
         if (!quick_state_restore_u32_pointer(emuenv.mem, entry->timeout, data.timeout)
             || !quick_state_restore_u32_pointer(emuenv.mem, entry->result_pattern, data.result_pattern)
@@ -6635,7 +6638,7 @@ static bool quick_state_restore_deferred_timer_waits(EmuEnvState &emuenv, const 
         thread->second->restore_deferred_import_wait();
         timer->waiting_threads->push(data);
         if (data.timeout && data.timeout_value > 0)
-            timer_schedule_deferred_timeout(emuenv.kernel, timer, thread->second, data.timeout_value);
+            timer_schedule_deferred_timeout(emuenv.kernel, timer, thread->second, data.timeout_value, data.wait_generation);
     }
 
     timer_schedule_deferred_event(emuenv.kernel, timer);
@@ -6671,6 +6674,7 @@ static bool quick_state_restore_deferred_rwlock_waits(EmuEnvState &emuenv, const
         data.is_write = entry->is_write;
         data.timeout_value = entry->timeout_value;
         data.timeout_start_host_us = quick_state_host_time_us();
+        data.wait_generation = emuenv.kernel.next_wait_generation();
         data.deferred_import_wait = true;
         if (!quick_state_restore_u32_pointer(emuenv.mem, entry->timeout, data.timeout)) {
             quick_state_last_restore_detail = fmt::format("rwlock {} waiter {} timeout pointer 0x{:X} is invalid", uid, index, entry->timeout);
@@ -6680,7 +6684,7 @@ static bool quick_state_restore_deferred_rwlock_waits(EmuEnvState &emuenv, const
         thread->second->restore_deferred_import_wait();
         rwlock->waiting_threads->push(data);
         if (data.timeout && data.timeout_value > 0)
-            rwlock_schedule_deferred_timeout(emuenv.kernel, rwlock, thread->second, data.timeout_value);
+            rwlock_schedule_deferred_timeout(emuenv.kernel, rwlock, thread->second, data.timeout_value, data.wait_generation);
     }
     return true;
 }
@@ -6715,6 +6719,7 @@ static bool quick_state_restore_deferred_eventflag_waits(EmuEnvState &emuenv, co
         data.flags = entry->flags;
         data.timeout_value = entry->timeout_value;
         data.timeout_start_host_us = quick_state_host_time_us();
+        data.wait_generation = emuenv.kernel.next_wait_generation();
         data.deferred_import_wait = true;
         data.was_canceled = std::make_shared<bool>(false);
         if (!quick_state_restore_u32_pointer(emuenv.mem, entry->timeout, data.timeout)
@@ -6726,7 +6731,7 @@ static bool quick_state_restore_deferred_eventflag_waits(EmuEnvState &emuenv, co
         thread->second->restore_deferred_import_wait();
         eventflag->waiting_threads->push(data);
         if (data.timeout && data.timeout_value > 0)
-            eventflag_schedule_deferred_timeout(emuenv.kernel, eventflag, thread->second, data.timeout_value);
+            eventflag_schedule_deferred_timeout(emuenv.kernel, eventflag, thread->second, data.timeout_value, data.wait_generation);
     }
     return true;
 }
@@ -6760,6 +6765,7 @@ static bool quick_state_restore_deferred_mutex_waits(EmuEnvState &emuenv, const 
         data.lock_count = entry->lock_count;
         data.timeout_value = entry->timeout_value;
         data.timeout_start_host_us = quick_state_host_time_us();
+        data.wait_generation = emuenv.kernel.next_wait_generation();
         data.deferred_import_wait = true;
         if (!quick_state_restore_u32_pointer(emuenv.mem, entry->timeout, data.timeout)) {
             quick_state_last_restore_detail = fmt::format("{} {} waiter {} timeout pointer 0x{:X} is invalid", kind, uid, index, entry->timeout);
@@ -6769,7 +6775,7 @@ static bool quick_state_restore_deferred_mutex_waits(EmuEnvState &emuenv, const 
         thread->second->restore_deferred_import_wait();
         mutex->waiting_threads->push(data);
         if (data.timeout && data.timeout_value > 0)
-            mutex_schedule_deferred_timeout(emuenv.kernel, mutex, thread->second, data.timeout_value);
+            mutex_schedule_deferred_timeout(emuenv.kernel, mutex, thread->second, data.timeout_value, data.wait_generation);
     }
     return true;
 }
@@ -6802,6 +6808,7 @@ static bool quick_state_restore_deferred_condvar_waits(EmuEnvState &emuenv, cons
         data.priority = entry->priority;
         data.timeout_value = entry->timeout_value;
         data.timeout_start_host_us = quick_state_host_time_us();
+        data.wait_generation = emuenv.kernel.next_wait_generation();
         data.deferred_import_wait = true;
         if (!quick_state_restore_u32_pointer(emuenv.mem, entry->timeout, data.timeout)) {
             quick_state_last_restore_detail = fmt::format("{} {} waiter {} timeout pointer 0x{:X} is invalid", kind, uid, index, entry->timeout);
@@ -6811,7 +6818,7 @@ static bool quick_state_restore_deferred_condvar_waits(EmuEnvState &emuenv, cons
         thread->second->restore_deferred_import_wait();
         condvar->waiting_threads->push(data);
         if (data.timeout && data.timeout_value > 0)
-            condvar_schedule_deferred_timeout(emuenv.kernel, condvar, thread->second, data.timeout_value);
+            condvar_schedule_deferred_timeout(emuenv.kernel, condvar, thread->second, data.timeout_value, data.wait_generation);
     }
     return true;
 }
@@ -6846,6 +6853,7 @@ static bool quick_state_restore_deferred_msgpipe_waits(EmuEnvState &emuenv, cons
         data.priority = entry->priority;
         data.timeout_value = entry->timeout_value;
         data.timeout_start_host_us = quick_state_host_time_us();
+        data.wait_generation = emuenv.kernel.next_wait_generation();
         data.deferred_import_wait = true;
         data.mp.request_size = entry->request_size;
         data.mp.transfer_size = entry->transfer_size;
@@ -6860,7 +6868,7 @@ static bool quick_state_restore_deferred_msgpipe_waits(EmuEnvState &emuenv, cons
         thread->second->restore_deferred_import_wait();
         queue->push(data);
         if (data.timeout && data.timeout_value > 0)
-            msgpipe_schedule_deferred_timeout(emuenv.kernel, msgpipe, thread->second, std::string_view(kind) == "msgpipe_receiver", data.timeout_value);
+            msgpipe_schedule_deferred_timeout(emuenv.kernel, msgpipe, thread->second, std::string_view(kind) == "msgpipe_receiver", data.timeout_value, data.wait_generation);
     }
     LOG_INFO("Restored {} deferred quickstate waits for {} {}.", expected_count, kind, uid);
     return true;

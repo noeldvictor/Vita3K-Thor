@@ -32,8 +32,12 @@
 #include <util/types.h>
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <functional>
 #include <map>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 struct ThreadState;
@@ -93,6 +97,7 @@ typedef std::map<uint32_t, uint32_t> ModuleUidByNid;
 
 struct KernelState {
     KernelState();
+    ~KernelState();
 
     std::mutex mutex;
     CodecEngineBlocks codec_blocks;
@@ -170,6 +175,9 @@ struct KernelState {
     ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option);
     ThreadStatePtr create_thread_for_restore(MemState &mem, SceUID uid, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size);
     void reserve_uid_for_restore(SceUID uid);
+    uint64_t next_wait_generation();
+    void schedule_deferred_wait_timeout(uint64_t timeout_guest_us, std::function<void()> action);
+    void clear_deferred_wait_timeouts();
 
     ThreadStatePtr get_thread(SceUID thread_id);
     Ptr<Ptr<void>> get_thread_tls_addr(MemState &mem, SceUID thread_id, int key);
@@ -186,7 +194,24 @@ struct KernelState {
     SceKernelModuleInfo *find_module_by_addr(Address address);
 
 private:
+    struct DeferredWaitTimeout {
+        uint64_t due_guest_process_us = 0;
+        uint64_t sequence = 0;
+        std::function<void()> action;
+    };
+
+    void start_deferred_wait_worker();
+    void stop_deferred_wait_worker();
+    void run_deferred_wait_worker();
+
     std::atomic<SceUID> next_uid{ 1 };
+    std::atomic<uint64_t> next_wait_generation_id{ 1 };
     std::atomic<bool> threads_pause_active{ false };
     std::map<SceUID, ThreadStatus> paused_threads_status;
+    std::mutex deferred_wait_mutex;
+    std::condition_variable deferred_wait_cond;
+    std::thread deferred_wait_thread;
+    std::deque<DeferredWaitTimeout> deferred_wait_timeouts;
+    uint64_t deferred_wait_sequence = 1;
+    bool deferred_wait_stop = false;
 };

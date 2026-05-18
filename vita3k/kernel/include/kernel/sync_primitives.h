@@ -32,6 +32,7 @@ struct WaitingThreadData {
     SceUInt32 *timeout = nullptr;
     SceUInt32 timeout_value = 0;
     uint64_t timeout_start_host_us = 0;
+    uint64_t wait_generation = 0;
     bool deferred_import_wait = false;
 
     // additional fields for each primitive
@@ -221,7 +222,7 @@ SceInt32 simple_event_waitorpoll(KernelState &kernel, const char *export_name, S
 SceInt32 simple_event_setorpulse(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id, SceUInt32 pattern, SceUInt64 user_data, bool is_set);
 SceInt32 simple_event_clear(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id, SceUInt32 clear_pattern);
 SceInt32 simple_event_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id);
-void simple_event_schedule_deferred_timeout(const KernelState &kernel, const SimpleEventPtr &event, const ThreadStatePtr &thread, SceUInt32 timeout_value);
+void simple_event_schedule_deferred_timeout(KernelState &kernel, const SimpleEventPtr &event, const ThreadStatePtr &thread, SceUInt32 timeout_value, uint64_t wait_generation);
 
 // Timer
 SceUID timer_create(KernelState &kernel, MemState &mem, const char *export_name, const char *name, SceUID thread_id, SceUInt32 attr);
@@ -232,7 +233,7 @@ SceInt32 timer_set(KernelState &kernel, const char *export_name, SceUID thread_i
 SceInt32 timer_start(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID timer_handle);
 SceInt32 timer_stop(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID timer_handle);
 void timer_schedule_deferred_event(const KernelState &kernel, const TimerPtr &timer);
-void timer_schedule_deferred_timeout(const KernelState &kernel, const TimerPtr &timer, const ThreadStatePtr &thread, SceUInt32 timeout_value);
+void timer_schedule_deferred_timeout(KernelState &kernel, const TimerPtr &timer, const ThreadStatePtr &thread, SceUInt32 timeout_value, uint64_t wait_generation);
 
 // Mutex
 SceUID mutex_create(SceUID *uid_out, KernelState &kernel, MemState &mem, const char *export_name, const char *name, SceUID thread_id, SceUInt attr, int init_count, Ptr<SceKernelLwMutexWork> workarea, SyncWeight weight);
@@ -242,14 +243,14 @@ int mutex_try_lock(KernelState &kernel, MemState &mem, const char *export_name, 
 int mutex_unlock(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID mutexid, int unlock_count, SyncWeight weight);
 int mutex_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID mutexid, SyncWeight weight);
 MutexPtr mutex_get(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID mutexid, SyncWeight weight);
-void mutex_schedule_deferred_timeout(const KernelState &kernel, const MutexPtr &mutex, const ThreadStatePtr &thread, SceUInt32 timeout_value);
+void mutex_schedule_deferred_timeout(KernelState &kernel, const MutexPtr &mutex, const ThreadStatePtr &thread, SceUInt32 timeout_value, uint64_t wait_generation);
 
 // RWLock
 SceUID rwlock_create(KernelState &kernel, MemState &mem, const char *export_name, const char *name, SceUID thread_id, SceUInt32 attr);
 SceInt32 rwlock_lock(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID lock_id, uint32_t *timeout, bool is_write);
 SceInt32 rwlock_unlock(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID lock_id, bool is_write);
 SceInt32 rwlock_delete(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID lock_id);
-void rwlock_schedule_deferred_timeout(const KernelState &kernel, const RWLockPtr &rwlock, const ThreadStatePtr &thread, SceUInt32 timeout_value);
+void rwlock_schedule_deferred_timeout(KernelState &kernel, const RWLockPtr &rwlock, const ThreadStatePtr &thread, SceUInt32 timeout_value, uint64_t wait_generation);
 
 // Semaphore
 SceUID semaphore_create(KernelState &kernel, const char *export_name, const char *name, SceUID thread_id, SceUInt attr, int init_val, int max_val);
@@ -258,14 +259,14 @@ SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thr
 int semaphore_signal(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID semaid, int signal);
 int semaphore_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID semaid);
 int semaphore_cancel(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID semaid, SceInt32 setCount, SceUInt32 *pNumWaitThreads);
-void semaphore_schedule_deferred_timeout(const KernelState &kernel, const SemaphorePtr &semaphore, const ThreadStatePtr &thread, SceUInt32 timeout_value);
+void semaphore_schedule_deferred_timeout(KernelState &kernel, const SemaphorePtr &semaphore, const ThreadStatePtr &thread, SceUInt32 timeout_value, uint64_t wait_generation);
 
 // Condition Variable
 SceUID condvar_create(SceUID *uid_out, KernelState &kernel, const char *export_name, const char *name, SceUID thread_id, SceUInt attr, SceUID assoc_mutexid, SyncWeight weight);
 int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID condid, SceUInt *timeout, SyncWeight weight);
 int condvar_signal(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID condid, Condvar::SignalTarget signal_target, SyncWeight weight);
 int condvar_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID condid, SyncWeight weight);
-void condvar_schedule_deferred_timeout(const KernelState &kernel, const CondvarPtr &condvar, const ThreadStatePtr &thread, SceUInt32 timeout_value);
+void condvar_schedule_deferred_timeout(KernelState &kernel, const CondvarPtr &condvar, const ThreadStatePtr &thread, SceUInt32 timeout_value, uint64_t wait_generation);
 
 // Event Flag
 SceUID eventflag_clear(KernelState &kernel, const char *export_name, SceUID evfId, SceUInt32 bitPattern);
@@ -276,7 +277,7 @@ int eventflag_poll(KernelState &kernel, const char *export_name, SceUID thread_i
 SceInt32 eventflag_set(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID evfId, SceUInt32 bitPattern);
 SceInt32 eventflag_cancel(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id, SceUInt32 pattern, SceUInt32 *num_wait_threads);
 int eventflag_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id);
-void eventflag_schedule_deferred_timeout(const KernelState &kernel, const EventFlagPtr &eventflag, const ThreadStatePtr &thread, SceUInt32 timeout_value);
+void eventflag_schedule_deferred_timeout(KernelState &kernel, const EventFlagPtr &eventflag, const ThreadStatePtr &thread, SceUInt32 timeout_value, uint64_t wait_generation);
 
 // Message Pipe
 SceUID msgpipe_create(KernelState &kernel, const char *export_name, const char *name, SceUID thread_id, SceUInt attr, SceSize bufSize);
@@ -284,4 +285,4 @@ SceUID msgpipe_find(KernelState &kernel, const char *export_name, const char *pN
 SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgPipeId, SceUInt32 waitMode, void *pRecvBuf, SceSize recvSize, SceSize *pResult, SceUInt32 *pTimeout);
 SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgPipeId, SceUInt32 waitMode, const void *pSendBuf, SceSize sendSize, SceSize *pResult, SceUInt32 *pTimeout);
 SceInt32 msgpipe_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgpipe_id);
-void msgpipe_schedule_deferred_timeout(const KernelState &kernel, const MsgPipePtr &msgpipe, const ThreadStatePtr &thread, bool receiver, SceUInt32 timeout_value);
+void msgpipe_schedule_deferred_timeout(KernelState &kernel, const MsgPipePtr &msgpipe, const ThreadStatePtr &thread, bool receiver, SceUInt32 timeout_value, uint64_t wait_generation);

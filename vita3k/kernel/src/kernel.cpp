@@ -33,6 +33,10 @@
 #include <SDL3/SDL_mutex.h>
 
 #include <algorithm>
+#include <chrono>
+#include <limits>
+#include <utility>
+#include <vector>
 
 int CorenumAllocator::new_corenum() {
     const std::lock_guard<std::mutex> guard(lock);
@@ -86,6 +90,112 @@ KernelState::KernelState()
     : debugger(*this) {
 }
 
+KernelState::~KernelState() {
+    stop_deferred_wait_worker();
+}
+
+void KernelState::start_deferred_wait_worker() {
+    std::lock_guard<std::mutex> lock(deferred_wait_mutex);
+    if (deferred_wait_thread.joinable())
+        return;
+
+    deferred_wait_stop = false;
+    deferred_wait_thread = std::thread([this]() {
+        run_deferred_wait_worker();
+    });
+}
+
+void KernelState::stop_deferred_wait_worker() {
+    {
+        std::lock_guard<std::mutex> lock(deferred_wait_mutex);
+        deferred_wait_stop = true;
+        deferred_wait_timeouts.clear();
+    }
+    deferred_wait_cond.notify_all();
+
+    if (deferred_wait_thread.joinable() && deferred_wait_thread.get_id() != std::this_thread::get_id())
+        deferred_wait_thread.join();
+}
+
+uint64_t KernelState::next_wait_generation() {
+    return next_wait_generation_id.fetch_add(1, std::memory_order_relaxed);
+}
+
+void KernelState::schedule_deferred_wait_timeout(const uint64_t timeout_guest_us, std::function<void()> action) {
+    if (!action)
+        return;
+
+    DeferredWaitTimeout timeout;
+    timeout.due_guest_process_us = get_process_time() + timeout_guest_us;
+    timeout.action = std::move(action);
+
+    {
+        std::lock_guard<std::mutex> lock(deferred_wait_mutex);
+        if (deferred_wait_stop)
+            return;
+
+        timeout.sequence = deferred_wait_sequence++;
+        deferred_wait_timeouts.push_back(std::move(timeout));
+    }
+    deferred_wait_cond.notify_all();
+}
+
+void KernelState::clear_deferred_wait_timeouts() {
+    {
+        std::lock_guard<std::mutex> lock(deferred_wait_mutex);
+        deferred_wait_timeouts.clear();
+    }
+    deferred_wait_cond.notify_all();
+}
+
+void KernelState::run_deferred_wait_worker() {
+    std::unique_lock<std::mutex> lock(deferred_wait_mutex);
+    while (!deferred_wait_stop) {
+        if (deferred_wait_timeouts.empty()) {
+            deferred_wait_cond.wait(lock, [this]() { return deferred_wait_stop || !deferred_wait_timeouts.empty(); });
+            continue;
+        }
+
+        const uint64_t now_guest_us = get_process_time();
+        std::vector<std::function<void()>> due_actions;
+        for (auto it = deferred_wait_timeouts.begin(); it != deferred_wait_timeouts.end();) {
+            if (it->due_guest_process_us <= now_guest_us) {
+                due_actions.push_back(std::move(it->action));
+                it = deferred_wait_timeouts.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        if (!due_actions.empty()) {
+            lock.unlock();
+            for (auto &action : due_actions) {
+                if (action)
+                    action();
+            }
+            lock.lock();
+            continue;
+        }
+
+        const auto next_timeout = std::min_element(
+            deferred_wait_timeouts.begin(), deferred_wait_timeouts.end(),
+            [](const DeferredWaitTimeout &lhs, const DeferredWaitTimeout &rhs) {
+                if (lhs.due_guest_process_us != rhs.due_guest_process_us)
+                    return lhs.due_guest_process_us < rhs.due_guest_process_us;
+                return lhs.sequence < rhs.sequence;
+            });
+        if (next_timeout == deferred_wait_timeouts.end())
+            continue;
+
+        const uint64_t guest_delta_us = next_timeout->due_guest_process_us > now_guest_us ? next_timeout->due_guest_process_us - now_guest_us : 1;
+        const uint64_t speed = std::max<uint32_t>(speed_percent.load(), 1);
+        const uint64_t host_wait_us = std::clamp<uint64_t>((guest_delta_us * 100) / speed, 1, 1000000);
+        deferred_wait_cond.wait_for(lock, std::chrono::microseconds(host_wait_us));
+    }
+
+    deferred_wait_timeouts.clear();
+}
+
 static uint64_t speeded_process_time_locked(const KernelState &kernel, const uint64_t host_process_time) {
     const uint64_t speed_percent = std::max<uint32_t>(kernel.speed_percent.load(), 1);
     const uint64_t host_delta = host_process_time - kernel.speed_anchor_host_process_us;
@@ -99,6 +209,7 @@ bool KernelState::init(MemState &mem, const CallImportFunc &call_import, bool cp
     speed_anchor_host_process_us = 0;
     speed_anchor_guest_process_us = 0;
     speed_percent.store(100);
+    start_deferred_wait_worker();
     this->call_import = call_import;
     this->cpu_opt = cpu_opt;
 
@@ -128,6 +239,7 @@ void KernelState::set_speed_percent(const uint32_t new_speed_percent) {
     speed_anchor_guest_process_us = speeded_process_time_locked(*this, host_process_time);
     speed_anchor_host_process_us = host_process_time;
     speed_percent.store(std::max<uint32_t>(new_speed_percent, 1));
+    deferred_wait_cond.notify_all();
 }
 
 void KernelState::load_process_param(MemState &mem, Ptr<uint32_t> ptr) {
@@ -232,6 +344,7 @@ void KernelState::set_paused_thread_status_for_restore(const SceUID thread_id, c
 }
 
 void KernelState::exit_delete_all_threads() {
+    clear_deferred_wait_timeouts();
     const std::lock_guard<std::mutex> lock(mutex);
     for (auto &[_, thread] : threads)
         // Skip end callbacks; running guest code can access torn-down state

@@ -118,17 +118,23 @@ inline static SceUInt32 remaining_timeout_us(const KernelState &kernel, const Wa
     return static_cast<SceUInt32>(data.timeout_value - elapsed_guest);
 }
 
-void semaphore_schedule_deferred_timeout(const KernelState &kernel, const SemaphorePtr &semaphore, const ThreadStatePtr &thread, const SceUInt32 timeout_value) {
-    std::thread([&kernel, semaphore, thread, timeout_value]() {
-        std::this_thread::sleep_for(std::chrono::microseconds{ kernel_speed_to_host_us(kernel, timeout_value) });
+inline static void assign_wait_generation(KernelState &kernel, WaitingThreadData &data) {
+    data.wait_generation = kernel.next_wait_generation();
+}
 
+inline static bool is_current_deferred_timeout_wait(const WaitingThreadData &data, const uint64_t wait_generation) {
+    return data.deferred_import_wait && data.timeout && data.wait_generation == wait_generation;
+}
+
+void semaphore_schedule_deferred_timeout(KernelState &kernel, const SemaphorePtr &semaphore, const ThreadStatePtr &thread, const SceUInt32 timeout_value, const uint64_t wait_generation) {
+    kernel.schedule_deferred_wait_timeout(timeout_value, [&kernel, semaphore, thread, wait_generation]() {
         const std::lock_guard<std::mutex> semaphore_lock(semaphore->mutex);
         auto data_it = semaphore->waiting_threads->find(thread);
         if (data_it == semaphore->waiting_threads->end())
             return;
 
         const WaitingThreadData data = *data_it;
-        if (!data.deferred_import_wait || !data.timeout)
+        if (!is_current_deferred_timeout_wait(data, wait_generation))
             return;
 
         if (remaining_timeout_us(kernel, data) > 0)
@@ -137,20 +143,18 @@ void semaphore_schedule_deferred_timeout(const KernelState &kernel, const Semaph
         *data.timeout = 0;
         semaphore->waiting_threads->erase(data_it);
         thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_TIMEOUT));
-    }).detach();
+    });
 }
 
-void eventflag_schedule_deferred_timeout(const KernelState &kernel, const EventFlagPtr &eventflag, const ThreadStatePtr &thread, const SceUInt32 timeout_value) {
-    std::thread([&kernel, eventflag, thread, timeout_value]() {
-        std::this_thread::sleep_for(std::chrono::microseconds{ kernel_speed_to_host_us(kernel, timeout_value) });
-
+void eventflag_schedule_deferred_timeout(KernelState &kernel, const EventFlagPtr &eventflag, const ThreadStatePtr &thread, const SceUInt32 timeout_value, const uint64_t wait_generation) {
+    kernel.schedule_deferred_wait_timeout(timeout_value, [&kernel, eventflag, thread, wait_generation]() {
         const std::lock_guard<std::mutex> event_lock(eventflag->mutex);
         auto data_it = eventflag->waiting_threads->find(thread);
         if (data_it == eventflag->waiting_threads->end())
             return;
 
         const WaitingThreadData data = *data_it;
-        if (!data.deferred_import_wait || !data.timeout)
+        if (!is_current_deferred_timeout_wait(data, wait_generation))
             return;
 
         if (remaining_timeout_us(kernel, data) > 0)
@@ -161,13 +165,11 @@ void eventflag_schedule_deferred_timeout(const KernelState &kernel, const EventF
             *data.outBits = eventflag->flags;
         eventflag->waiting_threads->erase(data_it);
         thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_TIMEOUT));
-    }).detach();
+    });
 }
 
-void msgpipe_schedule_deferred_timeout(const KernelState &kernel, const MsgPipePtr &msgpipe, const ThreadStatePtr &thread, const bool receiver, const SceUInt32 timeout_value) {
-    std::thread([&kernel, msgpipe, thread, receiver, timeout_value]() {
-        std::this_thread::sleep_for(std::chrono::microseconds{ kernel_speed_to_host_us(kernel, timeout_value) });
-
+void msgpipe_schedule_deferred_timeout(KernelState &kernel, const MsgPipePtr &msgpipe, const ThreadStatePtr &thread, const bool receiver, const SceUInt32 timeout_value, const uint64_t wait_generation) {
+    kernel.schedule_deferred_wait_timeout(timeout_value, [&kernel, msgpipe, thread, receiver, wait_generation]() {
         const std::lock_guard<std::mutex> msgpipe_lock(msgpipe->mutex);
         auto &queue = receiver ? msgpipe->receivers : msgpipe->senders;
         auto data_it = queue->find(thread);
@@ -175,7 +177,7 @@ void msgpipe_schedule_deferred_timeout(const KernelState &kernel, const MsgPipeP
             return;
 
         const WaitingThreadData data = *data_it;
-        if (!data.deferred_import_wait || !data.timeout)
+        if (!is_current_deferred_timeout_wait(data, wait_generation))
             return;
 
         if (remaining_timeout_us(kernel, data) > 0)
@@ -184,20 +186,18 @@ void msgpipe_schedule_deferred_timeout(const KernelState &kernel, const MsgPipeP
         *data.timeout = 0;
         queue->erase(data_it);
         thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_TIMEOUT));
-    }).detach();
+    });
 }
 
-void mutex_schedule_deferred_timeout(const KernelState &kernel, const MutexPtr &mutex, const ThreadStatePtr &thread, const SceUInt32 timeout_value) {
-    std::thread([&kernel, mutex, thread, timeout_value]() {
-        std::this_thread::sleep_for(std::chrono::microseconds{ kernel_speed_to_host_us(kernel, timeout_value) });
-
+void mutex_schedule_deferred_timeout(KernelState &kernel, const MutexPtr &mutex, const ThreadStatePtr &thread, const SceUInt32 timeout_value, const uint64_t wait_generation) {
+    kernel.schedule_deferred_wait_timeout(timeout_value, [&kernel, mutex, thread, wait_generation]() {
         const std::lock_guard<std::mutex> mutex_lock(mutex->mutex);
         auto data_it = mutex->waiting_threads->find(thread);
         if (data_it == mutex->waiting_threads->end())
             return;
 
         const WaitingThreadData data = *data_it;
-        if (!data.deferred_import_wait || !data.timeout)
+        if (!is_current_deferred_timeout_wait(data, wait_generation))
             return;
 
         if (remaining_timeout_us(kernel, data) > 0)
@@ -206,20 +206,18 @@ void mutex_schedule_deferred_timeout(const KernelState &kernel, const MutexPtr &
         *data.timeout = 0;
         mutex->waiting_threads->erase(data_it);
         thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_TIMEOUT));
-    }).detach();
+    });
 }
 
-void condvar_schedule_deferred_timeout(const KernelState &kernel, const CondvarPtr &condvar, const ThreadStatePtr &thread, const SceUInt32 timeout_value) {
-    std::thread([&kernel, condvar, thread, timeout_value]() {
-        std::this_thread::sleep_for(std::chrono::microseconds{ kernel_speed_to_host_us(kernel, timeout_value) });
-
+void condvar_schedule_deferred_timeout(KernelState &kernel, const CondvarPtr &condvar, const ThreadStatePtr &thread, const SceUInt32 timeout_value, const uint64_t wait_generation) {
+    kernel.schedule_deferred_wait_timeout(timeout_value, [&kernel, condvar, thread, wait_generation]() {
         const std::lock_guard<std::mutex> condvar_lock(condvar->mutex);
         auto data_it = condvar->waiting_threads->find(thread);
         if (data_it == condvar->waiting_threads->end())
             return;
 
         const WaitingThreadData data = *data_it;
-        if (!data.deferred_import_wait || !data.timeout)
+        if (!is_current_deferred_timeout_wait(data, wait_generation))
             return;
 
         if (remaining_timeout_us(kernel, data) > 0)
@@ -228,20 +226,18 @@ void condvar_schedule_deferred_timeout(const KernelState &kernel, const CondvarP
         *data.timeout = 0;
         condvar->waiting_threads->erase(data_it);
         thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_TIMEOUT));
-    }).detach();
+    });
 }
 
-void simple_event_schedule_deferred_timeout(const KernelState &kernel, const SimpleEventPtr &event, const ThreadStatePtr &thread, const SceUInt32 timeout_value) {
-    std::thread([&kernel, event, thread, timeout_value]() {
-        std::this_thread::sleep_for(std::chrono::microseconds{ kernel_speed_to_host_us(kernel, timeout_value) });
-
+void simple_event_schedule_deferred_timeout(KernelState &kernel, const SimpleEventPtr &event, const ThreadStatePtr &thread, const SceUInt32 timeout_value, const uint64_t wait_generation) {
+    kernel.schedule_deferred_wait_timeout(timeout_value, [&kernel, event, thread, wait_generation]() {
         const std::lock_guard<std::mutex> event_lock(event->mutex);
         auto data_it = event->waiting_threads->find(thread);
         if (data_it == event->waiting_threads->end())
             return;
 
         const WaitingThreadData data = *data_it;
-        if (!data.deferred_import_wait || !data.timeout)
+        if (!is_current_deferred_timeout_wait(data, wait_generation))
             return;
 
         if (remaining_timeout_us(kernel, data) > 0)
@@ -254,20 +250,18 @@ void simple_event_schedule_deferred_timeout(const KernelState &kernel, const Sim
             *data.user_data = event->last_user_data;
         event->waiting_threads->erase(data_it);
         thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_TIMEOUT));
-    }).detach();
+    });
 }
 
-void rwlock_schedule_deferred_timeout(const KernelState &kernel, const RWLockPtr &rwlock, const ThreadStatePtr &thread, const SceUInt32 timeout_value) {
-    std::thread([&kernel, rwlock, thread, timeout_value]() {
-        std::this_thread::sleep_for(std::chrono::microseconds{ kernel_speed_to_host_us(kernel, timeout_value) });
-
+void rwlock_schedule_deferred_timeout(KernelState &kernel, const RWLockPtr &rwlock, const ThreadStatePtr &thread, const SceUInt32 timeout_value, const uint64_t wait_generation) {
+    kernel.schedule_deferred_wait_timeout(timeout_value, [&kernel, rwlock, thread, wait_generation]() {
         const std::lock_guard<std::mutex> rwlock_lock(rwlock->mutex);
         auto data_it = rwlock->waiting_threads->find(thread);
         if (data_it == rwlock->waiting_threads->end())
             return;
 
         const WaitingThreadData data = *data_it;
-        if (!data.deferred_import_wait || !data.timeout)
+        if (!is_current_deferred_timeout_wait(data, wait_generation))
             return;
 
         if (remaining_timeout_us(kernel, data) > 0)
@@ -276,20 +270,18 @@ void rwlock_schedule_deferred_timeout(const KernelState &kernel, const RWLockPtr
         *data.timeout = 0;
         rwlock->waiting_threads->erase(data_it);
         thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_TIMEOUT));
-    }).detach();
+    });
 }
 
-void timer_schedule_deferred_timeout(const KernelState &kernel, const TimerPtr &timer, const ThreadStatePtr &thread, const SceUInt32 timeout_value) {
-    std::thread([&kernel, timer, thread, timeout_value]() {
-        std::this_thread::sleep_for(std::chrono::microseconds{ kernel_speed_to_host_us(kernel, timeout_value) });
-
+void timer_schedule_deferred_timeout(KernelState &kernel, const TimerPtr &timer, const ThreadStatePtr &thread, const SceUInt32 timeout_value, const uint64_t wait_generation) {
+    kernel.schedule_deferred_wait_timeout(timeout_value, [&kernel, timer, thread, wait_generation]() {
         const std::lock_guard<std::mutex> timer_lock(timer->mutex);
         auto data_it = timer->waiting_threads->find(thread);
         if (data_it == timer->waiting_threads->end())
             return;
 
         const WaitingThreadData data = *data_it;
-        if (!data.deferred_import_wait || !data.timeout)
+        if (!is_current_deferred_timeout_wait(data, wait_generation))
             return;
 
         if (remaining_timeout_us(kernel, data) > 0)
@@ -299,7 +291,7 @@ void timer_schedule_deferred_timeout(const KernelState &kernel, const TimerPtr &
         timer->waiting_threads->erase(data_it);
         timer->condvar.notify_all();
         thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_TIMEOUT));
-    }).detach();
+    });
 }
 
 inline static int handle_timeout(const KernelState &kernel, const ThreadStatePtr &thread, std::unique_lock<std::mutex> &thread_lock,
@@ -416,6 +408,7 @@ SceInt32 simple_event_waitorpoll(KernelState &kernel, const char *export_name, S
         data.priority = thread->priority;
         capture_wait_timeout(data, timeout);
         capture_wait_timeout_start(data);
+        assign_wait_generation(kernel, data);
 
         if (timeout && *timeout == 0) {
             if (user_data)
@@ -429,7 +422,7 @@ SceInt32 simple_event_waitorpoll(KernelState &kernel, const char *export_name, S
             data.deferred_import_wait = true;
             event->waiting_threads->push(data);
             if (timeout)
-                simple_event_schedule_deferred_timeout(kernel, event, thread, data.timeout_value);
+                simple_event_schedule_deferred_timeout(kernel, event, thread, data.timeout_value, data.wait_generation);
             return SCE_KERNEL_OK;
         }
 
@@ -766,6 +759,7 @@ SceInt32 timer_waitorpoll(KernelState &kernel, const char *export_name, SceUID t
         data.priority = thread->priority;
         capture_wait_timeout(data, timeout);
         capture_wait_timeout_start(data);
+        assign_wait_generation(kernel, data);
 
         if (timeout && *timeout == 0)
             return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
@@ -775,7 +769,7 @@ SceInt32 timer_waitorpoll(KernelState &kernel, const char *export_name, SceUID t
             timer->waiting_threads->push(data);
             timer_schedule_deferred_event(kernel, timer);
             if (timeout)
-                timer_schedule_deferred_timeout(kernel, timer, thread, data.timeout_value);
+                timer_schedule_deferred_timeout(kernel, timer, thread, data.timeout_value, data.wait_generation);
             return SCE_KERNEL_OK;
         }
 
@@ -1015,6 +1009,7 @@ inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char
         data.priority = thread->priority;
         capture_wait_timeout(data, timeout);
         capture_wait_timeout_start(data);
+        assign_wait_generation(kernel, data);
 
         if (timeout && *timeout == 0)
             return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
@@ -1023,7 +1018,7 @@ inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char
             data.deferred_import_wait = true;
             mutex->waiting_threads->push(data);
             if (timeout)
-                mutex_schedule_deferred_timeout(kernel, mutex, thread, data.timeout_value);
+                mutex_schedule_deferred_timeout(kernel, mutex, thread, data.timeout_value, data.wait_generation);
             return SCE_KERNEL_OK;
         }
 
@@ -1243,6 +1238,7 @@ SceInt32 rwlock_lock(KernelState &kernel, MemState &mem, const char *export_name
         data.priority = thread->priority;
         capture_wait_timeout(data, timeout);
         capture_wait_timeout_start(data);
+        assign_wait_generation(kernel, data);
 
         if (timeout && *timeout == 0)
             return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
@@ -1251,7 +1247,7 @@ SceInt32 rwlock_lock(KernelState &kernel, MemState &mem, const char *export_name
             data.deferred_import_wait = true;
             rwlock->waiting_threads->push(data);
             if (timeout)
-                rwlock_schedule_deferred_timeout(kernel, rwlock, thread, data.timeout_value);
+                rwlock_schedule_deferred_timeout(kernel, rwlock, thread, data.timeout_value, data.wait_generation);
             return SCE_KERNEL_OK;
         }
 
@@ -1436,6 +1432,7 @@ SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thr
         data.signal = needCount;
         capture_wait_timeout(data, pTimeout);
         capture_wait_timeout_start(data);
+        assign_wait_generation(kernel, data);
 
         auto was_canceled = std::make_shared<bool>(false);
         data.was_canceled = was_canceled;
@@ -1448,7 +1445,7 @@ SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thr
             data.deferred_import_wait = true;
             semaphore->waiting_threads->push(data);
             if (pTimeout)
-                semaphore_schedule_deferred_timeout(kernel, semaphore, thread, data.timeout_value);
+                semaphore_schedule_deferred_timeout(kernel, semaphore, thread, data.timeout_value, data.wait_generation);
             return SCE_KERNEL_OK;
         }
 
@@ -1652,6 +1649,7 @@ int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, Sc
     data.priority = thread->priority;
     capture_wait_timeout(data, timeout);
     capture_wait_timeout_start(data);
+    assign_wait_generation(kernel, data);
 
     if (timeout && *timeout == 0)
         return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
@@ -1660,7 +1658,7 @@ int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, Sc
         data.deferred_import_wait = true;
         condvar->waiting_threads->push(data);
         if (timeout)
-            condvar_schedule_deferred_timeout(kernel, condvar, thread, data.timeout_value);
+            condvar_schedule_deferred_timeout(kernel, condvar, thread, data.timeout_value, data.wait_generation);
         return SCE_KERNEL_OK;
     }
 
@@ -1729,9 +1727,10 @@ static void condvar_finish_wait(KernelState &kernel, MemState &mem, const char *
     mutex_wait.timeout = waiting_thread_data.timeout;
     mutex_wait.timeout_value = remaining_timeout;
     capture_wait_timeout_start(mutex_wait);
+    assign_wait_generation(kernel, mutex_wait);
     mutex->waiting_threads->push(mutex_wait);
     if (mutex_wait.timeout)
-        mutex_schedule_deferred_timeout(kernel, mutex, waiting_thread, mutex_wait.timeout_value);
+        mutex_schedule_deferred_timeout(kernel, mutex, waiting_thread, mutex_wait.timeout_value, mutex_wait.wait_generation);
 }
 
 int condvar_signal(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID condid, Condvar::SignalTarget signal_target, SyncWeight weight) {
@@ -1934,6 +1933,7 @@ static int eventflag_waitorpoll(KernelState &kernel, const char *export_name, Sc
         data.priority = thread->priority;
         capture_wait_timeout(data, timeout);
         capture_wait_timeout_start(data);
+        assign_wait_generation(kernel, data);
 
         auto was_canceled = std::make_shared<bool>(false);
         data.was_canceled = was_canceled;
@@ -1948,7 +1948,7 @@ static int eventflag_waitorpoll(KernelState &kernel, const char *export_name, Sc
             data.deferred_import_wait = true;
             event->waiting_threads->push(data);
             if (timeout)
-                eventflag_schedule_deferred_timeout(kernel, event, thread, data.timeout_value);
+                eventflag_schedule_deferred_timeout(kernel, event, thread, data.timeout_value, data.wait_generation);
             return SCE_KERNEL_OK;
         }
 
@@ -2243,6 +2243,7 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
         wait_data.mp.wait_mode = waitMode;
         capture_wait_timeout(wait_data, pTimeout);
         capture_wait_timeout_start(wait_data);
+        assign_wait_generation(kernel, wait_data);
 
         if (pTimeout && *pTimeout == 0)
             return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
@@ -2251,7 +2252,7 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
             wait_data.deferred_import_wait = true;
             msgpipe->receivers->push(wait_data);
             if (pTimeout)
-                msgpipe_schedule_deferred_timeout(kernel, msgpipe, thread, true, wait_data.timeout_value);
+                msgpipe_schedule_deferred_timeout(kernel, msgpipe, thread, true, wait_data.timeout_value, wait_data.wait_generation);
             return SCE_KERNEL_OK;
         }
 
@@ -2382,6 +2383,7 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
         wait_data.mp.wait_mode = waitMode;
         capture_wait_timeout(wait_data, pTimeout);
         capture_wait_timeout_start(wait_data);
+        assign_wait_generation(kernel, wait_data);
 
         if (pTimeout && *pTimeout == 0)
             return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
@@ -2390,7 +2392,7 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
             wait_data.deferred_import_wait = true;
             msgpipe->senders->push(wait_data);
             if (pTimeout)
-                msgpipe_schedule_deferred_timeout(kernel, msgpipe, thread, false, wait_data.timeout_value);
+                msgpipe_schedule_deferred_timeout(kernel, msgpipe, thread, false, wait_data.timeout_value, wait_data.wait_generation);
             return SCE_KERNEL_OK;
         }
 
