@@ -112,6 +112,60 @@ function Assert-CleanLog([string]$Path) {
     }
 }
 
+function Add-MarkerDigest([System.Collections.Generic.List[string]]$Summary, [string]$Label, [string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        $Summary.Add("[$Label] marker digest: missing $Path")
+        return
+    }
+
+    $patterns = @(
+        "^Result:",
+        "^Mode:",
+        "^Detail:",
+        "^Restore enabled:",
+        "^Same paused-session restore:",
+        "^Same-session live host restore:",
+        "^Block reason:",
+        "^Missing serializers:",
+        "^Sync wait queue entries:",
+        "^Sync wait queue metadata:",
+        "^Message-pipe buffered bytes:",
+        "^IO memory-backed file handles:",
+        "^Open files:",
+        "^Open std files:",
+        "^Open directories:",
+        "^FIOS overlays:",
+        "^Display vblank waits:",
+        "^Display vblank callbacks:",
+        "^GXM display queue entries:",
+        "^GXM display queue waiters:",
+        "^GXM pending display callbacks:",
+        "^GXM notification waits:",
+        "^AVPlayer players:",
+        "^Timers:",
+        "^Semaphores:",
+        "^Condvars:",
+        "^Lightweight condvars:",
+        "^Mutexes:",
+        "^Lightweight mutexes:",
+        "^RW locks:",
+        "^Event flags:",
+        "^Message pipes:",
+        "^Callbacks:",
+        "^Simple events:"
+    )
+    $hits = Select-String -LiteralPath $Path -Pattern $patterns -ErrorAction SilentlyContinue
+    if (-not $hits) {
+        $Summary.Add("[$Label] marker digest: no selected coverage lines")
+        return
+    }
+
+    $Summary.Add("[$Label] marker digest:")
+    foreach ($hit in $hits) {
+        $Summary.Add("  $($hit.Line.Trim())")
+    }
+}
+
 function Invoke-ControlAction([string]$ControlFile, [string]$Action, [int]$TraceLimit) {
     & (Join-Path $PSScriptRoot "set-render-debug-control.ps1") `
         -ControlFile $ControlFile `
@@ -199,6 +253,7 @@ foreach ($run in $runs) {
     $prefixSlug = Get-Slug $CasePrefix
     $cycleSlug = if ($Cycles -gt 1) { "$prefixSlug-cycle$cycle" } else { $prefixSlug }
     $stateFile = Join-Path $stateRoot "$title\slot0.thorstate"
+    $stateMarker = Join-Path $stateRoot "$title\slot0.thorstate.txt"
     $captureMarker = Join-Path $stateRoot "$title\slot0.thorstate.capture.txt"
     $restoreMarker = Join-Path $stateRoot "$title\slot0.thorstate.restore.txt"
     if (-not (Test-Path -LiteralPath $stateFile)) {
@@ -249,6 +304,9 @@ foreach ($run in $runs) {
             Start-Sleep -Seconds $AfterActionSeconds
             Assert-HealthyProcess $process "$title undo load"
         }
+        Add-MarkerDigest $summary "$title cycle $cycle run 1 state" $stateMarker
+        Add-MarkerDigest $summary "$title cycle $cycle run 1 capture" $captureMarker
+        Add-MarkerDigest $summary "$title cycle $cycle run 1 restore" $restoreMarker
     } catch {
         $failures.Add("$title cycle $cycle run 1: $($_.Exception.Message)")
     } finally {
@@ -280,6 +338,7 @@ foreach ($run in $runs) {
         Assert-MarkerSuccess $restoreMarker "durable-disk" | Out-Null
         Start-Sleep -Seconds $AfterActionSeconds
         Assert-HealthyProcess $process "$title restart durable load"
+        Add-MarkerDigest $summary "$title cycle $cycle run 2 restore" $restoreMarker
     } catch {
         $failures.Add("$title cycle $cycle run 2: $($_.Exception.Message)")
     } finally {
