@@ -50,6 +50,7 @@
 #include <modules/module_parent.h>
 #include <modules/SceAudiodec/quick_state.h>
 #include <modules/SceAvPlayer/quick_state.h>
+#include <modules/SceJpeg/quick_state.h>
 #include <modules/SceVideodec/quick_state.h>
 #include <motion/event_handler.h>
 #include <string>
@@ -1481,6 +1482,15 @@ struct QuickStateVideodecSnapshot {
     std::string detail;
 };
 
+struct QuickStateJpegSnapshot {
+    bool valid = false;
+    bool initialized = false;
+    bool decoder_present = false;
+    bool exact_restore = false;
+    std::string schema;
+    std::string detail;
+};
+
 struct QuickStateRestoreManifest {
     uint32_t format_version = QUICKSTATE_VERSION;
     uint64_t guest_memory_bytes = 0;
@@ -1506,6 +1516,7 @@ struct QuickStateRestoreManifest {
     bool audio_state_restorable = false;
     bool audiodec_state_restorable = false;
     bool avplayer_state_restorable = false;
+    bool jpeg_state_restorable = false;
     bool videodec_state_restorable = false;
     bool ngs_state_restorable = false;
     bool same_pause_restore_available = false;
@@ -1532,6 +1543,10 @@ struct QuickStateRestoreManifest {
     size_t avplayer_active_players = 0;
     std::string avplayer_schema;
     bool avplayer_exact_cursor_restore = false;
+    bool jpeg_initialized = false;
+    bool jpeg_decoder_present = false;
+    bool jpeg_exact_restore = false;
+    std::string jpeg_schema;
     size_t videodec_decoders = 0;
     std::string videodec_schema;
     QuickStateKernelObjectCounts kernel;
@@ -4591,6 +4606,27 @@ static bool quick_state_parse_videodec_snapshot_section(const QuickStateSlot &sl
     return true;
 }
 
+static bool quick_state_parse_jpeg_snapshot_section(const QuickStateSlot &slot, QuickStateJpegSnapshot &snapshot) {
+    snapshot = {};
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.jpeg");
+    if (!section || section->version != 1) {
+        snapshot.detail = "Jpeg host-state section is missing";
+        return false;
+    }
+
+    const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    snapshot.schema = schema == values.end() ? "" : schema->second;
+    std::string detail;
+    if (!sce_jpeg::quick_state_validate_snapshot_values(values, &snapshot.initialized, &snapshot.decoder_present, &snapshot.exact_restore, &detail)) {
+        snapshot.detail = detail.empty() ? "Jpeg host-state section is invalid" : detail;
+        return false;
+    }
+
+    snapshot.valid = true;
+    return true;
+}
+
 static std::string quick_state_thread_status_name(const ThreadStatus status) {
     switch (status) {
     case ThreadStatus::run:
@@ -4779,6 +4815,12 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     manifest.avplayer_active_players = avplayer_snapshot.active_player_count;
     manifest.avplayer_schema = avplayer_snapshot.schema;
     manifest.avplayer_exact_cursor_restore = avplayer_snapshot.exact_cursor_restore;
+    QuickStateJpegSnapshot jpeg_snapshot;
+    manifest.jpeg_state_restorable = quick_state_parse_jpeg_snapshot_section(slot, jpeg_snapshot);
+    manifest.jpeg_initialized = jpeg_snapshot.initialized;
+    manifest.jpeg_decoder_present = jpeg_snapshot.decoder_present;
+    manifest.jpeg_schema = jpeg_snapshot.schema;
+    manifest.jpeg_exact_restore = jpeg_snapshot.exact_restore;
     QuickStateVideodecSnapshot videodec_snapshot;
     manifest.videodec_state_restorable = quick_state_parse_videodec_snapshot_section(slot, videodec_snapshot);
     manifest.videodec_decoders = videodec_snapshot.decoder_count;
@@ -4835,6 +4877,10 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         manifest.missing_serializers.push_back("avplayer-movie-state");
     if (manifest.avplayer_state_restorable && manifest.avplayer_active_players > 0 && !manifest.avplayer_exact_cursor_restore)
         manifest.missing_serializers.push_back("avplayer-exact-cursor");
+    if (!manifest.jpeg_state_restorable)
+        manifest.missing_serializers.push_back("jpeg-state");
+    if (manifest.jpeg_state_restorable && manifest.jpeg_initialized && !manifest.jpeg_exact_restore)
+        manifest.missing_serializers.push_back("jpeg-exact-state");
     if (!manifest.videodec_state_restorable && manifest.avplayer_threads > 0)
         manifest.missing_serializers.push_back("videodec-state");
     if (!manifest.ngs_state_restorable && quick_state_needs_ngs_durable_restore(emuenv, slot))
@@ -4852,6 +4898,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     const bool videodec_sections_ready = manifest.videodec_state_restorable || manifest.avplayer_threads == 0;
     const bool audiodec_sections_ready = manifest.audiodec_state_restorable
         && (manifest.audiodec_exact_restore || manifest.audiodec_decoders == 0);
+    const bool jpeg_sections_ready = manifest.jpeg_state_restorable
+        && (manifest.jpeg_exact_restore || !manifest.jpeg_initialized);
     const bool live_host_sections_ready = (manifest.same_pause_restore_available || manifest.live_host_restore_available)
         && manifest.timing_restorable
         && manifest.thread_metadata_restorable
@@ -4864,6 +4912,7 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         && manifest.audio_state_restorable
         && audiodec_sections_ready
         && manifest.avplayer_state_restorable
+        && jpeg_sections_ready
         && videodec_sections_ready;
     const bool durable_restore_ready = manifest.missing_serializers.empty() && !slot.restore_requires_same_pause;
     manifest.restore_enabled = durable_restore_ready || live_host_sections_ready;
@@ -5863,6 +5912,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         "thor.audio",
         "thor.audiodec",
         "thor.avplayer",
+        "thor.jpeg",
         "thor.videodec",
         "thor.ngs",
     };
@@ -6350,6 +6400,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
 
     sections.push_back(quick_state_make_text_section("thor.audiodec", sce_audiodec::quick_state_snapshot_text(emuenv)));
     sections.push_back(quick_state_make_text_section("thor.avplayer", sce_avplayer::quick_state_snapshot_text(emuenv)));
+    sections.push_back(quick_state_make_text_section("thor.jpeg", sce_jpeg::quick_state_snapshot_text(emuenv)));
     sections.push_back(quick_state_make_text_section("thor.videodec", sce_videodec::quick_state_snapshot_text(emuenv)));
 
     sections.push_back(quick_state_make_text_section("thor.ngs", quick_state_ngs_snapshot_text(emuenv)));
@@ -8184,6 +8235,32 @@ static bool restore_quick_state_avplayer_state(EmuEnvState &emuenv, const QuickS
     return true;
 }
 
+static bool restore_quick_state_jpeg_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.jpeg");
+    if (!section || section->version != 1) {
+        LOG_WARN("Refused Jpeg restore for {} because the thor.jpeg section is missing.", slot.title_id);
+        quick_state_last_restore_detail = "Jpeg host-state section is missing";
+        return false;
+    }
+
+    const auto values = quick_state_parse_text_section(*section);
+    std::string detail;
+    if (!sce_jpeg::quick_state_restore_snapshot(emuenv, values, &detail)) {
+        quick_state_last_restore_detail = detail.empty() ? "Jpeg host-state restore failed" : detail;
+        LOG_WARN("Refused Jpeg restore for {} because {}.", slot.title_id, quick_state_last_restore_detail);
+        return false;
+    }
+
+    QuickStateJpegSnapshot snapshot;
+    quick_state_parse_jpeg_snapshot_section(slot, snapshot);
+    LOG_INFO("Restored Jpeg host snapshot for {} (initialized={}, decoder={}, exact={}).",
+        slot.title_id,
+        snapshot.initialized,
+        snapshot.decoder_present,
+        snapshot.exact_restore);
+    return true;
+}
+
 static bool restore_quick_state_audiodec_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
     const QuickStateSection *section = quick_state_find_section(slot, "thor.audiodec");
     if (!section || section->version != 1) {
@@ -8714,6 +8791,12 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         return fail_quick_state_restore();
     }
 
+    if (!restore_quick_state_jpeg_state(emuenv, slot)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "Jpeg restore failed";
+        return fail_quick_state_restore();
+    }
+
     if (!restore_quick_state_audiodec_state(emuenv, slot)) {
         if (quick_state_last_restore_detail.empty())
             quick_state_last_restore_detail = "Audiodec restore failed";
@@ -8896,6 +8979,11 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "AVPlayer schema: " << (manifest.avplayer_schema.empty() ? "missing" : manifest.avplayer_schema) << "\n";
     marker << "AVPlayer exact cursor restore: " << (manifest.avplayer_exact_cursor_restore ? "ready" : "missing") << "\n";
     marker << "AVPlayer players: " << manifest.avplayer_players << " (" << manifest.avplayer_active_players << " active)\n";
+    marker << "Jpeg host-state restore layer: " << (manifest.jpeg_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Jpeg schema: " << (manifest.jpeg_schema.empty() ? "missing" : manifest.jpeg_schema) << "\n";
+    marker << "Jpeg initialized: " << (manifest.jpeg_initialized ? "yes" : "no") << "\n";
+    marker << "Jpeg decoder: " << (manifest.jpeg_decoder_present ? "present" : "none") << "\n";
+    marker << "Jpeg exact restore: " << (manifest.jpeg_exact_restore ? "ready" : "missing") << "\n";
     marker << "Videodec host-state restore layer: " << (manifest.videodec_state_restorable ? "ready" : "missing") << "\n";
     marker << "Videodec schema: " << (manifest.videodec_schema.empty() ? "missing" : manifest.videodec_schema) << "\n";
     marker << "Videodec decoders: " << manifest.videodec_decoders << "\n";
@@ -8996,6 +9084,11 @@ static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickSta
     marker << "AVPlayer schema: " << (manifest.avplayer_schema.empty() ? "missing" : manifest.avplayer_schema) << "\n";
     marker << "AVPlayer exact cursor restore: " << (manifest.avplayer_exact_cursor_restore ? "ready" : "missing") << "\n";
     marker << "AVPlayer players: " << manifest.avplayer_players << " (" << manifest.avplayer_active_players << " active)\n";
+    marker << "Jpeg host-state restore layer: " << (manifest.jpeg_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Jpeg schema: " << (manifest.jpeg_schema.empty() ? "missing" : manifest.jpeg_schema) << "\n";
+    marker << "Jpeg initialized: " << (manifest.jpeg_initialized ? "yes" : "no") << "\n";
+    marker << "Jpeg decoder: " << (manifest.jpeg_decoder_present ? "present" : "none") << "\n";
+    marker << "Jpeg exact restore: " << (manifest.jpeg_exact_restore ? "ready" : "missing") << "\n";
     marker << "Videodec host-state restore layer: " << (manifest.videodec_state_restorable ? "ready" : "missing") << "\n";
     marker << "Videodec schema: " << (manifest.videodec_schema.empty() ? "missing" : manifest.videodec_schema) << "\n";
     marker << "Videodec decoders: " << manifest.videodec_decoders << "\n";

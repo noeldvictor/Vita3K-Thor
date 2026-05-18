@@ -20,6 +20,12 @@
 #include <codec/state.h>
 #include <codec/types.h>
 #include <kernel/state.h>
+#include <modules/SceJpeg/quick_state.h>
+
+#include <fmt/format.h>
+#include <limits>
+#include <map>
+#include <sstream>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceJpegUser);
@@ -31,6 +37,258 @@ struct MJpegState {
     std::mutex decoderMutex;
     DecoderPtr decoder;
 };
+
+namespace sce_jpeg {
+
+static bool quick_state_parse_u64_text(const std::string &text, uint64_t &out, const int base = 10) {
+    if (text.empty())
+        return false;
+
+    size_t consumed = 0;
+    try {
+        out = std::stoull(text, &consumed, base);
+    } catch (...) {
+        return false;
+    }
+    return consumed == text.size();
+}
+
+static bool quick_state_parse_u32_text(const std::string &text, uint32_t &out, const int base = 10) {
+    uint64_t parsed = 0;
+    if (!quick_state_parse_u64_text(text, parsed, base) || parsed > std::numeric_limits<uint32_t>::max())
+        return false;
+    out = static_cast<uint32_t>(parsed);
+    return true;
+}
+
+static bool quick_state_parse_i32_text(const std::string &text, int32_t &out) {
+    if (text.empty())
+        return false;
+
+    size_t consumed = 0;
+    int64_t parsed = 0;
+    try {
+        parsed = std::stoll(text, &consumed, 10);
+    } catch (...) {
+        return false;
+    }
+    if (consumed != text.size() || parsed < std::numeric_limits<int32_t>::min() || parsed > std::numeric_limits<int32_t>::max())
+        return false;
+    out = static_cast<int32_t>(parsed);
+    return true;
+}
+
+static bool quick_state_parse_bool_text(const std::string &text, bool &out) {
+    if (text == "1" || text == "true") {
+        out = true;
+        return true;
+    }
+    if (text == "0" || text == "false") {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+static std::string quick_state_pitch_text(const MJpegPitch &pitch) {
+    return fmt::format("{},{}", pitch.x, pitch.y);
+}
+
+static bool quick_state_parse_pitch_text(const std::string &text, MJpegPitch &pitch) {
+    const size_t separator = text.find(',');
+    if (separator == std::string::npos)
+        return false;
+
+    uint32_t x = 0;
+    uint32_t y = 0;
+    if (!quick_state_parse_u32_text(text.substr(0, separator), x)
+        || !quick_state_parse_u32_text(text.substr(separator + 1), y)) {
+        return false;
+    }
+
+    pitch = { x, y };
+    return true;
+}
+
+static bool quick_state_valid_color_space(const uint32_t color_space) {
+    switch (static_cast<DecoderColorSpace>(color_space)) {
+    case COLORSPACE_UNKNOWN:
+    case COLORSPACE_GRAYSCALE:
+    case COLORSPACE_YUV444P:
+    case COLORSPACE_YUV440P:
+    case COLORSPACE_YUV441P:
+    case COLORSPACE_YUV422P:
+    case COLORSPACE_YUV420P:
+    case COLORSPACE_YUV411P:
+        return true;
+    default:
+        return false;
+    }
+}
+
+std::string quick_state_snapshot_text(EmuEnvState &emuenv) {
+    std::ostringstream text;
+    text << "schema=thor.jpeg.v1\n";
+
+    MJpegState *state = emuenv.kernel.obj_store.get_if<MJpegState>();
+    if (!state) {
+        text << "initialized=0\n";
+        text << "decoder=0\n";
+        text << "exact=1\n";
+        return text.str();
+    }
+
+    std::lock_guard<std::mutex> lock(state->decoderMutex);
+    const bool decoder_present = static_cast<bool>(state->decoder);
+    const bool initialized = state->initialized || decoder_present;
+    text << "initialized=" << (initialized ? 1 : 0) << "\n";
+    text << "decoder=" << (decoder_present ? 1 : 0) << "\n";
+    text << "exact=" << ((initialized == decoder_present) ? 1 : 0) << "\n";
+
+    if (state->decoder) {
+        MJpegPitch pitch[4] = {};
+        state->decoder->get_pitch_info(pitch);
+        text << "use_standard_decoder=" << (state->decoder->use_standard_decoder ? 1 : 0) << "\n";
+        text << "downscale_ratio=" << state->decoder->downscale_ratio << "\n";
+        text << "color_space=" << static_cast<uint32_t>(state->decoder->get_color_space()) << "\n";
+        for (size_t index = 0; index < 4; index++)
+            text << "pitch." << index << "=" << quick_state_pitch_text(pitch[index]) << "\n";
+    }
+
+    return text.str();
+}
+
+bool quick_state_validate_snapshot_values(const std::map<std::string, std::string> &values, bool *initialized, bool *decoder_present, bool *exact_restore, std::string *detail) {
+    const auto schema = values.find("schema");
+    if (schema == values.end() || schema->second != "thor.jpeg.v1") {
+        if (detail)
+            *detail = "Jpeg section schema is invalid";
+        return false;
+    }
+
+    bool parsed_initialized = false;
+    bool parsed_decoder = false;
+    bool parsed_exact = false;
+    if (!values.contains("initialized") || !quick_state_parse_bool_text(values.at("initialized"), parsed_initialized)
+        || !values.contains("decoder") || !quick_state_parse_bool_text(values.at("decoder"), parsed_decoder)
+        || !values.contains("exact") || !quick_state_parse_bool_text(values.at("exact"), parsed_exact)) {
+        if (detail)
+            *detail = "Jpeg section header is invalid";
+        return false;
+    }
+
+    if (parsed_initialized != parsed_decoder) {
+        if (detail)
+            *detail = "Jpeg initialized state does not match decoder presence";
+        return false;
+    }
+
+    if (parsed_decoder) {
+        static constexpr const char *required_fields[] = {
+            "use_standard_decoder",
+            "downscale_ratio",
+            "color_space",
+            "pitch.0",
+            "pitch.1",
+            "pitch.2",
+            "pitch.3",
+        };
+        for (const char *field : required_fields) {
+            if (!values.contains(field)) {
+                if (detail)
+                    *detail = std::string("Jpeg decoder field is missing: ") + field;
+                return false;
+            }
+        }
+
+        bool parsed_bool = false;
+        int32_t parsed_i32 = 0;
+        uint32_t parsed_u32 = 0;
+        MJpegPitch parsed_pitch = {};
+        if (!quick_state_parse_bool_text(values.at("use_standard_decoder"), parsed_bool)
+            || !quick_state_parse_i32_text(values.at("downscale_ratio"), parsed_i32)
+            || parsed_i32 < 0
+            || parsed_i32 > 8
+            || !quick_state_parse_u32_text(values.at("color_space"), parsed_u32)
+            || !quick_state_valid_color_space(parsed_u32)
+            || !quick_state_parse_pitch_text(values.at("pitch.0"), parsed_pitch)
+            || !quick_state_parse_pitch_text(values.at("pitch.1"), parsed_pitch)
+            || !quick_state_parse_pitch_text(values.at("pitch.2"), parsed_pitch)
+            || !quick_state_parse_pitch_text(values.at("pitch.3"), parsed_pitch)) {
+            if (detail)
+                *detail = "Jpeg decoder metadata is invalid";
+            return false;
+        }
+    }
+
+    if (initialized)
+        *initialized = parsed_initialized;
+    if (decoder_present)
+        *decoder_present = parsed_decoder;
+    if (exact_restore)
+        *exact_restore = parsed_exact && (!parsed_initialized || parsed_decoder);
+    return true;
+}
+
+bool quick_state_restore_snapshot(EmuEnvState &emuenv, const std::map<std::string, std::string> &values, std::string *detail) {
+    bool initialized = false;
+    bool exact_restore = false;
+    if (!quick_state_validate_snapshot_values(values, &initialized, nullptr, &exact_restore, detail))
+        return false;
+
+    if (!initialized) {
+        emuenv.kernel.obj_store.erase<MJpegState>();
+        return true;
+    }
+
+    MJpegState *state = emuenv.kernel.obj_store.get_if<MJpegState>();
+    if (!state) {
+        emuenv.kernel.obj_store.create<MJpegState>();
+        state = emuenv.kernel.obj_store.get_if<MJpegState>();
+    }
+    if (!state) {
+        if (detail)
+            *detail = "Jpeg state object could not be created";
+        return false;
+    }
+
+    bool use_standard_decoder = false;
+    int32_t downscale_ratio = 1;
+    uint32_t color_space = 0;
+    MJpegPitch pitch[4] = {};
+    if (!quick_state_parse_bool_text(values.at("use_standard_decoder"), use_standard_decoder)
+        || !quick_state_parse_i32_text(values.at("downscale_ratio"), downscale_ratio)
+        || !quick_state_parse_u32_text(values.at("color_space"), color_space)) {
+        if (detail)
+            *detail = "Jpeg decoder restore fields are invalid";
+        return false;
+    }
+    for (size_t index = 0; index < 4; index++) {
+        if (!quick_state_parse_pitch_text(values.at(fmt::format("pitch.{}", index)), pitch[index])) {
+            if (detail)
+                *detail = fmt::format("Jpeg pitch {} restore field is invalid", index);
+            return false;
+        }
+    }
+
+    auto decoder = std::make_shared<MjpegDecoderState>();
+    MJpegDecoderOptions options = {};
+    options.use_standard_decoder = use_standard_decoder;
+    options.downscale_ratio = downscale_ratio;
+    decoder->configure(&options);
+    for (size_t index = 0; index < 4; index++)
+        decoder->pitch[index] = pitch[index];
+    decoder->color_space_out = static_cast<DecoderColorSpace>(color_space);
+
+    {
+        std::lock_guard<std::mutex> lock(state->decoderMutex);
+        state->initialized = true;
+        state->decoder = std::move(decoder);
+    }
+    return exact_restore;
+}
+
+} // namespace sce_jpeg
 
 struct SceJpegMJpegInitInfo {
     SceSize size;
@@ -355,6 +613,7 @@ EXPORT(int, sceJpegInitMJpeg, int maxSplitDecoder) {
 
     emuenv.kernel.obj_store.create<MJpegState>();
     const auto state = emuenv.kernel.obj_store.get<MJpegState>();
+    state->initialized = true;
     state->decoder = std::make_shared<MjpegDecoderState>();
 
     return 0;
