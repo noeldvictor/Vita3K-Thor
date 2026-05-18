@@ -4240,6 +4240,8 @@ static bool quick_state_needs_ngs_durable_restore(EmuEnvState &emuenv, const Qui
     return !slot.has_live_host_state && !emuenv.ngs.systems.empty();
 }
 
+static bool quick_state_wait_queue_entry_restorable_without_live_host(const QuickStateSyncWaitQueueEntry &entry);
+
 static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState &emuenv, const QuickStateSlot &slot) {
     QuickStateRestoreManifest manifest;
     manifest.guest_memory_bytes = slot.byte_count;
@@ -4306,18 +4308,10 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
             if (!manifest.sync_wait_queue_metadata_complete)
                 manifest.missing_serializers.push_back("kernel-wait-queue-metadata");
             const bool has_live_host_only_wait = std::any_of(sync_snapshot.wait_queue_entries.begin(), sync_snapshot.wait_queue_entries.end(), [](const QuickStateSyncWaitQueueEntry &entry) {
-                if (entry.deferred_import_wait)
-                    return false;
-                return !((entry.kind == "condvar" || entry.kind == "lwcondvar") && entry.timeout == 0);
+                return !entry.deferred_import_wait && !quick_state_wait_queue_entry_restorable_without_live_host(entry);
             });
             const bool has_unsupported_deferred_wait = std::any_of(sync_snapshot.wait_queue_entries.begin(), sync_snapshot.wait_queue_entries.end(), [](const QuickStateSyncWaitQueueEntry &entry) {
-                return entry.deferred_import_wait
-                    && entry.kind != "semaphore"
-                    && entry.kind != "eventflag"
-                    && entry.kind != "condvar"
-                    && entry.kind != "lwcondvar"
-                    && entry.kind != "msgpipe_sender"
-                    && entry.kind != "msgpipe_receiver";
+                return entry.deferred_import_wait && !quick_state_wait_queue_entry_restorable_without_live_host(entry);
             });
             if (has_live_host_only_wait)
                 manifest.missing_serializers.push_back("host-syscall-state");
@@ -4459,12 +4453,16 @@ static bool quick_state_wait_queue_entries_all_deferred(const QuickStateSyncSnap
 
 static bool quick_state_wait_queue_entry_restorable_without_live_host(const QuickStateSyncWaitQueueEntry &entry) {
     if (entry.deferred_import_wait) {
-        return entry.kind == "semaphore"
-            || entry.kind == "eventflag"
+        if (entry.kind == "semaphore")
+            return true;
+        if (entry.kind == "eventflag"
             || entry.kind == "condvar"
             || entry.kind == "lwcondvar"
             || entry.kind == "msgpipe_sender"
-            || entry.kind == "msgpipe_receiver";
+            || entry.kind == "msgpipe_receiver") {
+            return entry.timeout == 0;
+        }
+        return false;
     }
 
     return (entry.kind == "condvar" || entry.kind == "lwcondvar") && entry.timeout == 0;
