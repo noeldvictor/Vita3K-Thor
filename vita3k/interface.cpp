@@ -8679,7 +8679,12 @@ static void write_quick_state_wait_queue_marker(std::ostream &marker, const Quic
 static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &slot) {
     const fs::path state_dir = quick_state_dir(emuenv, slot.title_id);
     fs::create_directories(state_dir);
-    const auto manifest = build_quick_state_restore_manifest(emuenv, slot);
+    // The sidecar describes the durable file, not the temporary live host state kept for same-session restores.
+    QuickStateSlot disk_slot = slot;
+    disk_slot.restore_requires_same_pause = false;
+    disk_slot.has_live_host_state = false;
+    disk_slot.pause_epoch = 0;
+    const auto manifest = build_quick_state_restore_manifest(emuenv, disk_slot);
     fs::ofstream marker(quick_state_marker_file(emuenv, slot.title_id));
     marker << "Vita3K Thor quickstate capture\n";
     marker << "Title ID: " << slot.title_id << "\n";
