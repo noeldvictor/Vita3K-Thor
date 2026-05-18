@@ -221,6 +221,7 @@ SceInt32 simple_event_waitorpoll(KernelState &kernel, const char *export_name, S
 SceInt32 simple_event_setorpulse(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id, SceUInt32 pattern, SceUInt64 user_data, bool is_set);
 SceInt32 simple_event_clear(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id, SceUInt32 clear_pattern);
 SceInt32 simple_event_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id);
+void simple_event_schedule_deferred_timeout(const KernelState &kernel, const SimpleEventPtr &event, const ThreadStatePtr &thread, SceUInt32 timeout_value);
 
 // Timer
 SceUID timer_create(KernelState &kernel, MemState &mem, const char *export_name, const char *name, SceUID thread_id, SceUInt32 attr);
@@ -230,6 +231,7 @@ SceInt32 timer_clear(KernelState &kernel, const char *export_name, SceUID thread
 SceInt32 timer_set(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID timer_handle, SceUID type, SceKernelSysClock *interval, SceInt32 repeats);
 SceInt32 timer_start(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID timer_handle);
 SceInt32 timer_stop(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID timer_handle);
+void timer_schedule_deferred_event(const KernelState &kernel, const TimerPtr &timer);
 
 // Mutex
 SceUID mutex_create(SceUID *uid_out, KernelState &kernel, MemState &mem, const char *export_name, const char *name, SceUID thread_id, SceUInt attr, int init_count, Ptr<SceKernelLwMutexWork> workarea, SyncWeight weight);
