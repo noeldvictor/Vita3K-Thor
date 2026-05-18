@@ -270,6 +270,7 @@ int eventflag_poll(KernelState &kernel, const char *export_name, SceUID thread_i
 SceInt32 eventflag_set(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID evfId, SceUInt32 bitPattern);
 SceInt32 eventflag_cancel(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id, SceUInt32 pattern, SceUInt32 *num_wait_threads);
 int eventflag_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id);
+void eventflag_schedule_deferred_timeout(const KernelState &kernel, const EventFlagPtr &eventflag, const ThreadStatePtr &thread, SceUInt32 timeout_value);
 
 // Message Pipe
 SceUID msgpipe_create(KernelState &kernel, const char *export_name, const char *name, SceUID thread_id, SceUInt attr, SceSize bufSize);

@@ -140,6 +140,30 @@ void semaphore_schedule_deferred_timeout(const KernelState &kernel, const Semaph
     }).detach();
 }
 
+void eventflag_schedule_deferred_timeout(const KernelState &kernel, const EventFlagPtr &eventflag, const ThreadStatePtr &thread, const SceUInt32 timeout_value) {
+    std::thread([&kernel, eventflag, thread, timeout_value]() {
+        std::this_thread::sleep_for(std::chrono::microseconds{ kernel_speed_to_host_us(kernel, timeout_value) });
+
+        const std::lock_guard<std::mutex> event_lock(eventflag->mutex);
+        auto data_it = eventflag->waiting_threads->find(thread);
+        if (data_it == eventflag->waiting_threads->end())
+            return;
+
+        const WaitingThreadData data = *data_it;
+        if (!data.deferred_import_wait || !data.timeout)
+            return;
+
+        if (remaining_timeout_us(kernel, data) > 0)
+            return;
+
+        *data.timeout = 0;
+        if (data.outBits)
+            *data.outBits = eventflag->flags;
+        eventflag->waiting_threads->erase(data_it);
+        thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_TIMEOUT));
+    }).detach();
+}
+
 inline static int handle_timeout(const KernelState &kernel, const ThreadStatePtr &thread, std::unique_lock<std::mutex> &thread_lock,
     std::unique_lock<std::mutex> &primitive_lock, WaitingThreadQueuePtr &queue,
     const ThreadDataQueueInterator<WaitingThreadData> &data_it, const char *export_name,
@@ -1593,13 +1617,22 @@ static int eventflag_waitorpoll(KernelState &kernel, const char *export_name, Sc
         data.outBits = outBits;
         data.priority = thread->priority;
         capture_wait_timeout(data, timeout);
+        capture_wait_timeout_start(data);
 
         auto was_canceled = std::make_shared<bool>(false);
         data.was_canceled = was_canceled;
 
-        if (!timeout && thread->begin_deferred_import_wait()) {
+        if (timeout && *timeout == 0) {
+            if (outBits)
+                *outBits = event->flags;
+            return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+        }
+
+        if (thread->begin_deferred_import_wait()) {
             data.deferred_import_wait = true;
             event->waiting_threads->push(data);
+            if (timeout)
+                eventflag_schedule_deferred_timeout(kernel, event, thread, data.timeout_value);
             return SCE_KERNEL_OK;
         }
 
@@ -1667,6 +1700,8 @@ SceInt32 eventflag_set(KernelState &kernel, const char *export_name, SceUID thre
             if (waiting_thread_data.outBits) {
                 *waiting_thread_data.outBits = event->flags;
             }
+            if (waiting_thread_data.timeout)
+                *waiting_thread_data.timeout = remaining_timeout_us(kernel, waiting_thread_data);
 
             if (waiting_thread_data.wait & SCE_EVENT_WAITCLEAR) {
                 event->flags = 0;

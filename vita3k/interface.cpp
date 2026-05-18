@@ -4455,8 +4455,9 @@ static bool quick_state_wait_queue_entry_restorable_without_live_host(const Quic
     if (entry.deferred_import_wait) {
         if (entry.kind == "semaphore")
             return true;
-        if (entry.kind == "eventflag"
-            || entry.kind == "condvar"
+        if (entry.kind == "eventflag")
+            return true;
+        if (entry.kind == "condvar"
             || entry.kind == "lwcondvar"
             || entry.kind == "msgpipe_sender"
             || entry.kind == "msgpipe_receiver") {
@@ -6002,6 +6003,8 @@ static bool quick_state_restore_deferred_eventflag_waits(EmuEnvState &emuenv, co
 
         thread->second->restore_deferred_import_wait();
         eventflag->waiting_threads->push(data);
+        if (data.timeout && data.timeout_value > 0)
+            eventflag_schedule_deferred_timeout(emuenv.kernel, eventflag, thread->second, data.timeout_value);
     }
     return true;
 }
