@@ -19,7 +19,11 @@
 
 #include <codec/state.h>
 #include <kernel/state.h>
+#include <modules/SceVideodec/quick_state.h>
 #include <util/lock_and_find.h>
+
+#include <limits>
+#include <sstream>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceVideodecUser);
@@ -31,6 +35,228 @@ struct VideodecState {
     std::mutex mutex;
     H264DecoderStates decoders;
 };
+
+namespace sce_videodec {
+
+static bool quick_state_parse_u64_text(const std::string &text, uint64_t &out, const int base = 10) {
+    if (text.empty())
+        return false;
+
+    size_t consumed = 0;
+    try {
+        out = std::stoull(text, &consumed, base);
+    } catch (...) {
+        return false;
+    }
+    return consumed == text.size();
+}
+
+static bool quick_state_parse_u32_text(const std::string &text, uint32_t &out, const int base = 10) {
+    uint64_t parsed = 0;
+    if (!quick_state_parse_u64_text(text, parsed, base) || parsed > std::numeric_limits<uint32_t>::max())
+        return false;
+    out = static_cast<uint32_t>(parsed);
+    return true;
+}
+
+static bool quick_state_parse_bool_text(const std::string &text, bool &out) {
+    if (text == "1" || text == "true") {
+        out = true;
+        return true;
+    }
+    if (text == "0" || text == "false") {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+static std::map<std::string, std::string> quick_state_parse_fields(const std::string &text) {
+    std::map<std::string, std::string> fields;
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t end = text.find(';', start);
+        const std::string item = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        const size_t separator = item.find('=');
+        if (separator != std::string::npos)
+            fields[item.substr(0, separator)] = item.substr(separator + 1);
+        if (end == std::string::npos)
+            break;
+        start = end + 1;
+    }
+    return fields;
+}
+
+std::string quick_state_snapshot_text(EmuEnvState &emuenv) {
+    std::ostringstream text;
+    text << "schema=thor.videodec.v1\n";
+
+    VideodecState *state = emuenv.kernel.obj_store.get_if<VideodecState>();
+    if (!state) {
+        text << "decoders=0\n";
+        return text.str();
+    }
+
+    std::lock_guard<std::mutex> lock(state->mutex);
+    size_t decoder_count = 0;
+    for (const auto &[handle, decoder] : state->decoders) {
+        if (decoder)
+            decoder_count++;
+    }
+    text << "decoders=" << decoder_count << "\n";
+    size_t index = 0;
+    for (const auto &[handle, decoder] : state->decoders) {
+        if (!decoder)
+            continue;
+
+        text << "decoder." << index++
+             << "=handle=" << handle
+             << ";width_in=" << decoder->width_in
+             << ";height_in=" << decoder->height_in
+             << ";width_out=" << decoder->width_out
+             << ";height_out=" << decoder->height_out
+             << ";pts=" << decoder->pts
+             << ";dts=" << decoder->dts
+             << ";pts_out=" << decoder->pts_out
+             << ";output_yuvp3=" << decoder->output_yuvp3
+             << ";stopped=" << decoder->is_stopped
+             << "\n";
+    }
+
+    return text.str();
+}
+
+bool quick_state_validate_snapshot_values(const std::map<std::string, std::string> &values, size_t *decoder_count, std::string *detail) {
+    const auto schema = values.find("schema");
+    if (schema == values.end() || schema->second != "thor.videodec.v1") {
+        if (detail)
+            *detail = "Videodec section schema is invalid";
+        return false;
+    }
+
+    uint64_t parsed_decoders = 0;
+    if (!values.contains("decoders") || !quick_state_parse_u64_text(values.at("decoders"), parsed_decoders) || parsed_decoders > 64) {
+        if (detail)
+            *detail = "Videodec section header is invalid";
+        return false;
+    }
+    if (decoder_count)
+        *decoder_count = static_cast<size_t>(parsed_decoders);
+
+    for (size_t index = 0; index < static_cast<size_t>(parsed_decoders); index++) {
+        const std::string key = fmt::format("decoder.{}", index);
+        const auto value = values.find(key);
+        if (value == values.end()) {
+            if (detail)
+                *detail = fmt::format("Videodec decoder {} is missing", index);
+            return false;
+        }
+
+        const auto fields = quick_state_parse_fields(value->second);
+        static constexpr const char *required_fields[] = {
+            "handle",
+            "width_in",
+            "height_in",
+            "width_out",
+            "height_out",
+            "pts",
+            "dts",
+            "pts_out",
+            "output_yuvp3",
+            "stopped",
+        };
+        for (const char *field : required_fields) {
+            if (!fields.contains(field)) {
+                if (detail)
+                    *detail = fmt::format("Videodec decoder {} field '{}' is missing", index, field);
+                return false;
+            }
+        }
+
+        uint32_t parsed_u32 = 0;
+        uint64_t parsed_u64 = 0;
+        bool parsed_bool = false;
+        if (!quick_state_parse_u32_text(fields.at("handle"), parsed_u32) || parsed_u32 == 0
+            || !quick_state_parse_u32_text(fields.at("width_in"), parsed_u32)
+            || !quick_state_parse_u32_text(fields.at("height_in"), parsed_u32)
+            || !quick_state_parse_u32_text(fields.at("width_out"), parsed_u32)
+            || !quick_state_parse_u32_text(fields.at("height_out"), parsed_u32)
+            || !quick_state_parse_u64_text(fields.at("pts"), parsed_u64)
+            || !quick_state_parse_u64_text(fields.at("dts"), parsed_u64)
+            || !quick_state_parse_u64_text(fields.at("pts_out"), parsed_u64)
+            || !quick_state_parse_bool_text(fields.at("output_yuvp3"), parsed_bool)
+            || !quick_state_parse_bool_text(fields.at("stopped"), parsed_bool)) {
+            if (detail)
+                *detail = fmt::format("Videodec decoder {} metadata is invalid", index);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool quick_state_restore_snapshot(EmuEnvState &emuenv, const std::map<std::string, std::string> &values, std::string *detail) {
+    size_t decoder_count = 0;
+    if (!quick_state_validate_snapshot_values(values, &decoder_count, detail))
+        return false;
+
+    VideodecState *state = emuenv.kernel.obj_store.get_if<VideodecState>();
+    if (!state) {
+        emuenv.kernel.obj_store.create<VideodecState>();
+        state = emuenv.kernel.obj_store.get_if<VideodecState>();
+    }
+    if (!state) {
+        if (detail)
+            *detail = "Videodec state object could not be created";
+        return false;
+    }
+
+    H264DecoderStates restored_decoders;
+    for (size_t index = 0; index < decoder_count; index++) {
+        const auto fields = quick_state_parse_fields(values.at(fmt::format("decoder.{}", index)));
+        uint32_t handle = 0;
+        uint32_t width_in = 0;
+        uint32_t height_in = 0;
+        uint32_t width_out = 0;
+        uint32_t height_out = 0;
+        bool output_yuvp3 = false;
+        bool stopped = true;
+        uint64_t pts = ~0ull;
+        uint64_t dts = ~0ull;
+        uint64_t pts_out = ~0ull;
+        if (!quick_state_parse_u32_text(fields.at("handle"), handle)
+            || !quick_state_parse_u32_text(fields.at("width_in"), width_in)
+            || !quick_state_parse_u32_text(fields.at("height_in"), height_in)
+            || !quick_state_parse_u32_text(fields.at("width_out"), width_out)
+            || !quick_state_parse_u32_text(fields.at("height_out"), height_out)
+            || !quick_state_parse_u64_text(fields.at("pts"), pts)
+            || !quick_state_parse_u64_text(fields.at("dts"), dts)
+            || !quick_state_parse_u64_text(fields.at("pts_out"), pts_out)
+            || !quick_state_parse_bool_text(fields.at("output_yuvp3"), output_yuvp3)
+            || !quick_state_parse_bool_text(fields.at("stopped"), stopped)) {
+            if (detail)
+                *detail = fmt::format("Videodec decoder {} restore fields are invalid", index);
+            return false;
+        }
+
+        auto decoder = std::make_shared<H264DecoderState>(width_in, height_in);
+        decoder->set_res(width_out, height_out);
+        decoder->set_output_format(output_yuvp3);
+        decoder->pts = pts;
+        decoder->dts = dts;
+        decoder->pts_out = pts_out;
+        decoder->is_stopped = stopped;
+        restored_decoders.emplace(static_cast<SceUID>(handle), std::move(decoder));
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->decoders.swap(restored_decoders);
+    }
+    return true;
+}
+
+} // namespace sce_videodec
 
 enum {
     SCE_AVCDEC_ERROR_INVALID_PARAM = 0x80620002,

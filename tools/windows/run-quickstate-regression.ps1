@@ -166,6 +166,7 @@ function Add-MarkerDigest([System.Collections.Generic.List[string]]$Summary, [st
         "^GXM pending display callbacks:",
         "^GXM notification waits:",
         "^AVPlayer players:",
+        "^Videodec decoders:",
         "^Timers:",
         "^Semaphores:",
         "^Condvars:",

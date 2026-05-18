@@ -49,6 +49,7 @@
 
 #include <modules/module_parent.h>
 #include <modules/SceAvPlayer/quick_state.h>
+#include <modules/SceVideodec/quick_state.h>
 #include <motion/event_handler.h>
 #include <string>
 #include <touch/functions.h>
@@ -1463,6 +1464,13 @@ struct QuickStateAvPlayerSnapshot {
     std::string detail;
 };
 
+struct QuickStateVideodecSnapshot {
+    bool valid = false;
+    size_t decoder_count = 0;
+    std::string schema;
+    std::string detail;
+};
+
 struct QuickStateRestoreManifest {
     uint32_t format_version = QUICKSTATE_VERSION;
     uint64_t guest_memory_bytes = 0;
@@ -1487,6 +1495,7 @@ struct QuickStateRestoreManifest {
     bool gxm_program_host_state_restorable = false;
     bool audio_state_restorable = false;
     bool avplayer_state_restorable = false;
+    bool videodec_state_restorable = false;
     bool ngs_state_restorable = false;
     bool same_pause_restore_available = false;
     bool live_host_restore_available = false;
@@ -1508,6 +1517,8 @@ struct QuickStateRestoreManifest {
     size_t avplayer_active_players = 0;
     std::string avplayer_schema;
     bool avplayer_exact_cursor_restore = false;
+    size_t videodec_decoders = 0;
+    std::string videodec_schema;
     QuickStateKernelObjectCounts kernel;
     QuickStateIOCounts io;
     std::vector<std::string> missing_serializers;
@@ -4523,6 +4534,27 @@ static bool quick_state_parse_avplayer_snapshot_section(const QuickStateSlot &sl
     return true;
 }
 
+static bool quick_state_parse_videodec_snapshot_section(const QuickStateSlot &slot, QuickStateVideodecSnapshot &snapshot) {
+    snapshot = {};
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.videodec");
+    if (!section || section->version != 1) {
+        snapshot.detail = "Videodec host-state section is missing";
+        return false;
+    }
+
+    const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    snapshot.schema = schema == values.end() ? "" : schema->second;
+    std::string detail;
+    if (!sce_videodec::quick_state_validate_snapshot_values(values, &snapshot.decoder_count, &detail)) {
+        snapshot.detail = detail.empty() ? "Videodec host-state section is invalid" : detail;
+        return false;
+    }
+
+    snapshot.valid = true;
+    return true;
+}
+
 static std::string quick_state_thread_status_name(const ThreadStatus status) {
     switch (status) {
     case ThreadStatus::run:
@@ -4705,6 +4737,10 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     manifest.avplayer_active_players = avplayer_snapshot.active_player_count;
     manifest.avplayer_schema = avplayer_snapshot.schema;
     manifest.avplayer_exact_cursor_restore = avplayer_snapshot.exact_cursor_restore;
+    QuickStateVideodecSnapshot videodec_snapshot;
+    manifest.videodec_state_restorable = quick_state_parse_videodec_snapshot_section(slot, videodec_snapshot);
+    manifest.videodec_decoders = videodec_snapshot.decoder_count;
+    manifest.videodec_schema = videodec_snapshot.schema;
     manifest.ngs_state_restorable = quick_state_parse_ngs_snapshot_header(slot);
     manifest.kernel = quick_state_count_kernel_objects(emuenv);
     manifest.io = quick_state_count_io_objects(emuenv);
@@ -4753,6 +4789,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         manifest.missing_serializers.push_back("avplayer-movie-state");
     if (manifest.avplayer_state_restorable && manifest.avplayer_active_players > 0 && !manifest.avplayer_exact_cursor_restore)
         manifest.missing_serializers.push_back("avplayer-exact-cursor");
+    if (!manifest.videodec_state_restorable && manifest.avplayer_threads > 0)
+        manifest.missing_serializers.push_back("videodec-state");
     if (!manifest.ngs_state_restorable && quick_state_needs_ngs_durable_restore(emuenv, slot))
         manifest.missing_serializers.push_back("ngs-host-state");
     if (!manifest.io_file_positions_restorable) {
@@ -4765,6 +4803,7 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     }
     if (!manifest.timing_restorable)
         manifest.missing_serializers.push_back("timing-clocks");
+    const bool videodec_sections_ready = manifest.videodec_state_restorable || manifest.avplayer_threads == 0;
     const bool live_host_sections_ready = (manifest.same_pause_restore_available || manifest.live_host_restore_available)
         && manifest.timing_restorable
         && manifest.thread_metadata_restorable
@@ -4775,7 +4814,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         && manifest.gxm_state_restorable
         && manifest.gxm_program_host_state_restorable
         && manifest.audio_state_restorable
-        && manifest.avplayer_state_restorable;
+        && manifest.avplayer_state_restorable
+        && videodec_sections_ready;
     const bool durable_restore_ready = manifest.missing_serializers.empty() && !slot.restore_requires_same_pause;
     manifest.restore_enabled = durable_restore_ready || live_host_sections_ready;
     if (manifest.restore_enabled) {
@@ -5773,6 +5813,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         "thor.gxm.program-host",
         "thor.audio",
         "thor.avplayer",
+        "thor.videodec",
         "thor.ngs",
     };
 
@@ -6258,6 +6299,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
     }
 
     sections.push_back(quick_state_make_text_section("thor.avplayer", sce_avplayer::quick_state_snapshot_text(emuenv)));
+    sections.push_back(quick_state_make_text_section("thor.videodec", sce_videodec::quick_state_snapshot_text(emuenv)));
 
     sections.push_back(quick_state_make_text_section("thor.ngs", quick_state_ngs_snapshot_text(emuenv)));
 
@@ -8091,6 +8133,34 @@ static bool restore_quick_state_avplayer_state(EmuEnvState &emuenv, const QuickS
     return true;
 }
 
+static bool restore_quick_state_videodec_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.videodec");
+    if (!section || section->version != 1) {
+        if (quick_state_count_avplayer_threads(slot) == 0) {
+            LOG_INFO("Skipping Videodec host snapshot restore for {} because this older state has no AVPlayer/movie threads.", slot.title_id);
+            return true;
+        }
+        LOG_WARN("Refused Videodec restore for {} because the thor.videodec section is missing.", slot.title_id);
+        quick_state_last_restore_detail = "Videodec host-state section is missing";
+        return false;
+    }
+
+    const auto values = quick_state_parse_text_section(*section);
+    std::string detail;
+    if (!sce_videodec::quick_state_restore_snapshot(emuenv, values, &detail)) {
+        quick_state_last_restore_detail = detail.empty() ? "Videodec host-state restore failed" : detail;
+        LOG_WARN("Refused Videodec restore for {} because {}.", slot.title_id, quick_state_last_restore_detail);
+        return false;
+    }
+
+    QuickStateVideodecSnapshot snapshot;
+    quick_state_parse_videodec_snapshot_section(slot, snapshot);
+    LOG_INFO("Restored Videodec host snapshot for {} (decoders={}).",
+        slot.title_id,
+        snapshot.decoder_count);
+    return true;
+}
+
 static std::optional<fs::path> quick_state_app0_relative_path(const std::string &vita_path) {
     std::string normalized = vita_path;
     string_utils::replace(normalized, "\\", "/");
@@ -8567,6 +8637,12 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         return fail_quick_state_restore();
     }
 
+    if (!restore_quick_state_videodec_state(emuenv, slot)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "Videodec restore failed";
+        return fail_quick_state_restore();
+    }
+
     if (!restore_quick_state_avplayer_state(emuenv, slot)) {
         if (quick_state_last_restore_detail.empty())
             quick_state_last_restore_detail = "AVPlayer restore failed";
@@ -8732,6 +8808,9 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "AVPlayer schema: " << (manifest.avplayer_schema.empty() ? "missing" : manifest.avplayer_schema) << "\n";
     marker << "AVPlayer exact cursor restore: " << (manifest.avplayer_exact_cursor_restore ? "ready" : "missing") << "\n";
     marker << "AVPlayer players: " << manifest.avplayer_players << " (" << manifest.avplayer_active_players << " active)\n";
+    marker << "Videodec host-state restore layer: " << (manifest.videodec_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Videodec schema: " << (manifest.videodec_schema.empty() ? "missing" : manifest.videodec_schema) << "\n";
+    marker << "Videodec decoders: " << manifest.videodec_decoders << "\n";
     marker << "NGS host-state restore layer: " << (manifest.ngs_state_restorable ? "ready" : "missing") << "\n";
     marker << "Block reason: " << manifest.block_reason << "\n";
     marker << "Missing serializers: " << quick_state_join_strings(manifest.missing_serializers) << "\n";
@@ -8824,6 +8903,9 @@ static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickSta
     marker << "AVPlayer schema: " << (manifest.avplayer_schema.empty() ? "missing" : manifest.avplayer_schema) << "\n";
     marker << "AVPlayer exact cursor restore: " << (manifest.avplayer_exact_cursor_restore ? "ready" : "missing") << "\n";
     marker << "AVPlayer players: " << manifest.avplayer_players << " (" << manifest.avplayer_active_players << " active)\n";
+    marker << "Videodec host-state restore layer: " << (manifest.videodec_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Videodec schema: " << (manifest.videodec_schema.empty() ? "missing" : manifest.videodec_schema) << "\n";
+    marker << "Videodec decoders: " << manifest.videodec_decoders << "\n";
     marker << "NGS host-state restore layer: " << (manifest.ngs_state_restorable ? "ready" : "missing") << "\n";
     marker << "Block reason: " << manifest.block_reason << "\n";
     marker << "Missing serializers: " << quick_state_join_strings(manifest.missing_serializers) << "\n";
