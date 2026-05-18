@@ -1388,6 +1388,23 @@ struct QuickStateGxmMemoryMapSnapshot {
     uint32_t perm = 0;
 };
 
+struct QuickStateGxmDisplayCallbackSnapshot {
+    Address data = 0;
+    Address old_sync = 0;
+    Address new_sync = 0;
+    uint32_t old_sync_timestamp = 0;
+    uint32_t new_sync_timestamp = 0;
+    bool frame_predicted = false;
+};
+
+struct QuickStateGxmPendingDisplayCallbackSnapshot {
+    SceUID thread_id = 0;
+    QuickStateGxmDisplayCallbackSnapshot callback;
+    bool frame_valid = false;
+    QuickStateDisplayFrameSnapshot frame;
+    bool wait_until_empty_after_push = false;
+};
+
 struct QuickStateGxmNotificationWaitSnapshot {
     SceUID thread_id = 0;
     Address address = 0;
@@ -1406,6 +1423,9 @@ struct QuickStateGxmSnapshot {
     uint32_t last_display_global = 0;
     Address notification_region = 0;
     std::vector<QuickStateGxmMemoryMapSnapshot> memory_maps;
+    std::vector<QuickStateGxmDisplayCallbackSnapshot> display_queue_entries;
+    std::vector<SceUID> display_queue_waiters;
+    std::vector<QuickStateGxmPendingDisplayCallbackSnapshot> pending_display_callbacks;
     std::vector<QuickStateGxmNotificationWaitSnapshot> notification_waits;
 };
 
@@ -1478,6 +1498,9 @@ struct QuickStateRestoreManifest {
     size_t display_callback_entries = 0;
     size_t kernel_callback_entries = 0;
     size_t gxm_memory_maps = 0;
+    size_t gxm_display_queue_entries = 0;
+    size_t gxm_display_queue_waiters = 0;
+    size_t gxm_pending_display_callbacks = 0;
     size_t gxm_notification_waits = 0;
     size_t avplayer_players = 0;
     size_t avplayer_active_players = 0;
@@ -4049,6 +4072,27 @@ static bool quick_state_parse_gxm_memory_map_key(const std::string &key, uint32_
     return quick_state_parse_u32_text(key.substr(prefix.size()), index);
 }
 
+static bool quick_state_parse_gxm_display_queue_key(const std::string &key, uint32_t &index) {
+    constexpr std::string_view prefix = "display_queue.";
+    if (key.rfind(prefix, 0) != 0 || key.size() <= prefix.size())
+        return false;
+    return quick_state_parse_u32_text(key.substr(prefix.size()), index);
+}
+
+static bool quick_state_parse_gxm_display_queue_waiter_key(const std::string &key, uint32_t &index) {
+    constexpr std::string_view prefix = "display_queue_waiter.";
+    if (key.rfind(prefix, 0) != 0 || key.size() <= prefix.size())
+        return false;
+    return quick_state_parse_u32_text(key.substr(prefix.size()), index);
+}
+
+static bool quick_state_parse_gxm_pending_display_callback_key(const std::string &key, uint32_t &index) {
+    constexpr std::string_view prefix = "pending_display_callback.";
+    if (key.rfind(prefix, 0) != 0 || key.size() <= prefix.size())
+        return false;
+    return quick_state_parse_u32_text(key.substr(prefix.size()), index);
+}
+
 static bool quick_state_parse_gxm_notification_wait_key(const std::string &key, uint32_t &index) {
     constexpr std::string_view prefix = "notification_wait.";
     if (key.rfind(prefix, 0) != 0 || key.size() <= prefix.size())
@@ -4077,6 +4121,92 @@ static bool quick_state_parse_gxm_memory_map_snapshot(const std::string &text, Q
     return map.offset % KiB(4) == 0
         && map.size % KiB(4) == 0
         && end <= static_cast<uint64_t>(std::numeric_limits<Address>::max()) + 1;
+}
+
+static bool quick_state_parse_address_field(const std::map<std::string, std::string> &fields, const char *name, Address &address) {
+    const auto found = fields.find(name);
+    if (found == fields.end())
+        return false;
+
+    uint64_t parsed = 0;
+    if (!quick_state_parse_u64_text(found->second, parsed, 0) || parsed > std::numeric_limits<Address>::max())
+        return false;
+
+    address = static_cast<Address>(parsed);
+    return true;
+}
+
+static bool quick_state_parse_gxm_display_callback_fields(const std::map<std::string, std::string> &fields, QuickStateGxmDisplayCallbackSnapshot &callback) {
+    if (!fields.contains("old_ts")
+        || !fields.contains("new_ts")
+        || !fields.contains("frame_predicted")) {
+        return false;
+    }
+
+    return quick_state_parse_address_field(fields, "data", callback.data)
+        && quick_state_parse_address_field(fields, "old_sync", callback.old_sync)
+        && quick_state_parse_address_field(fields, "new_sync", callback.new_sync)
+        && callback.data != 0
+        && callback.old_sync != 0
+        && callback.new_sync != 0
+        && quick_state_parse_u32_text(fields.at("old_ts"), callback.old_sync_timestamp)
+        && quick_state_parse_u32_text(fields.at("new_ts"), callback.new_sync_timestamp)
+        && quick_state_parse_bool_text(fields.at("frame_predicted"), callback.frame_predicted);
+}
+
+static bool quick_state_parse_gxm_display_callback_snapshot(const std::string &text, QuickStateGxmDisplayCallbackSnapshot &callback) {
+    const auto fields = quick_state_parse_semicolon_fields(text);
+    return quick_state_parse_gxm_display_callback_fields(fields, callback);
+}
+
+static bool quick_state_parse_gxm_display_queue_waiter_snapshot(const std::string &text, SceUID &thread_id) {
+    const auto fields = quick_state_parse_semicolon_fields(text);
+    if (!fields.contains("thread"))
+        return false;
+
+    int32_t parsed_thread_id = 0;
+    if (!quick_state_parse_i32_text(fields.at("thread"), parsed_thread_id) || parsed_thread_id <= 0)
+        return false;
+
+    thread_id = static_cast<SceUID>(parsed_thread_id);
+    return true;
+}
+
+static bool quick_state_parse_gxm_pending_display_callback_snapshot(const std::string &text, QuickStateGxmPendingDisplayCallbackSnapshot &pending) {
+    const auto fields = quick_state_parse_semicolon_fields(text);
+    if (!fields.contains("thread")
+        || !fields.contains("frame_valid")
+        || !fields.contains("wait_until_empty_after_push")) {
+        return false;
+    }
+
+    int32_t parsed_thread_id = 0;
+    if (!quick_state_parse_i32_text(fields.at("thread"), parsed_thread_id)
+        || parsed_thread_id <= 0
+        || !quick_state_parse_gxm_display_callback_fields(fields, pending.callback)
+        || !quick_state_parse_bool_text(fields.at("frame_valid"), pending.frame_valid)
+        || !quick_state_parse_bool_text(fields.at("wait_until_empty_after_push"), pending.wait_until_empty_after_push)) {
+        return false;
+    }
+
+    pending.thread_id = static_cast<SceUID>(parsed_thread_id);
+    if (!pending.frame_valid)
+        return true;
+
+    if (!quick_state_parse_address_field(fields, "frame_base", pending.frame.base)
+        || !fields.contains("frame_pitch")
+        || !fields.contains("frame_format")
+        || !fields.contains("frame_width")
+        || !fields.contains("frame_height")
+        || !quick_state_parse_u32_text(fields.at("frame_pitch"), pending.frame.pitch)
+        || !quick_state_parse_u32_text(fields.at("frame_format"), pending.frame.pixelformat)
+        || !quick_state_parse_i32_text(fields.at("frame_width"), pending.frame.width)
+        || !quick_state_parse_i32_text(fields.at("frame_height"), pending.frame.height)
+        || pending.frame.width < 0
+        || pending.frame.height < 0) {
+        return false;
+    }
+    return pending.frame.pitch <= 8192 && pending.frame.width <= 8192 && pending.frame.height <= 8192;
 }
 
 static bool quick_state_parse_gxm_notification_wait_snapshot(const std::string &text, QuickStateGxmNotificationWaitSnapshot &wait) {
@@ -4115,6 +4245,9 @@ static bool quick_state_parse_gxm_snapshot_section(const QuickStateSlot &slot, Q
 
     uint64_t parsed_address = 0;
     size_t memory_map_count = 0;
+    size_t display_queue_entry_count = 0;
+    size_t display_queue_waiter_count = 0;
+    size_t pending_display_callback_count = 0;
     size_t notification_wait_count = 0;
     int32_t parsed_thread_id = 0;
     if (!quick_state_parse_u32(values, "flags", snapshot.flags)
@@ -4141,6 +4274,33 @@ static bool quick_state_parse_gxm_snapshot_section(const QuickStateSlot &slot, Q
         return false;
     }
     snapshot.notification_region = static_cast<Address>(parsed_address);
+    const auto display_queue_entries_value = values.find("display_queue_entries");
+    if (display_queue_entries_value != values.end()) {
+        uint64_t parsed_count = 0;
+        if (!quick_state_parse_u64_text(display_queue_entries_value->second, parsed_count)
+            || parsed_count > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+            return false;
+        }
+        display_queue_entry_count = static_cast<size_t>(parsed_count);
+    }
+    const auto display_queue_waiters_value = values.find("display_queue_waiters");
+    if (display_queue_waiters_value != values.end()) {
+        uint64_t parsed_count = 0;
+        if (!quick_state_parse_u64_text(display_queue_waiters_value->second, parsed_count)
+            || parsed_count > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+            return false;
+        }
+        display_queue_waiter_count = static_cast<size_t>(parsed_count);
+    }
+    const auto pending_display_callbacks_value = values.find("pending_display_callbacks");
+    if (pending_display_callbacks_value != values.end()) {
+        uint64_t parsed_count = 0;
+        if (!quick_state_parse_u64_text(pending_display_callbacks_value->second, parsed_count)
+            || parsed_count > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+            return false;
+        }
+        pending_display_callback_count = static_cast<size_t>(parsed_count);
+    }
     const auto notification_waits_value = values.find("notification_waits");
     if (notification_waits_value != values.end()) {
         uint64_t parsed_count = 0;
@@ -4167,6 +4327,60 @@ static bool quick_state_parse_gxm_snapshot_section(const QuickStateSlot &slot, Q
         seen[index] = true;
     }
     if (std::any_of(seen.begin(), seen.end(), [](const bool value) { return !value; }))
+        return false;
+
+    snapshot.display_queue_entries.resize(display_queue_entry_count);
+    std::vector<bool> seen_display_queue_entries(display_queue_entry_count, false);
+    for (const auto &[key, value] : values) {
+        uint32_t index = 0;
+        if (!quick_state_parse_gxm_display_queue_key(key, index))
+            continue;
+        if (index >= display_queue_entry_count)
+            return false;
+
+        QuickStateGxmDisplayCallbackSnapshot callback;
+        if (!quick_state_parse_gxm_display_callback_snapshot(value, callback))
+            return false;
+        snapshot.display_queue_entries[index] = callback;
+        seen_display_queue_entries[index] = true;
+    }
+    if (std::any_of(seen_display_queue_entries.begin(), seen_display_queue_entries.end(), [](const bool value) { return !value; }))
+        return false;
+
+    snapshot.display_queue_waiters.resize(display_queue_waiter_count);
+    std::vector<bool> seen_display_queue_waiters(display_queue_waiter_count, false);
+    for (const auto &[key, value] : values) {
+        uint32_t index = 0;
+        if (!quick_state_parse_gxm_display_queue_waiter_key(key, index))
+            continue;
+        if (index >= display_queue_waiter_count)
+            return false;
+
+        SceUID thread_id = 0;
+        if (!quick_state_parse_gxm_display_queue_waiter_snapshot(value, thread_id))
+            return false;
+        snapshot.display_queue_waiters[index] = thread_id;
+        seen_display_queue_waiters[index] = true;
+    }
+    if (std::any_of(seen_display_queue_waiters.begin(), seen_display_queue_waiters.end(), [](const bool value) { return !value; }))
+        return false;
+
+    snapshot.pending_display_callbacks.resize(pending_display_callback_count);
+    std::vector<bool> seen_pending_display_callbacks(pending_display_callback_count, false);
+    for (const auto &[key, value] : values) {
+        uint32_t index = 0;
+        if (!quick_state_parse_gxm_pending_display_callback_key(key, index))
+            continue;
+        if (index >= pending_display_callback_count)
+            return false;
+
+        QuickStateGxmPendingDisplayCallbackSnapshot pending;
+        if (!quick_state_parse_gxm_pending_display_callback_snapshot(value, pending))
+            return false;
+        snapshot.pending_display_callbacks[index] = pending;
+        seen_pending_display_callbacks[index] = true;
+    }
+    if (std::any_of(seen_pending_display_callbacks.begin(), seen_pending_display_callbacks.end(), [](const bool value) { return !value; }))
         return false;
 
     snapshot.notification_waits.resize(notification_wait_count);
@@ -4471,6 +4685,9 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     manifest.gxm_state_restorable = quick_state_parse_gxm_snapshot_section(slot, gxm_snapshot);
     if (manifest.gxm_state_restorable) {
         manifest.gxm_memory_maps = gxm_snapshot.memory_maps.size();
+        manifest.gxm_display_queue_entries = gxm_snapshot.display_queue_entries.size();
+        manifest.gxm_display_queue_waiters = gxm_snapshot.display_queue_waiters.size();
+        manifest.gxm_pending_display_callbacks = gxm_snapshot.pending_display_callbacks.size();
         manifest.gxm_notification_waits = gxm_snapshot.notification_waits.size();
     }
     manifest.gxm_program_host_state_restorable = quick_state_parse_gxm_program_host_snapshot_header(slot);
@@ -5923,6 +6140,53 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         text << "last_display_global=" << emuenv.gxm.last_display_global << "\n";
         text << "notification_region=0x" << std::hex << emuenv.gxm.notification_region.address() << std::dec << "\n";
         {
+            const std::vector<DisplayCallback> display_queue_entries = emuenv.gxm.display_queue.snapshot();
+            text << "display_queue_entries=" << display_queue_entries.size() << "\n";
+            for (size_t i = 0; i < display_queue_entries.size(); i++) {
+                const auto &callback = display_queue_entries[i];
+                text << "display_queue." << i
+                     << "=data=0x" << std::hex << callback.data
+                     << ";old_sync=0x" << callback.old_sync.address()
+                     << ";new_sync=0x" << callback.new_sync.address()
+                     << std::dec
+                     << ";old_ts=" << callback.old_sync_timestamp
+                     << ";new_ts=" << callback.new_sync_timestamp
+                     << ";frame_predicted=" << callback.frame_predicted
+                     << "\n";
+            }
+        }
+        {
+            const std::lock_guard<std::mutex> display_queue_lock(emuenv.gxm.display_queue_waiters_mutex);
+            text << "display_queue_waiters=" << emuenv.gxm.display_queue_waiters.size() << "\n";
+            for (size_t i = 0; i < emuenv.gxm.display_queue_waiters.size(); i++)
+                text << "display_queue_waiter." << i << "=thread=" << emuenv.gxm.display_queue_waiters[i] << "\n";
+
+            text << "pending_display_callbacks=" << emuenv.gxm.pending_display_callbacks.size() << "\n";
+            for (size_t i = 0; i < emuenv.gxm.pending_display_callbacks.size(); i++) {
+                const auto &pending = emuenv.gxm.pending_display_callbacks[i];
+                const auto &callback = pending.callback;
+                text << "pending_display_callback." << i
+                     << "=thread=" << pending.thread_id
+                     << ";data=0x" << std::hex << callback.data
+                     << ";old_sync=0x" << callback.old_sync.address()
+                     << ";new_sync=0x" << callback.new_sync.address()
+                     << std::dec
+                     << ";old_ts=" << callback.old_sync_timestamp
+                     << ";new_ts=" << callback.new_sync_timestamp
+                     << ";frame_predicted=" << callback.frame_predicted
+                     << ";frame_valid=" << static_cast<bool>(pending.frame)
+                     << ";wait_until_empty_after_push=" << pending.wait_until_empty_after_push;
+                if (pending.frame) {
+                    text << ";frame_base=0x" << std::hex << pending.frame->base.address() << std::dec
+                         << ";frame_pitch=" << pending.frame->pitch
+                         << ";frame_format=" << pending.frame->pixelformat
+                         << ";frame_width=" << pending.frame->image_size.x
+                         << ";frame_height=" << pending.frame->image_size.y;
+                }
+                text << "\n";
+            }
+        }
+        {
             const std::lock_guard<std::mutex> notification_waits_lock(emuenv.gxm.notification_waits_mutex);
             text << "notification_waits=" << emuenv.gxm.notification_waits.size() << "\n";
             for (size_t i = 0; i < emuenv.gxm.notification_waits.size(); i++) {
@@ -7353,6 +7617,7 @@ static bool restore_quick_state_gxm_state(EmuEnvState &emuenv, const QuickStateS
     emuenv.gxm.params.displayQueueCallbackDataSize = snapshot.display_queue_callback_data_size;
     emuenv.gxm.params.parameterBufferSize = snapshot.parameter_buffer_size;
     emuenv.gxm.display_queue_thread = snapshot.display_queue_thread;
+    emuenv.gxm.display_queue.maxPendingCount_ = snapshot.display_queue_max_pending_count;
     emuenv.gxm.global_timestamp.store(snapshot.global_timestamp);
     emuenv.gxm.last_display_global = snapshot.last_display_global;
     emuenv.gxm.notification_region = Ptr<uint32_t>(snapshot.notification_region);
@@ -7388,6 +7653,173 @@ static DisplayFrameInfo quick_state_to_display_frame_info(const QuickStateDispla
     frame.pixelformat = snapshot.pixelformat;
     frame.image_size = { snapshot.width, snapshot.height };
     return frame;
+}
+
+static DisplayCallback quick_state_to_gxm_display_callback(const QuickStateGxmDisplayCallbackSnapshot &snapshot) {
+    return DisplayCallback{
+        .data = snapshot.data,
+        .old_sync = Ptr<SceGxmSyncObject>(snapshot.old_sync),
+        .new_sync = Ptr<SceGxmSyncObject>(snapshot.new_sync),
+        .old_sync_timestamp = snapshot.old_sync_timestamp,
+        .new_sync_timestamp = snapshot.new_sync_timestamp,
+        .frame_predicted = snapshot.frame_predicted,
+    };
+}
+
+static bool quick_state_validate_gxm_display_callback(EmuEnvState &emuenv, const QuickStateGxmDisplayCallbackSnapshot &snapshot, const char *kind) {
+    if (!Ptr<uint8_t>(snapshot.data).valid(emuenv.mem)) {
+        quick_state_last_restore_detail = fmt::format("{} display callback data 0x{:08X} is invalid", kind, snapshot.data);
+        return false;
+    }
+    if (!Ptr<SceGxmSyncObject>(snapshot.old_sync).valid(emuenv.mem)) {
+        quick_state_last_restore_detail = fmt::format("{} old sync object 0x{:08X} is invalid", kind, snapshot.old_sync);
+        return false;
+    }
+    if (!Ptr<SceGxmSyncObject>(snapshot.new_sync).valid(emuenv.mem)) {
+        quick_state_last_restore_detail = fmt::format("{} new sync object 0x{:08X} is invalid", kind, snapshot.new_sync);
+        return false;
+    }
+    return true;
+}
+
+static void quick_state_submit_display_queue_new_frame(EmuEnvState &emuenv, DisplayFrameInfo *frame) {
+    if (!emuenv.renderer)
+        return;
+    renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::NewFrame, false, frame, &emuenv.display);
+}
+
+static void quick_state_complete_restored_display_queue_waiters(EmuEnvState &emuenv) {
+    if (!emuenv.gxm.display_queue.empty())
+        return;
+
+    std::vector<SceUID> waiters;
+    {
+        const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
+        if (!emuenv.gxm.pending_display_callbacks.empty())
+            return;
+        waiters.swap(emuenv.gxm.display_queue_waiters);
+    }
+
+    for (const SceUID waiter_id : waiters) {
+        const ThreadStatePtr waiter = emuenv.kernel.get_thread(waiter_id);
+        if (waiter)
+            waiter->complete_deferred_import_wait(0);
+    }
+}
+
+static void quick_state_pump_restored_display_queue_add_entries(EmuEnvState &emuenv) {
+    while (true) {
+        PendingDisplayCallback pending;
+        {
+            const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
+            if (emuenv.gxm.pending_display_callbacks.empty())
+                return;
+            pending = emuenv.gxm.pending_display_callbacks.front();
+        }
+
+        if (!emuenv.gxm.display_queue.try_push(pending.callback))
+            return;
+
+        {
+            const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
+            if (!emuenv.gxm.pending_display_callbacks.empty())
+                emuenv.gxm.pending_display_callbacks.pop_front();
+        }
+
+        quick_state_submit_display_queue_new_frame(emuenv, pending.frame);
+
+        if (pending.wait_until_empty_after_push) {
+            {
+                const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
+                emuenv.gxm.display_queue_waiters.push_back(pending.thread_id);
+            }
+            quick_state_complete_restored_display_queue_waiters(emuenv);
+            continue;
+        }
+
+        const ThreadStatePtr waiter = emuenv.kernel.get_thread(pending.thread_id);
+        if (waiter)
+            waiter->complete_deferred_import_wait(0);
+    }
+}
+
+static bool restore_quick_state_gxm_display_queue_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    QuickStateGxmSnapshot snapshot;
+    if (!quick_state_parse_gxm_snapshot_section(slot, snapshot)) {
+        quick_state_last_restore_detail = "GXM display queue snapshot is missing or invalid";
+        return false;
+    }
+
+    if (snapshot.display_queue_entries.size() > emuenv.gxm.display_queue.maxPendingCount_) {
+        quick_state_last_restore_detail = fmt::format("GXM display queue snapshot has {} entries but max pending count is {}",
+            snapshot.display_queue_entries.size(),
+            emuenv.gxm.display_queue.maxPendingCount_);
+        return false;
+    }
+
+    std::vector<DisplayCallback> display_queue_entries;
+    display_queue_entries.reserve(snapshot.display_queue_entries.size());
+    for (const QuickStateGxmDisplayCallbackSnapshot &saved_callback : snapshot.display_queue_entries) {
+        if (!quick_state_validate_gxm_display_callback(emuenv, saved_callback, "queued"))
+            return false;
+        display_queue_entries.push_back(quick_state_to_gxm_display_callback(saved_callback));
+    }
+
+    std::deque<PendingDisplayCallback> pending_callbacks;
+    for (const QuickStateGxmPendingDisplayCallbackSnapshot &saved_pending : snapshot.pending_display_callbacks) {
+        if (!quick_state_validate_gxm_display_callback(emuenv, saved_pending.callback, "pending"))
+            return false;
+
+        ThreadStatePtr thread = emuenv.kernel.get_thread(saved_pending.thread_id);
+        if (!thread) {
+            quick_state_last_restore_detail = fmt::format("GXM pending display callback thread {} was not matched", saved_pending.thread_id);
+            return false;
+        }
+        thread->restore_deferred_import_wait();
+
+        PendingDisplayCallback pending;
+        pending.thread_id = saved_pending.thread_id;
+        pending.callback = quick_state_to_gxm_display_callback(saved_pending.callback);
+        pending.wait_until_empty_after_push = saved_pending.wait_until_empty_after_push;
+        if (saved_pending.frame_valid) {
+            pending.owned_frame = quick_state_to_display_frame_info(saved_pending.frame);
+            pending.frame = &*pending.owned_frame;
+        }
+        pending_callbacks.push_back(std::move(pending));
+    }
+
+    std::vector<SceUID> display_queue_waiters;
+    display_queue_waiters.reserve(snapshot.display_queue_waiters.size());
+    for (const SceUID waiter_id : snapshot.display_queue_waiters) {
+        ThreadStatePtr waiter = emuenv.kernel.get_thread(waiter_id);
+        if (!waiter) {
+            quick_state_last_restore_detail = fmt::format("GXM display queue waiter thread {} was not matched", waiter_id);
+            return false;
+        }
+        waiter->restore_deferred_import_wait();
+        if (!display_queue_entries.empty() || !pending_callbacks.empty())
+            display_queue_waiters.push_back(waiter_id);
+        else
+            waiter->complete_deferred_import_wait(0);
+    }
+
+    {
+        const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
+        emuenv.gxm.pending_display_callbacks = std::move(pending_callbacks);
+        emuenv.gxm.display_queue_waiters = std::move(display_queue_waiters);
+    }
+    emuenv.gxm.display_queue.replace(display_queue_entries);
+    if (display_queue_entries.empty()) {
+        quick_state_pump_restored_display_queue_add_entries(emuenv);
+        quick_state_complete_restored_display_queue_waiters(emuenv);
+    }
+
+    LOG_INFO("Restored GXM display queue snapshot for {} (queued={}, waiters={}, pending={}).",
+        slot.title_id,
+        snapshot.display_queue_entries.size(),
+        snapshot.display_queue_waiters.size(),
+        snapshot.pending_display_callbacks.size());
+    return true;
 }
 
 static bool restore_quick_state_display_state(EmuEnvState &emuenv, const QuickStateSlot &slot, const std::vector<ThreadStatePtr> &matched_threads, const bool allow_live_host_state) {
@@ -8122,6 +8554,11 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
     }
 
     reset_quick_state_runtime_render_state(emuenv);
+    if (!allow_live_host_state && !restore_quick_state_gxm_display_queue_state(emuenv, slot)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "GXM display queue restore failed";
+        return fail_quick_state_restore();
+    }
     emuenv.kernel.invalidate_jit_cache(0, std::numeric_limits<Address>::max());
     resume_after_quick_state(emuenv, already_paused);
 
@@ -8260,6 +8697,9 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "Display vblank callbacks: " << manifest.display_callback_entries << "\n";
     marker << "GXM host-state restore layer: " << (manifest.gxm_state_restorable ? "ready" : "missing") << "\n";
     marker << "GXM memory maps: " << manifest.gxm_memory_maps << "\n";
+    marker << "GXM display queue entries: " << manifest.gxm_display_queue_entries << "\n";
+    marker << "GXM display queue waiters: " << manifest.gxm_display_queue_waiters << "\n";
+    marker << "GXM pending display callbacks: " << manifest.gxm_pending_display_callbacks << "\n";
     marker << "GXM notification waits: " << manifest.gxm_notification_waits << "\n";
     marker << "GXM shader program host-state restore layer: " << (manifest.gxm_program_host_state_restorable ? "ready" : "missing") << "\n";
     marker << "Audio scalar restore layer: " << (manifest.audio_state_restorable ? "ready" : "missing") << "\n";
@@ -8342,6 +8782,9 @@ static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickSta
     marker << "Display vblank wait restore layer: " << (manifest.display_vblank_waits_restorable ? "ready" : "missing") << "\n";
     marker << "GXM host-state restore layer: " << (manifest.gxm_state_restorable ? "ready" : "missing") << "\n";
     marker << "GXM memory maps: " << manifest.gxm_memory_maps << "\n";
+    marker << "GXM display queue entries: " << manifest.gxm_display_queue_entries << "\n";
+    marker << "GXM display queue waiters: " << manifest.gxm_display_queue_waiters << "\n";
+    marker << "GXM pending display callbacks: " << manifest.gxm_pending_display_callbacks << "\n";
     marker << "GXM notification waits: " << manifest.gxm_notification_waits << "\n";
     marker << "GXM shader program host-state restore layer: " << (manifest.gxm_program_host_state_restorable ? "ready" : "missing") << "\n";
     marker << "Audio scalar restore layer: " << (manifest.audio_state_restorable ? "ready" : "missing") << "\n";

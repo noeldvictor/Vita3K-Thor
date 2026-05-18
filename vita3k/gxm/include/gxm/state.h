@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <display/state.h>
 #include <gxm/types.h>
 #include <mem/ptr.h>
 #include <threads/queue.h>
@@ -25,9 +26,9 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <optional>
+#include <utility>
 #include <vector>
-
-struct DisplayFrameInfo;
 
 struct SceGxmInitializeParams {
     uint32_t flags = 0;
@@ -50,7 +51,58 @@ struct PendingDisplayCallback {
     SceUID thread_id = 0;
     DisplayCallback callback;
     DisplayFrameInfo *frame = nullptr;
+    std::optional<DisplayFrameInfo> owned_frame;
     bool wait_until_empty_after_push = false;
+
+    PendingDisplayCallback() = default;
+
+    PendingDisplayCallback(const PendingDisplayCallback &other)
+        : thread_id(other.thread_id)
+        , callback(other.callback)
+        , frame(other.frame)
+        , owned_frame(other.owned_frame)
+        , wait_until_empty_after_push(other.wait_until_empty_after_push) {
+        if (owned_frame)
+            frame = &*owned_frame;
+    }
+
+    PendingDisplayCallback &operator=(const PendingDisplayCallback &other) {
+        if (this == &other)
+            return *this;
+
+        thread_id = other.thread_id;
+        callback = other.callback;
+        frame = other.frame;
+        owned_frame = other.owned_frame;
+        wait_until_empty_after_push = other.wait_until_empty_after_push;
+        if (owned_frame)
+            frame = &*owned_frame;
+        return *this;
+    }
+
+    PendingDisplayCallback(PendingDisplayCallback &&other) noexcept
+        : thread_id(other.thread_id)
+        , callback(other.callback)
+        , frame(other.frame)
+        , owned_frame(std::move(other.owned_frame))
+        , wait_until_empty_after_push(other.wait_until_empty_after_push) {
+        if (owned_frame)
+            frame = &*owned_frame;
+    }
+
+    PendingDisplayCallback &operator=(PendingDisplayCallback &&other) noexcept {
+        if (this == &other)
+            return *this;
+
+        thread_id = other.thread_id;
+        callback = other.callback;
+        frame = other.frame;
+        owned_frame = std::move(other.owned_frame);
+        wait_until_empty_after_push = other.wait_until_empty_after_push;
+        if (owned_frame)
+            frame = &*owned_frame;
+        return *this;
+    }
 };
 
 struct GxmNotificationWait {

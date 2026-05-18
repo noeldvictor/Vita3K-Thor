@@ -24,6 +24,7 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <vector>
 
 template <typename T>
 class Queue {
@@ -124,6 +125,31 @@ public:
             std::unique_lock<std::mutex> mlock(mutex_);
             std::queue<T> empty;
             std::swap(queue_, empty);
+            aborted = false;
+        }
+        condempty_.notify_all();
+        cond_.notify_all();
+    }
+
+    std::vector<T> snapshot() {
+        std::unique_lock<std::mutex> mlock(mutex_);
+        std::vector<T> items;
+        items.reserve(queue_.size());
+        std::queue<T> copy = queue_;
+        while (!copy.empty()) {
+            items.push_back(copy.front());
+            copy.pop();
+        }
+        return items;
+    }
+
+    void replace(const std::vector<T> &items) {
+        {
+            std::unique_lock<std::mutex> mlock(mutex_);
+            std::queue<T> empty;
+            std::swap(queue_, empty);
+            for (const T &item : items)
+                queue_.push(item);
             aborted = false;
         }
         condempty_.notify_all();

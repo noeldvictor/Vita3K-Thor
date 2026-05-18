@@ -973,13 +973,14 @@ static bool defer_display_queue_full_push(EmuEnvState &emuenv, const SceUID thre
     if (!thread || !thread->begin_deferred_import_wait())
         return false;
 
+    PendingDisplayCallback pending;
+    pending.thread_id = thread_id;
+    pending.callback = display_callback;
+    pending.frame = frame;
+    pending.wait_until_empty_after_push = emuenv.gxm.params.displayQueueMaxPendingCount == 1;
+
     const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
-    emuenv.gxm.pending_display_callbacks.push_back({
-        .thread_id = thread_id,
-        .callback = display_callback,
-        .frame = frame,
-        .wait_until_empty_after_push = emuenv.gxm.params.displayQueueMaxPendingCount == 1
-    });
+    emuenv.gxm.pending_display_callbacks.push_back(std::move(pending));
     return true;
 }
 
