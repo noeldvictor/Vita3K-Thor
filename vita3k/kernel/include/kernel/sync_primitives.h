@@ -248,6 +248,7 @@ SceUID rwlock_create(KernelState &kernel, MemState &mem, const char *export_name
 SceInt32 rwlock_lock(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID lock_id, uint32_t *timeout, bool is_write);
 SceInt32 rwlock_unlock(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID lock_id, bool is_write);
 SceInt32 rwlock_delete(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID lock_id);
+void rwlock_schedule_deferred_timeout(const KernelState &kernel, const RWLockPtr &rwlock, const ThreadStatePtr &thread, SceUInt32 timeout_value);
 
 // Semaphore
 SceUID semaphore_create(KernelState &kernel, const char *export_name, const char *name, SceUID thread_id, SceUInt attr, int init_val, int max_val);

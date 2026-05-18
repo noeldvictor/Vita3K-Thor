@@ -4459,6 +4459,8 @@ static bool quick_state_wait_queue_entry_restorable_without_live_host(const Quic
             return true;
         if (entry.kind == "timer")
             return true;
+        if (entry.kind == "rwlock")
+            return true;
         if (entry.kind == "eventflag")
             return true;
         if (entry.kind == "msgpipe_sender" || entry.kind == "msgpipe_receiver")
@@ -6069,6 +6071,49 @@ static bool quick_state_restore_deferred_timer_waits(EmuEnvState &emuenv, const 
     return true;
 }
 
+static bool quick_state_restore_deferred_rwlock_waits(EmuEnvState &emuenv, const QuickStateSyncSnapshot &snapshot, const std::map<SceUID, ThreadStatePtr> &threads_by_saved_id, const SceUID uid, const QuickStateSyncRWLock &saved_rwlock, const RWLockPtr &rwlock) {
+    if (saved_rwlock.waiting_count == 0)
+        return true;
+    if (!quick_state_wait_queue_entries_all_deferred(snapshot, "rwlock", uid, saved_rwlock.waiting_count))
+        return true;
+
+    if (!quick_state_wait_queue_contains_only_deferred_current_waiters(rwlock->waiting_threads)) {
+        quick_state_last_restore_detail = fmt::format("rwlock {} has non-deferred current waiters", uid);
+        return false;
+    }
+
+    quick_state_clear_wait_queue(rwlock->waiting_threads);
+    for (uint32_t index = 0; index < saved_rwlock.waiting_count; index++) {
+        const QuickStateSyncWaitQueueEntry *entry = quick_state_find_wait_queue_entry(snapshot, "rwlock", uid, index);
+        if (!entry)
+            return false;
+
+        const auto thread = threads_by_saved_id.find(entry->thread_id);
+        if (thread == threads_by_saved_id.end() || !thread->second) {
+            quick_state_last_restore_detail = fmt::format("rwlock {} waiter thread {} was not matched", uid, entry->thread_id);
+            return false;
+        }
+
+        WaitingThreadData data;
+        data.thread = thread->second;
+        data.priority = entry->priority;
+        data.is_write = entry->is_write;
+        data.timeout_value = entry->timeout_value;
+        data.timeout_start_host_us = quick_state_host_time_us();
+        data.deferred_import_wait = true;
+        if (!quick_state_restore_u32_pointer(emuenv.mem, entry->timeout, data.timeout)) {
+            quick_state_last_restore_detail = fmt::format("rwlock {} waiter {} timeout pointer 0x{:X} is invalid", uid, index, entry->timeout);
+            return false;
+        }
+
+        thread->second->restore_deferred_import_wait();
+        rwlock->waiting_threads->push(data);
+        if (data.timeout && data.timeout_value > 0)
+            rwlock_schedule_deferred_timeout(emuenv.kernel, rwlock, thread->second, data.timeout_value);
+    }
+    return true;
+}
+
 static bool quick_state_restore_deferred_eventflag_waits(EmuEnvState &emuenv, const QuickStateSyncSnapshot &snapshot, const std::map<SceUID, ThreadStatePtr> &threads_by_saved_id, const SceUID uid, const QuickStateSyncEventFlag &saved_eventflag, const EventFlagPtr &eventflag) {
     if (saved_eventflag.waiting_count == 0)
         return true;
@@ -6669,8 +6714,11 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
             return false;
         }
         const std::lock_guard<std::mutex> rwlock_lock(current->second->mutex);
+        const bool rebuild_deferred_waiters = saved_rwlock.waiting_count > 0
+            && quick_state_wait_queue_entries_all_deferred(snapshot, "rwlock", uid, saved_rwlock.waiting_count);
         if (!quick_state_sync_identity_matches(*current->second, saved_rwlock.name, saved_rwlock.attr)
-            || quick_state_waiting_count(current->second->waiting_threads) != saved_rwlock.waiting_count) {
+            || (!rebuild_deferred_waiters && quick_state_waiting_count(current->second->waiting_threads) != saved_rwlock.waiting_count)
+            || (rebuild_deferred_waiters && !quick_state_wait_queue_contains_only_deferred_current_waiters(current->second->waiting_threads))) {
             LOG_WARN("Refused sync primitive restore for {} because rwlock {} does not match the saved identity.", slot.title_id, uid);
             quick_state_last_restore_detail = fmt::format("rwlock {} does not match the saved identity", uid);
             return false;
@@ -6813,6 +6861,8 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
         rwlock->owners.clear();
         for (const auto &[owner_id, count] : saved_rwlock.owners)
             rwlock->owners[threads_by_saved_id.at(owner_id)] = count;
+        if (!quick_state_restore_deferred_rwlock_waits(emuenv, snapshot, threads_by_saved_id, uid, saved_rwlock, rwlock))
+            return false;
     }
 
     for (const auto &[uid, saved_msgpipe] : snapshot.msgpipes) {

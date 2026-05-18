@@ -257,6 +257,28 @@ void simple_event_schedule_deferred_timeout(const KernelState &kernel, const Sim
     }).detach();
 }
 
+void rwlock_schedule_deferred_timeout(const KernelState &kernel, const RWLockPtr &rwlock, const ThreadStatePtr &thread, const SceUInt32 timeout_value) {
+    std::thread([&kernel, rwlock, thread, timeout_value]() {
+        std::this_thread::sleep_for(std::chrono::microseconds{ kernel_speed_to_host_us(kernel, timeout_value) });
+
+        const std::lock_guard<std::mutex> rwlock_lock(rwlock->mutex);
+        auto data_it = rwlock->waiting_threads->find(thread);
+        if (data_it == rwlock->waiting_threads->end())
+            return;
+
+        const WaitingThreadData data = *data_it;
+        if (!data.deferred_import_wait || !data.timeout)
+            return;
+
+        if (remaining_timeout_us(kernel, data) > 0)
+            return;
+
+        *data.timeout = 0;
+        rwlock->waiting_threads->erase(data_it);
+        thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_TIMEOUT));
+    }).detach();
+}
+
 inline static int handle_timeout(const KernelState &kernel, const ThreadStatePtr &thread, std::unique_lock<std::mutex> &thread_lock,
     std::unique_lock<std::mutex> &primitive_lock, WaitingThreadQueuePtr &queue,
     const ThreadDataQueueInterator<WaitingThreadData> &data_it, const char *export_name,
@@ -1162,14 +1184,26 @@ SceInt32 rwlock_lock(KernelState &kernel, MemState &mem, const char *export_name
     } else {
         // we need to wait
 
-        std::unique_lock<std::mutex> thread_lock(thread->mutex);
-        thread->update_status(ThreadStatus::wait, ThreadStatus::run);
-
         WaitingThreadData data;
         data.thread = thread;
         data.is_write = is_write;
         data.priority = thread->priority;
         capture_wait_timeout(data, timeout);
+        capture_wait_timeout_start(data);
+
+        if (timeout && *timeout == 0)
+            return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+
+        if (thread->begin_deferred_import_wait()) {
+            data.deferred_import_wait = true;
+            rwlock->waiting_threads->push(data);
+            if (timeout)
+                rwlock_schedule_deferred_timeout(kernel, rwlock, thread, data.timeout_value);
+            return SCE_KERNEL_OK;
+        }
+
+        std::unique_lock<std::mutex> thread_lock(thread->mutex);
+        thread->update_status(ThreadStatus::wait, ThreadStatus::run);
 
         const auto data_it = rwlock->waiting_threads->push(data);
         thread_lock.unlock();
@@ -1211,7 +1245,7 @@ SceInt32 rwlock_unlock(KernelState &kernel, MemState &mem, const char *export_na
 
     if (!rwlock->waiting_threads->empty()) {
         for (auto it = rwlock->waiting_threads->begin(); it != rwlock->waiting_threads->end();) {
-            const auto &waiting_thread_data = *it;
+            const auto waiting_thread_data = *it;
             const auto waiting_thread = waiting_thread_data.thread;
             const auto waiting_is_write = waiting_thread_data.is_write;
 
@@ -1225,9 +1259,14 @@ SceInt32 rwlock_unlock(KernelState &kernel, MemState &mem, const char *export_na
             ++it;
             rwlock->waiting_threads->erase(old_it);
 
-            const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
-            waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
             rwlock->owners.emplace(waiting_thread, 1);
+            if (waiting_thread_data.timeout)
+                *waiting_thread_data.timeout = remaining_timeout_us(kernel, waiting_thread_data);
+
+            if (!waiting_thread->complete_deferred_import_wait(SCE_KERNEL_OK)) {
+                const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
+                waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+            }
 
             if (waiting_is_write) {
                 rwlock->state = RWLockState::WriteLocked;
