@@ -90,6 +90,12 @@ KernelState::KernelState()
     : debugger(*this) {
 }
 
+static uint64_t deferred_wait_host_time_us() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::high_resolution_clock::now().time_since_epoch())
+        .count();
+}
+
 KernelState::~KernelState() {
     stop_deferred_wait_worker();
 }
@@ -126,7 +132,28 @@ void KernelState::schedule_deferred_wait_timeout(const uint64_t timeout_guest_us
         return;
 
     DeferredWaitTimeout timeout;
-    timeout.due_guest_process_us = get_process_time() + timeout_guest_us;
+    timeout.clock = DeferredWaitTimeout::Clock::GuestProcess;
+    timeout.due_us = get_process_time() + timeout_guest_us;
+    timeout.action = std::move(action);
+
+    {
+        std::lock_guard<std::mutex> lock(deferred_wait_mutex);
+        if (deferred_wait_stop)
+            return;
+
+        timeout.sequence = deferred_wait_sequence++;
+        deferred_wait_timeouts.push_back(std::move(timeout));
+    }
+    deferred_wait_cond.notify_all();
+}
+
+void KernelState::schedule_deferred_host_timeout(const uint64_t timeout_host_us, std::function<void()> action) {
+    if (!action)
+        return;
+
+    DeferredWaitTimeout timeout;
+    timeout.clock = DeferredWaitTimeout::Clock::Host;
+    timeout.due_us = deferred_wait_host_time_us() + timeout_host_us;
     timeout.action = std::move(action);
 
     {
@@ -157,9 +184,11 @@ void KernelState::run_deferred_wait_worker() {
         }
 
         const uint64_t now_guest_us = get_process_time();
+        const uint64_t now_host_us = deferred_wait_host_time_us();
         std::vector<std::function<void()>> due_actions;
         for (auto it = deferred_wait_timeouts.begin(); it != deferred_wait_timeouts.end();) {
-            if (it->due_guest_process_us <= now_guest_us) {
+            const uint64_t now_us = it->clock == DeferredWaitTimeout::Clock::Host ? now_host_us : now_guest_us;
+            if (it->due_us <= now_us) {
                 due_actions.push_back(std::move(it->action));
                 it = deferred_wait_timeouts.erase(it);
             } else {
@@ -177,19 +206,19 @@ void KernelState::run_deferred_wait_worker() {
             continue;
         }
 
-        const auto next_timeout = std::min_element(
-            deferred_wait_timeouts.begin(), deferred_wait_timeouts.end(),
-            [](const DeferredWaitTimeout &lhs, const DeferredWaitTimeout &rhs) {
-                if (lhs.due_guest_process_us != rhs.due_guest_process_us)
-                    return lhs.due_guest_process_us < rhs.due_guest_process_us;
-                return lhs.sequence < rhs.sequence;
-            });
-        if (next_timeout == deferred_wait_timeouts.end())
-            continue;
-
-        const uint64_t guest_delta_us = next_timeout->due_guest_process_us > now_guest_us ? next_timeout->due_guest_process_us - now_guest_us : 1;
         const uint64_t speed = std::max<uint32_t>(speed_percent.load(), 1);
-        const uint64_t host_wait_us = std::clamp<uint64_t>((guest_delta_us * 100) / speed, 1, 1000000);
+        uint64_t host_wait_us = 1000000;
+        for (const DeferredWaitTimeout &timeout : deferred_wait_timeouts) {
+            uint64_t candidate_host_wait_us = 1;
+            if (timeout.clock == DeferredWaitTimeout::Clock::Host) {
+                candidate_host_wait_us = timeout.due_us > now_host_us ? timeout.due_us - now_host_us : 1;
+            } else {
+                const uint64_t guest_delta_us = timeout.due_us > now_guest_us ? timeout.due_us - now_guest_us : 1;
+                candidate_host_wait_us = std::max<uint64_t>(1, (guest_delta_us * 100) / speed);
+            }
+            host_wait_us = std::min(host_wait_us, candidate_host_wait_us);
+        }
+        host_wait_us = std::clamp<uint64_t>(host_wait_us, 1, 1000000);
         deferred_wait_cond.wait_for(lock, std::chrono::microseconds(host_wait_us));
     }
 

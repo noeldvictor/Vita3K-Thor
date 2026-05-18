@@ -599,14 +599,6 @@ SceUID timer_find(KernelState &kernel, const char *export_name, const char *pNam
     return RET_ERROR(SCE_KERNEL_ERROR_UID_CANNOT_FIND_BY_NAME);
 }
 
-static void timer_schedule_event(KernelState &kernel, TimerPtr &timer) {
-    uint64_t curr_time = get_current_time();
-    timer->next_event = curr_time + kernel_speed_to_host_us(kernel, timer->event_interval);
-
-    timer->condvar.notify_all();
-    timer_schedule_deferred_event(kernel, timer);
-}
-
 static void timer_set_next_event_after_wait_locked(const KernelState &kernel, const TimerPtr &timer, const uint64_t current_time) {
     if (timer->is_repeat) {
         const uint64_t host_interval = kernel_speed_to_host_us(kernel, timer->event_interval);
@@ -616,63 +608,83 @@ static void timer_set_next_event_after_wait_locked(const KernelState &kernel, co
     }
 }
 
-void timer_schedule_deferred_event(const KernelState &kernel, const TimerPtr &timer) {
-    std::thread([&kernel, timer]() {
-        while (true) {
-            uint64_t sleep_us = 0;
-            {
-                const std::lock_guard<std::mutex> timer_lock(timer->mutex);
-                if (!timer->is_started || timer->waiting_threads->empty())
-                    return;
-                if (!timer->event_set && timer->next_event == std::numeric_limits<uint64_t>::max())
-                    return;
+static void timer_schedule_deferred_event_for_generation_locked(KernelState &kernel, const TimerPtr &timer, const uint64_t generation);
 
-                const uint64_t now = get_current_time();
-                if (!timer->event_set && timer->next_event > now) {
-                    sleep_us = timer->next_event - now;
-                }
-            }
+static void timer_deferred_event_tick(KernelState &kernel, const TimerPtr &timer, const uint64_t generation) {
+    while (true) {
+        const std::lock_guard<std::mutex> timer_lock(timer->mutex);
+        if (timer->deferred_event_generation != generation)
+            return;
+        if (!timer->is_started || timer->waiting_threads->empty())
+            return;
+        if (!timer->event_set && timer->next_event == std::numeric_limits<uint64_t>::max())
+            return;
 
-            if (sleep_us > 0)
-                std::this_thread::sleep_for(std::chrono::microseconds{ sleep_us });
-
-            const std::lock_guard<std::mutex> timer_lock(timer->mutex);
-            if (!timer->is_started || timer->waiting_threads->empty())
-                return;
-
-            uint64_t current_time = get_current_time();
-            if (!timer->event_set && timer->next_event >= current_time)
-                continue;
-
-            if (!timer->event_set && timer->next_event < current_time && !timer->is_pulse)
-                timer->event_set = true;
-
-            auto it = timer->waiting_threads->begin();
-            const WaitingThreadData data = *it;
-            if (!data.thread) {
-                timer->waiting_threads->erase(it);
-                continue;
-            }
-            if (!data.deferred_import_wait) {
-                timer->condvar.notify_all();
-                return;
-            }
-
-            if (data.result_pattern)
-                *data.result_pattern = SCE_KERNEL_EVENT_TIMER;
-            if (data.user_data)
-                *data.user_data = 0;
-            if (data.timeout)
-                *data.timeout = remaining_timeout_us(kernel, data);
-
-            timer->waiting_threads->erase(it);
-            data.thread->complete_deferred_import_wait(SCE_KERNEL_OK);
-
-            timer->event_set = !timer->is_pulse && !(timer->attr & SCE_KERNEL_EVENT_ATTR_AUTO_RESET);
-            timer_set_next_event_after_wait_locked(kernel, timer, current_time);
-            timer->condvar.notify_all();
+        const uint64_t current_time = get_current_time();
+        if (!timer->event_set && timer->next_event >= current_time) {
+            timer_schedule_deferred_event_for_generation_locked(kernel, timer, generation);
+            return;
         }
-    }).detach();
+
+        if (!timer->event_set && timer->next_event < current_time && !timer->is_pulse)
+            timer->event_set = true;
+
+        auto it = timer->waiting_threads->begin();
+        const WaitingThreadData data = *it;
+        if (!data.thread) {
+            timer->waiting_threads->erase(it);
+            continue;
+        }
+        if (!data.deferred_import_wait) {
+            timer->condvar.notify_all();
+            return;
+        }
+
+        if (data.result_pattern)
+            *data.result_pattern = SCE_KERNEL_EVENT_TIMER;
+        if (data.user_data)
+            *data.user_data = 0;
+        if (data.timeout)
+            *data.timeout = remaining_timeout_us(kernel, data);
+
+        timer->waiting_threads->erase(it);
+        data.thread->complete_deferred_import_wait(SCE_KERNEL_OK);
+
+        timer->event_set = !timer->is_pulse && !(timer->attr & SCE_KERNEL_EVENT_ATTR_AUTO_RESET);
+        timer_set_next_event_after_wait_locked(kernel, timer, current_time);
+        timer->condvar.notify_all();
+    }
+}
+
+static void timer_schedule_deferred_event_for_generation_locked(KernelState &kernel, const TimerPtr &timer, const uint64_t generation) {
+    if (!timer->is_started || timer->waiting_threads->empty())
+        return;
+    if (!timer->event_set && timer->next_event == std::numeric_limits<uint64_t>::max())
+        return;
+
+    const uint64_t now = get_current_time();
+    const uint64_t sleep_us = (!timer->event_set && timer->next_event > now) ? timer->next_event - now : 0;
+    kernel.schedule_deferred_host_timeout(sleep_us, [&kernel, timer, generation]() {
+        timer_deferred_event_tick(kernel, timer, generation);
+    });
+}
+
+static void timer_schedule_deferred_event_locked(KernelState &kernel, const TimerPtr &timer) {
+    timer->deferred_event_generation = kernel.next_wait_generation();
+    timer_schedule_deferred_event_for_generation_locked(kernel, timer, timer->deferred_event_generation);
+}
+
+void timer_schedule_deferred_event(KernelState &kernel, const TimerPtr &timer) {
+    const std::lock_guard<std::mutex> timer_lock(timer->mutex);
+    timer_schedule_deferred_event_locked(kernel, timer);
+}
+
+static void timer_schedule_event(KernelState &kernel, TimerPtr &timer) {
+    uint64_t curr_time = get_current_time();
+    timer->next_event = curr_time + kernel_speed_to_host_us(kernel, timer->event_interval);
+
+    timer->condvar.notify_all();
+    timer_schedule_deferred_event_locked(kernel, timer);
 }
 
 SceInt32 timer_set(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID timer_handle, SceUID type, SceKernelSysClock *interval, SceInt32 repeats) {
@@ -767,7 +779,7 @@ SceInt32 timer_waitorpoll(KernelState &kernel, const char *export_name, SceUID t
         if (thread->begin_deferred_import_wait()) {
             data.deferred_import_wait = true;
             timer->waiting_threads->push(data);
-            timer_schedule_deferred_event(kernel, timer);
+            timer_schedule_deferred_event_locked(kernel, timer);
             if (timeout)
                 timer_schedule_deferred_timeout(kernel, timer, thread, data.timeout_value, data.wait_generation);
             return SCE_KERNEL_OK;

@@ -177,6 +177,7 @@ struct KernelState {
     void reserve_uid_for_restore(SceUID uid);
     uint64_t next_wait_generation();
     void schedule_deferred_wait_timeout(uint64_t timeout_guest_us, std::function<void()> action);
+    void schedule_deferred_host_timeout(uint64_t timeout_host_us, std::function<void()> action);
     void clear_deferred_wait_timeouts();
 
     ThreadStatePtr get_thread(SceUID thread_id);
@@ -195,7 +196,13 @@ struct KernelState {
 
 private:
     struct DeferredWaitTimeout {
-        uint64_t due_guest_process_us = 0;
+        enum class Clock {
+            GuestProcess,
+            Host,
+        };
+
+        Clock clock = Clock::GuestProcess;
+        uint64_t due_us = 0;
         uint64_t sequence = 0;
         std::function<void()> action;
     };

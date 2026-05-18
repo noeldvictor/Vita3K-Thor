@@ -118,6 +118,7 @@ struct Timer : SyncPrimitive {
     uint64_t time = 0;
     uint64_t next_event;
     uint64_t event_interval = 0;
+    uint64_t deferred_event_generation = 0;
 };
 
 typedef std::shared_ptr<Timer> TimerPtr;
@@ -232,7 +233,7 @@ SceInt32 timer_clear(KernelState &kernel, const char *export_name, SceUID thread
 SceInt32 timer_set(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID timer_handle, SceUID type, SceKernelSysClock *interval, SceInt32 repeats);
 SceInt32 timer_start(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID timer_handle);
 SceInt32 timer_stop(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID timer_handle);
-void timer_schedule_deferred_event(const KernelState &kernel, const TimerPtr &timer);
+void timer_schedule_deferred_event(KernelState &kernel, const TimerPtr &timer);
 void timer_schedule_deferred_timeout(KernelState &kernel, const TimerPtr &timer, const ThreadStatePtr &thread, SceUInt32 timeout_value, uint64_t wait_generation);
 
 // Mutex
