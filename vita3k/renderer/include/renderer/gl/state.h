@@ -46,6 +46,7 @@ struct GLState : public renderer::State {
     TextureCache *get_texture_cache() override {
         return &texture_cache;
     }
+    void reset_runtime_cache() override;
 
     void render_frame(const SceFVector2 &viewport_pos, const SceFVector2 &viewport_size, DisplayState &display,
         const GxmState &gxm, MemState &mem) override;

@@ -28,6 +28,16 @@ static constexpr std::uint64_t CASTED_UNUSED_TEXTURE_PURGE_SECS = 40;
 
 GLSurfaceCache::GLSurfaceCache() = default;
 
+void GLSurfaceCache::reset_runtime_cache() {
+    color_surface_textures.clear();
+    framebuffer_array.clear();
+    last_use_color_surface_index.clear();
+    last_use_depth_stencil_surface_index.clear();
+    for (GLDepthStencilSurfaceCacheInfo &surface : depth_stencil_textures)
+        surface.flags = GLSurfaceCacheInfo::FLAG_FREE;
+    typeless_copy_buffer_size = 0;
+}
+
 void GLSurfaceCache::do_typeless_copy(const GLuint dest_texture, const GLuint source_texture, const GLenum dest_internal,
     const GLenum dest_upload_format, const GLenum dest_type, const GLenum source_format, const GLenum source_type, const int offset_x,
     const int offset_y, const int width, const int height, const int dest_width, const int dest_height, const std::size_t total_source_size) {

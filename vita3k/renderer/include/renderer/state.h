@@ -104,6 +104,7 @@ struct State {
     virtual void late_init(const Config &cfg, const std::string_view game_id, MemState &mem) = 0;
 
     virtual TextureCache *get_texture_cache() = 0;
+    virtual void reset_runtime_cache() = 0;
 
     virtual void render_frame(const SceFVector2 &viewport_pos, const SceFVector2 &viewport_size, DisplayState &display,
         const GxmState &gxm, MemState &mem)

@@ -321,6 +321,11 @@ bool VKState::init() {
     return true;
 }
 
+void VKState::reset_runtime_cache() {
+    texture_cache.reset_runtime_cache();
+    surface_cache.reset_runtime_cache();
+}
+
 #ifdef __ANDROID__
 static void *load_custom_adreno_driver(const std::string &driver_name) {
     const fs::path driver_path = fs::path(SDL_GetAndroidInternalStoragePath()) / "driver" / driver_name / "/";

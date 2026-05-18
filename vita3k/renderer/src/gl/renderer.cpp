@@ -282,6 +282,11 @@ bool GLState::init() {
     return true;
 }
 
+void GLState::reset_runtime_cache() {
+    texture_cache.reset_runtime_cache();
+    surface_cache.reset_runtime_cache();
+}
+
 void GLState::late_init(const Config &cfg, const std::string_view game_id, MemState &mem) {
     texture_cache.init(cfg.hashless_texture_cache, texture_folder(), game_id);
 }

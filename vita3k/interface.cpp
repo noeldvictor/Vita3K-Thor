@@ -2693,8 +2693,7 @@ static void reset_quick_state_runtime_render_state(EmuEnvState &emuenv) {
     emuenv.renderer->command_buffer_queue.reset();
     emuenv.renderer->last_scene_id = 0;
     emuenv.renderer->should_display = false;
-    if (auto texture_cache = emuenv.renderer->get_texture_cache())
-        texture_cache->reset_runtime_cache();
+    emuenv.renderer->reset_runtime_cache();
 }
 
 static std::string quick_state_join_strings(const std::vector<std::string> &values) {

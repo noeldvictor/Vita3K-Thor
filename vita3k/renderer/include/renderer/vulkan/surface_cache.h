@@ -265,6 +265,7 @@ public:
     // destroy all framebuffers associated with render_target
     // (meaning their color or depth-stencil surface is not backed by memory)
     void destroy_associated_framebuffers(const VKRenderTarget *render_target);
+    void reset_runtime_cache();
 
     // Return the image along with the viewport to be displayed on the screen
     // Viewport should already have its fields width and height filled

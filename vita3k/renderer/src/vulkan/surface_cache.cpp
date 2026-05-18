@@ -39,6 +39,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -361,6 +362,43 @@ VKSurfaceCache::VKSurfaceCache(VKState &state)
     : state(state) {
     color_surface_queue.init(max_surfaces_allowed);
     ds_surface_queue.init(max_surfaces_allowed);
+}
+
+void VKSurfaceCache::reset_runtime_cache() {
+    vkutil::DestroyQueue &destroy_queue = state.frame().destroy_queue;
+    for (auto &[_, framebuffer] : framebuffer_array) {
+        destroy_queue.add(framebuffer.standard);
+        destroy_queue.add(framebuffer.shader_interlock);
+    }
+    framebuffer_array.clear();
+
+    std::set<ColorSurfaceCacheInfo *> color_surfaces;
+    for (auto &[_, surface] : color_address_lookup) {
+        if (surface)
+            color_surfaces.insert(surface);
+    }
+    for (ColorSurfaceCacheInfo *surface : color_surfaces)
+        destroy_surface(*surface);
+
+    std::set<DepthStencilSurfaceCacheInfo *> ds_surfaces;
+    for (auto &[_, surface] : depth_address_lookup) {
+        if (surface)
+            ds_surfaces.insert(surface);
+    }
+    for (auto &[_, surface] : stencil_address_lookup) {
+        if (surface)
+            ds_surfaces.insert(surface);
+    }
+    for (DepthStencilSurfaceCacheInfo *surface : ds_surfaces)
+        destroy_surface(*surface);
+
+    color_address_lookup.clear();
+    depth_address_lookup.clear();
+    stencil_address_lookup.clear();
+    color_surface_queue.init(max_surfaces_allowed);
+    ds_surface_queue.init(max_surfaces_allowed);
+    cpu_surfaces_changed.clear();
+    last_written_surface = nullptr;
 }
 
 SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(MemState &mem, SceGxmColorSurface *color) {
