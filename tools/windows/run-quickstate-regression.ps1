@@ -11,6 +11,9 @@ param(
     [int]$MarkerTimeoutSeconds = 90,
     [ValidateRange(1, 100)]
     [int]$Cycles = 1,
+    [string]$SaveStateDir = "",
+    [ValidateRange(-1, 9)]
+    [int]$SaveStateCompressionLevel = -1,
     [switch]$SkipBuild,
     [switch]$StopExisting,
     [switch]$ExerciseUndoLoad,
@@ -187,6 +190,10 @@ function Add-MarkerDigest([System.Collections.Generic.List[string]]$Summary, [st
         "^Mode:",
         "^Detail:",
         "^Restore enabled:",
+        "^Compression level:",
+        "^State file bytes:",
+        "^State root:",
+        "^State file:",
         "^Same paused-session restore:",
         "^Same-session live host restore:",
         "^Block reason:",
@@ -267,6 +274,24 @@ function Invoke-ControlAction([string]$ControlFile, [string]$Action, [int]$Trace
         -NoLabels | Out-Null
 }
 
+function Set-YamlScalar([string]$Text, [string]$Key, [string]$Value) {
+    $escapedKey = [regex]::Escape($Key)
+    if ($Text -match "(?m)^${escapedKey}:\s*.*$") {
+        return $Text -replace "(?m)^${escapedKey}:\s*.*$", "${Key}: $Value"
+    }
+    return $Text + "`n${Key}: $Value`n"
+}
+
+function Resolve-StateRoot([string]$ConfiguredStateDir, [string]$DefaultStateRoot, [string]$BinDir) {
+    if ([string]::IsNullOrWhiteSpace($ConfiguredStateDir)) {
+        return $DefaultStateRoot
+    }
+    if ([System.IO.Path]::IsPathRooted($ConfiguredStateDir)) {
+        return $ConfiguredStateDir
+    }
+    return Join-Path $BinDir $ConfiguredStateDir
+}
+
 function Start-TitleRun([string]$Title, [string]$CaseSlug, [string]$ConfigPath, [string]$BackendRenderer, [int]$TraceLimit, [int]$LogLevel) {
     $beforeIds = @(Get-Vita3KProcesses | ForEach-Object { $_.Id })
 
@@ -302,16 +327,51 @@ function Start-TitleRun([string]$Title, [string]$CaseSlug, [string]$ConfigPath, 
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $binDir = Join-Path $repoRoot "build\windows-vs2022\bin\RelWithDebInfo"
-$stateRoot = Join-Path $binDir "states"
+$defaultStateRoot = Join-Path $binDir "states"
+$stateRoot = Resolve-StateRoot $SaveStateDir $defaultStateRoot $binDir
 $summaryRoot = Join-Path $repoRoot ("tmp\vita3k-win-debug\" + (Get-Slug $CasePrefix))
 New-Item -ItemType Directory -Force -Path $summaryRoot | Out-Null
 $summaryPath = Join-Path $summaryRoot "quickstate-regression-summary.txt"
+
+if ($SaveStateDir -or $SaveStateCompressionLevel -ge 0) {
+    $baseConfigPath = if ($ConfigPath) { $ConfigPath } else { Join-Path $repoRoot "tmp\vita3k-win-debug\config_highacc.yml" }
+    if (-not (Test-Path -LiteralPath $baseConfigPath)) {
+        throw "Config not found: $baseConfigPath"
+    }
+    $harnessConfigPath = Join-Path $summaryRoot "quickstate_harness_config.yml"
+    $configText = Get-Content -LiteralPath $baseConfigPath -Raw
+    if ($SaveStateDir) {
+        $yamlStateDir = "'" + ($SaveStateDir -replace "'", "''") + "'"
+        $configText = Set-YamlScalar $configText "save-state-dir" $yamlStateDir
+    }
+    if ($SaveStateCompressionLevel -ge 0) {
+        $configText = Set-YamlScalar $configText "save-state-compression-level" ([string]$SaveStateCompressionLevel)
+    }
+    Set-Content -LiteralPath $harnessConfigPath -Value $configText -Encoding UTF8
+    $ConfigPath = $harnessConfigPath
+}
+
+if ($SaveStateDir) {
+    New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+    foreach ($title in $TitleId) {
+        $sourceTitleDir = Join-Path $defaultStateRoot $title
+        $targetTitleDir = Join-Path $stateRoot $title
+        if ((-not (Test-Path -LiteralPath (Join-Path $targetTitleDir "slot0.thorstate"))) -and (Test-Path -LiteralPath $sourceTitleDir)) {
+            New-Item -ItemType Directory -Force -Path $targetTitleDir | Out-Null
+            Get-ChildItem -LiteralPath $sourceTitleDir -File | Copy-Item -Destination $targetTitleDir -Force
+        }
+    }
+}
+
 $summary = [System.Collections.Generic.List[string]]::new()
 $summary.Add("Vita3K Thor Windows quickstate regression")
 $summary.Add("Started: $((Get-Date).ToString("o"))")
 $summary.Add("Commit: $(git -C $repoRoot rev-parse --short HEAD)")
 $summary.Add("Titles: $($TitleId -join ", ")")
 $summary.Add("Cycles: $Cycles")
+$summary.Add("State root: $stateRoot")
+$summary.Add("Save-state dir override: $SaveStateDir")
+$summary.Add("Save-state compression override: $SaveStateCompressionLevel")
 $summary.Add("Exercise undo load: $ExerciseUndoLoad")
 $summary.Add("Exercise corrupt primary fallback: $ExerciseCorruptPrimaryFallback")
 $summary.Add("")
