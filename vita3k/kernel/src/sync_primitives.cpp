@@ -164,6 +164,29 @@ void eventflag_schedule_deferred_timeout(const KernelState &kernel, const EventF
     }).detach();
 }
 
+void msgpipe_schedule_deferred_timeout(const KernelState &kernel, const MsgPipePtr &msgpipe, const ThreadStatePtr &thread, const bool receiver, const SceUInt32 timeout_value) {
+    std::thread([&kernel, msgpipe, thread, receiver, timeout_value]() {
+        std::this_thread::sleep_for(std::chrono::microseconds{ kernel_speed_to_host_us(kernel, timeout_value) });
+
+        const std::lock_guard<std::mutex> msgpipe_lock(msgpipe->mutex);
+        auto &queue = receiver ? msgpipe->receivers : msgpipe->senders;
+        auto data_it = queue->find(thread);
+        if (data_it == queue->end())
+            return;
+
+        const WaitingThreadData data = *data_it;
+        if (!data.deferred_import_wait || !data.timeout)
+            return;
+
+        if (remaining_timeout_us(kernel, data) > 0)
+            return;
+
+        *data.timeout = 0;
+        queue->erase(data_it);
+        thread->complete_deferred_import_wait(static_cast<uint32_t>(SCE_KERNEL_ERROR_WAIT_TIMEOUT));
+    }).detach();
+}
+
 inline static int handle_timeout(const KernelState &kernel, const ThreadStatePtr &thread, std::unique_lock<std::mutex> &thread_lock,
     std::unique_lock<std::mutex> &primitive_lock, WaitingThreadQueuePtr &queue,
     const ThreadDataQueueInterator<WaitingThreadData> &data_it, const char *export_name,
@@ -1892,6 +1915,8 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
                         const SceSize insertedSize = static_cast<SceSize>(msgpipe->data_buffer.Insert(threadInfo.mp.buffer, threadInfo.mp.transfer_size));
                         if (threadInfo.mp.result)
                             *threadInfo.mp.result = insertedSize;
+                        if (threadInfo.timeout)
+                            *threadInfo.timeout = remaining_timeout_us(kernel, threadInfo);
                         if (!threadInfo.thread->complete_deferred_import_wait(SCE_KERNEL_OK)) {
                             const std::lock_guard<std::mutex> waiting_thread_lock(threadInfo.thread->mutex);
                             threadInfo.thread->update_status(ThreadStatus::run, ThreadStatus::wait);
@@ -1924,10 +1949,16 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
         wait_data.mp.result = pResult;
         wait_data.mp.wait_mode = waitMode;
         capture_wait_timeout(wait_data, pTimeout);
+        capture_wait_timeout_start(wait_data);
 
-        if (!pTimeout && thread->begin_deferred_import_wait()) {
+        if (pTimeout && *pTimeout == 0)
+            return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+
+        if (thread->begin_deferred_import_wait()) {
             wait_data.deferred_import_wait = true;
             msgpipe->receivers->push(wait_data);
+            if (pTimeout)
+                msgpipe_schedule_deferred_timeout(kernel, msgpipe, thread, true, wait_data.timeout_value);
             return SCE_KERNEL_OK;
         }
 
@@ -1968,6 +1999,10 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
             }
 
             if (!status) { // Timed out and buffer hasn't been touched
+                msgpipe_lock.lock();
+                const auto data_it = msgpipe->receivers->find(thread);
+                if (data_it != msgpipe->receivers->end())
+                    msgpipe->receivers->erase(data_it);
                 thread->update_status(ThreadStatus::run, ThreadStatus::wait);
                 return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
             }
@@ -2009,6 +2044,8 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
                             : static_cast<SceSize>(msgpipe->data_buffer.Remove(threadInfo.mp.buffer, threadInfo.mp.transfer_size));
                         if (threadInfo.mp.result)
                             *threadInfo.mp.result = readSize;
+                        if (threadInfo.timeout)
+                            *threadInfo.timeout = remaining_timeout_us(kernel, threadInfo);
                         if (!threadInfo.thread->complete_deferred_import_wait(SCE_KERNEL_OK)) {
                             const std::lock_guard<std::mutex> waiting_thread_lock(threadInfo.thread->mutex);
                             threadInfo.thread->update_status(ThreadStatus::run, ThreadStatus::wait);
@@ -2051,10 +2088,16 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
         wait_data.mp.result = pResult;
         wait_data.mp.wait_mode = waitMode;
         capture_wait_timeout(wait_data, pTimeout);
+        capture_wait_timeout_start(wait_data);
 
-        if (!pTimeout && thread->begin_deferred_import_wait()) {
+        if (pTimeout && *pTimeout == 0)
+            return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+
+        if (thread->begin_deferred_import_wait()) {
             wait_data.deferred_import_wait = true;
             msgpipe->senders->push(wait_data);
+            if (pTimeout)
+                msgpipe_schedule_deferred_timeout(kernel, msgpipe, thread, false, wait_data.timeout_value);
             return SCE_KERNEL_OK;
         }
 
@@ -2096,6 +2139,10 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
             }
 
             if (!status) { // Timed out and buffer hasn't been touched
+                msgpipe_lock.lock();
+                const auto data_it = msgpipe->senders->find(thread);
+                if (data_it != msgpipe->senders->end())
+                    msgpipe->senders->erase(data_it);
                 thread->update_status(ThreadStatus::run, ThreadStatus::wait);
                 return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
             }

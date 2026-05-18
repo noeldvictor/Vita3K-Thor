@@ -278,3 +278,4 @@ SceUID msgpipe_find(KernelState &kernel, const char *export_name, const char *pN
 SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgPipeId, SceUInt32 waitMode, void *pRecvBuf, SceSize recvSize, SceSize *pResult, SceUInt32 *pTimeout);
 SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgPipeId, SceUInt32 waitMode, const void *pSendBuf, SceSize sendSize, SceSize *pResult, SceUInt32 *pTimeout);
 SceInt32 msgpipe_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID msgpipe_id);
+void msgpipe_schedule_deferred_timeout(const KernelState &kernel, const MsgPipePtr &msgpipe, const ThreadStatePtr &thread, bool receiver, SceUInt32 timeout_value);

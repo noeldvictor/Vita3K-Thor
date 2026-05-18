@@ -4457,10 +4457,10 @@ static bool quick_state_wait_queue_entry_restorable_without_live_host(const Quic
             return true;
         if (entry.kind == "eventflag")
             return true;
+        if (entry.kind == "msgpipe_sender" || entry.kind == "msgpipe_receiver")
+            return true;
         if (entry.kind == "condvar"
-            || entry.kind == "lwcondvar"
-            || entry.kind == "msgpipe_sender"
-            || entry.kind == "msgpipe_receiver") {
+            || entry.kind == "lwcondvar") {
             return entry.timeout == 0;
         }
         return false;
@@ -6051,7 +6051,7 @@ static bool quick_state_restore_deferred_condvar_waits(EmuEnvState &emuenv, cons
     return true;
 }
 
-static bool quick_state_restore_deferred_msgpipe_waits(EmuEnvState &emuenv, const QuickStateSyncSnapshot &snapshot, const std::map<SceUID, ThreadStatePtr> &threads_by_saved_id, const SceUID uid, const uint32_t expected_count, const char *kind, const WaitingThreadQueuePtr &queue) {
+static bool quick_state_restore_deferred_msgpipe_waits(EmuEnvState &emuenv, const QuickStateSyncSnapshot &snapshot, const std::map<SceUID, ThreadStatePtr> &threads_by_saved_id, const SceUID uid, const uint32_t expected_count, const char *kind, const MsgPipePtr &msgpipe, const WaitingThreadQueuePtr &queue) {
     if (expected_count == 0)
         return true;
     if (!quick_state_wait_queue_entries_all_deferred(snapshot, kind, uid, expected_count))
@@ -6094,6 +6094,8 @@ static bool quick_state_restore_deferred_msgpipe_waits(EmuEnvState &emuenv, cons
 
         thread->second->restore_deferred_import_wait();
         queue->push(data);
+        if (data.timeout && data.timeout_value > 0)
+            msgpipe_schedule_deferred_timeout(emuenv.kernel, msgpipe, thread->second, std::string_view(kind) == "msgpipe_receiver", data.timeout_value);
     }
     LOG_INFO("Restored {} deferred quickstate waits for {} {}.", expected_count, kind, uid);
     return true;
@@ -6663,8 +6665,8 @@ static bool restore_quick_state_sync_primitives(EmuEnvState &emuenv, const Quick
                 return false;
             }
         }
-        if (!quick_state_restore_deferred_msgpipe_waits(emuenv, snapshot, threads_by_saved_id, uid, saved_msgpipe.sender_count, "msgpipe_sender", msgpipe->senders)
-            || !quick_state_restore_deferred_msgpipe_waits(emuenv, snapshot, threads_by_saved_id, uid, saved_msgpipe.receiver_count, "msgpipe_receiver", msgpipe->receivers)) {
+        if (!quick_state_restore_deferred_msgpipe_waits(emuenv, snapshot, threads_by_saved_id, uid, saved_msgpipe.sender_count, "msgpipe_sender", msgpipe, msgpipe->senders)
+            || !quick_state_restore_deferred_msgpipe_waits(emuenv, snapshot, threads_by_saved_id, uid, saved_msgpipe.receiver_count, "msgpipe_receiver", msgpipe, msgpipe->receivers)) {
             return false;
         }
         msgpipe->beingDeleted = saved_msgpipe.being_deleted;
