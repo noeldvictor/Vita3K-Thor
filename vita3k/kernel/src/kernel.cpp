@@ -198,10 +198,14 @@ ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<c
 }
 
 ThreadStatePtr KernelState::create_thread_for_restore(MemState &mem, const SceUID uid, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size) {
+    reserve_uid_for_restore(uid);
+    return create_thread_with_uid(*this, mem, uid, name, entry_point, init_priority, affinity_mask, stack_size, nullptr);
+}
+
+void KernelState::reserve_uid_for_restore(const SceUID uid) {
     SceUID next = next_uid.load();
     while (next <= uid && !next_uid.compare_exchange_weak(next, uid + 1)) {
     }
-    return create_thread_with_uid(*this, mem, uid, name, entry_point, init_priority, affinity_mask, stack_size, nullptr);
 }
 
 Ptr<Ptr<void>> KernelState::get_thread_tls_addr(MemState &mem, SceUID thread_id, int key) {

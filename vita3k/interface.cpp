@@ -1092,6 +1092,17 @@ struct QuickStateThreadMetadata {
     uint32_t waiting_thread_count = 0;
 };
 
+struct QuickStateKernelCallback {
+    SceUID id = 0;
+    SceUID owner_thread_id = 0;
+    std::string name;
+    Address callback_function = 0;
+    Address userdata = 0;
+    uint32_t notifications = 0;
+    SceInt32 notify_arg = 0;
+    SceUID notifier_id = SCE_UID_INVALID_UID;
+};
+
 struct QuickStateIOFilePosition {
     SceUID fd = 0;
     std::string vita_path;
@@ -1367,6 +1378,8 @@ struct QuickStateDisplaySnapshot {
     bool vblank_waits_complete = false;
     std::vector<QuickStateDisplayVBlankWaitSnapshot> vblank_waits;
     uint32_t vblank_callback_count = 0;
+    bool vblank_callback_ids_complete = false;
+    std::vector<SceUID> vblank_callback_ids;
 };
 
 struct QuickStateGxmMemoryMapSnapshot {
@@ -1432,6 +1445,7 @@ struct QuickStateRestoreManifest {
     std::vector<std::string> captured_sections;
     bool timing_restorable = false;
     bool thread_metadata_restorable = false;
+    bool kernel_callbacks_restorable = false;
     bool io_file_positions_restorable = false;
     bool io_file_handles_restorable = false;
     bool io_directory_handles_restorable = false;
@@ -1455,6 +1469,7 @@ struct QuickStateRestoreManifest {
     size_t io_overlay_count = 0;
     size_t display_wait_entries = 0;
     size_t display_callback_entries = 0;
+    size_t kernel_callback_entries = 0;
     size_t gxm_memory_maps = 0;
     size_t avplayer_players = 0;
     size_t avplayer_active_players = 0;
@@ -3129,6 +3144,79 @@ static bool quick_state_parse_thread_metadata_section(const QuickStateSlot &slot
     return metadata_by_id.size() == slot.thread_contexts.size();
 }
 
+static bool quick_state_parse_kernel_callback_snapshot(const std::string &key, const std::string &value, QuickStateKernelCallback &callback) {
+    if (!quick_state_parse_uid_from_key(key, "callback.", ".name", callback.id))
+        return false;
+
+    const auto fields = quick_state_parse_semicolon_fields("name=" + value);
+    const auto required_fields = {
+        "name",
+        "owner",
+        "func",
+        "userdata",
+        "notifications",
+        "notify_arg",
+        "notifier",
+    };
+    for (const auto required : required_fields) {
+        if (!fields.contains(required))
+            return false;
+    }
+
+    callback.name = fields.at("name");
+    int32_t parsed_i32 = 0;
+    uint64_t parsed_hex = 0;
+    if (!quick_state_parse_i32_text(fields.at("owner"), parsed_i32) || parsed_i32 <= 0)
+        return false;
+    callback.owner_thread_id = static_cast<SceUID>(parsed_i32);
+    if (!quick_state_parse_u64_text(fields.at("func"), parsed_hex, 0) || parsed_hex > std::numeric_limits<Address>::max())
+        return false;
+    callback.callback_function = static_cast<Address>(parsed_hex);
+    if (!quick_state_parse_u64_text(fields.at("userdata"), parsed_hex, 0) || parsed_hex > std::numeric_limits<Address>::max())
+        return false;
+    callback.userdata = static_cast<Address>(parsed_hex);
+    if (!quick_state_parse_u32_text(fields.at("notifications"), callback.notifications)
+        || !quick_state_parse_i32_text(fields.at("notify_arg"), callback.notify_arg)
+        || !quick_state_parse_i32_text(fields.at("notifier"), parsed_i32)) {
+        return false;
+    }
+    callback.notifier_id = static_cast<SceUID>(parsed_i32);
+    return true;
+}
+
+static bool quick_state_parse_kernel_callbacks_section(const QuickStateSlot &slot, std::map<SceUID, QuickStateKernelCallback> &callbacks_by_id, size_t *expected_count = nullptr) {
+    callbacks_by_id.clear();
+    if (expected_count)
+        *expected_count = 0;
+
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.kernel.objects");
+    if (!section || section->version != 1)
+        return false;
+
+    const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    if (schema == values.end() || schema->second != "thor.kernel.objects.v1")
+        return false;
+
+    size_t callback_count = 0;
+    if (!quick_state_parse_size(values, "callbacks", callback_count))
+        return false;
+    if (expected_count)
+        *expected_count = callback_count;
+
+    for (const auto &[key, value] : values) {
+        if (key.rfind("callback.", 0) != 0)
+            continue;
+
+        QuickStateKernelCallback callback;
+        if (!quick_state_parse_kernel_callback_snapshot(key, value, callback))
+            return false;
+        callbacks_by_id[callback.id] = std::move(callback);
+    }
+
+    return callbacks_by_id.size() == callback_count;
+}
+
 static bool quick_state_parse_fd_from_key(const std::string &key, SceUID &fd) {
     constexpr std::string_view prefix = "file.";
     constexpr std::string_view suffix = ".vita";
@@ -3817,6 +3905,13 @@ static bool quick_state_parse_display_vblank_wait_key(const std::string &key, ui
     return quick_state_parse_u32_text(key.substr(prefix.size()), index);
 }
 
+static bool quick_state_parse_display_vblank_callback_key(const std::string &key, uint32_t &index) {
+    constexpr std::string_view prefix = "vblank_callback.";
+    if (key.rfind(prefix, 0) != 0 || key.size() <= prefix.size())
+        return false;
+    return quick_state_parse_u32_text(key.substr(prefix.size()), index);
+}
+
 static bool quick_state_parse_display_vblank_wait_snapshot(const std::string &text, QuickStateDisplayVBlankWaitSnapshot &wait) {
     const auto fields = quick_state_parse_semicolon_fields(text);
     if (!fields.contains("thread") || !fields.contains("target"))
@@ -3914,6 +4009,26 @@ static bool quick_state_parse_display_snapshot_section(const QuickStateSlot &slo
         seen_waits[index] = true;
     }
     snapshot.vblank_waits_complete = !std::any_of(seen_waits.begin(), seen_waits.end(), [](const bool value) { return !value; });
+
+    snapshot.vblank_callback_ids.resize(snapshot.vblank_callback_count);
+    std::vector<bool> seen_callbacks(snapshot.vblank_callback_count, false);
+    for (const auto &[key, value] : values) {
+        uint32_t index = 0;
+        if (!quick_state_parse_display_vblank_callback_key(key, index))
+            continue;
+        if (index >= snapshot.vblank_callback_count)
+            return false;
+
+        const auto fields = quick_state_parse_semicolon_fields(value);
+        if (!fields.contains("uid"))
+            return false;
+        int32_t parsed_callback_id = 0;
+        if (!quick_state_parse_i32_text(fields.at("uid"), parsed_callback_id) || parsed_callback_id <= 0)
+            return false;
+        snapshot.vblank_callback_ids[index] = static_cast<SceUID>(parsed_callback_id);
+        seen_callbacks[index] = true;
+    }
+    snapshot.vblank_callback_ids_complete = !std::any_of(seen_callbacks.begin(), seen_callbacks.end(), [](const bool value) { return !value; });
 
     snapshot.valid = true;
     return true;
@@ -4255,6 +4370,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     manifest.timing_restorable = quick_state_parse_timing_snapshot(slot, timing);
     std::map<SceUID, QuickStateThreadMetadata> thread_metadata;
     manifest.thread_metadata_restorable = quick_state_parse_thread_metadata_section(slot, thread_metadata);
+    std::map<SceUID, QuickStateKernelCallback> kernel_callbacks;
+    manifest.kernel_callbacks_restorable = quick_state_parse_kernel_callbacks_section(slot, kernel_callbacks, &manifest.kernel_callback_entries);
     std::map<SceUID, QuickStateIOFilePosition> io_file_positions;
     std::map<SceUID, QuickStateIODirectoryPosition> io_directories;
     std::vector<QuickStateIOOverlay> io_overlays;
@@ -4321,13 +4438,17 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     }
     if (!manifest.thread_metadata_restorable)
         manifest.missing_serializers.push_back("kernel-thread-metadata");
+    if (!manifest.kernel_callbacks_restorable && manifest.kernel_callback_entries > 0)
+        manifest.missing_serializers.push_back("kernel-callbacks");
     if (!manifest.display_state_restorable) {
         manifest.missing_serializers.push_back("display-state");
     } else {
         if (manifest.display_wait_entries > 0 && !manifest.display_vblank_waits_restorable)
             manifest.missing_serializers.push_back("display-vblank-waits");
-        if (manifest.display_callback_entries > 0)
+        if (manifest.display_callback_entries > 0
+            && (!display_snapshot.vblank_callback_ids_complete || !manifest.kernel_callbacks_restorable)) {
             manifest.missing_serializers.push_back("display-vblank-callbacks");
+        }
     }
     if (!manifest.audio_state_restorable)
         manifest.missing_serializers.push_back("audio-state");
@@ -4352,6 +4473,7 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     const bool live_host_sections_ready = (manifest.same_pause_restore_available || manifest.live_host_restore_available)
         && manifest.timing_restorable
         && manifest.thread_metadata_restorable
+        && manifest.kernel_callbacks_restorable
         && manifest.sync_primitives_restorable
         && manifest.io_file_positions_restorable
         && manifest.display_state_restorable
@@ -5591,6 +5713,17 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         }
 
         text << "callbacks=" << emuenv.kernel.callbacks.size() << "\n";
+        for (const auto &[uid, callback] : emuenv.kernel.callbacks) {
+            text << "callback." << uid
+                 << ".name=" << callback->get_name()
+                 << ";owner=" << callback->get_owner_thread_id()
+                 << ";func=0x" << std::hex << callback->get_callback_function().address()
+                 << ";userdata=0x" << callback->get_user_common_ptr().address() << std::dec
+                 << ";notifications=" << callback->get_num_notifications()
+                 << ";notify_arg=" << callback->get_notify_arg()
+                 << ";notifier=" << callback->get_notifier_id()
+                 << "\n";
+        }
         text << "simple_events=" << emuenv.kernel.simple_events.size() << "\n";
         for (const auto &[uid, event] : emuenv.kernel.simple_events) {
             const std::lock_guard<std::mutex> event_lock(event->mutex);
@@ -5702,6 +5835,9 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
                      << "\n";
             }
             text << "vblank_callbacks=" << emuenv.display.vblank_callbacks.size() << "\n";
+            size_t callback_index = 0;
+            for (const auto &callback_entry : emuenv.display.vblank_callbacks)
+                text << "vblank_callback." << callback_index++ << "=uid=" << callback_entry.first << "\n";
         }
         sections.push_back(quick_state_make_text_section("thor.display", text));
     }
@@ -5875,6 +6011,85 @@ static std::map<SceUID, ThreadStatePtr> quick_state_matched_threads_by_saved_id(
     for (size_t i = 0; i < count; i++)
         threads_by_saved_id[slot.thread_contexts[i].id] = matched_threads[i];
     return threads_by_saved_id;
+}
+
+static bool restore_quick_state_kernel_callbacks(EmuEnvState &emuenv, const QuickStateSlot &slot, const std::vector<ThreadStatePtr> &matched_threads, const bool allow_live_host_state) {
+    std::map<SceUID, QuickStateKernelCallback> callbacks_by_id;
+    size_t saved_callback_count = 0;
+    if (!quick_state_parse_kernel_callbacks_section(slot, callbacks_by_id, &saved_callback_count)) {
+        LOG_WARN("Refused callback restore for {} because the thor.kernel.objects callback metadata is missing or invalid.", slot.title_id);
+        return false;
+    }
+
+    if (allow_live_host_state) {
+        const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
+        if (emuenv.kernel.callbacks.size() != saved_callback_count) {
+            LOG_WARN("Refused callback live-host validation for {} because current callback count {} does not match saved count {}.",
+                slot.title_id, emuenv.kernel.callbacks.size(), saved_callback_count);
+            return false;
+        }
+        for (const auto &saved_callback_entry : callbacks_by_id) {
+            if (!emuenv.kernel.callbacks.contains(saved_callback_entry.first)) {
+                LOG_WARN("Refused callback live-host validation for {} because callback {} is missing from the current session.",
+                    slot.title_id, saved_callback_entry.first);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    const auto threads_by_saved_id = quick_state_matched_threads_by_saved_id(slot, matched_threads);
+    std::map<SceUID, QuickStateThreadMetadata> metadata_by_id;
+    if (!quick_state_parse_thread_metadata_section(slot, metadata_by_id)) {
+        LOG_WARN("Refused callback restore for {} because thread callback ownership metadata is missing.", slot.title_id);
+        return false;
+    }
+
+    {
+        const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
+        for (const auto &[uid, saved_callback] : callbacks_by_id) {
+            if (!threads_by_saved_id.contains(saved_callback.owner_thread_id)) {
+                LOG_WARN("Refused callback restore for {} because callback {} owner thread {} was not matched.",
+                    slot.title_id, uid, saved_callback.owner_thread_id);
+                return false;
+            }
+        }
+
+        emuenv.kernel.callbacks.clear();
+        for (const auto &thread : matched_threads) {
+            if (thread)
+                thread->callbacks.clear();
+        }
+
+        for (const auto &[uid, saved_callback] : callbacks_by_id) {
+            const auto thread = threads_by_saved_id.at(saved_callback.owner_thread_id);
+            std::string name = saved_callback.name;
+            auto callback = std::make_shared<Callback>(
+                saved_callback.owner_thread_id,
+                thread,
+                name,
+                Ptr<SceKernelCallbackFunction>(saved_callback.callback_function),
+                Ptr<void>(saved_callback.userdata));
+            callback->restore_state(saved_callback.notifications, saved_callback.notify_arg, saved_callback.notifier_id);
+            emuenv.kernel.callbacks.emplace(uid, callback);
+            thread->callbacks.push_back(callback);
+            emuenv.kernel.reserve_uid_for_restore(uid);
+        }
+
+        for (const auto &[thread_id, thread_metadata] : metadata_by_id) {
+            const auto thread = threads_by_saved_id.find(thread_id);
+            if (thread == threads_by_saved_id.end())
+                continue;
+            if (thread->second->callbacks.size() != thread_metadata.callback_count) {
+                LOG_WARN("Refused callback restore for {} because thread {} callback count {} does not match saved count {}.",
+                    slot.title_id, thread_id, thread->second->callbacks.size(), thread_metadata.callback_count);
+                return false;
+            }
+        }
+    }
+
+    LOG_INFO("Restored kernel callback snapshot for {} ({} callback(s)).", slot.title_id, saved_callback_count);
+    return true;
 }
 
 static bool quick_state_sync_identity_matches(const SyncPrimitive &object, const std::string &name, const uint32_t attr) {
@@ -7021,8 +7236,8 @@ static bool restore_quick_state_display_state(EmuEnvState &emuenv, const QuickSt
         return false;
     }
 
-    if (snapshot.vblank_callback_count > 0 && !allow_live_host_state) {
-        LOG_WARN("Refused display restore for {} because vblank callbacks still need callback lifecycle serialization (callbacks={}).",
+    if (snapshot.vblank_callback_count > 0 && !snapshot.vblank_callback_ids_complete && !allow_live_host_state) {
+        LOG_WARN("Refused display restore for {} because vblank callback IDs are missing (callbacks={}).",
             slot.title_id, snapshot.vblank_callback_count);
         return false;
     }
@@ -7055,8 +7270,24 @@ static bool restore_quick_state_display_state(EmuEnvState &emuenv, const QuickSt
         }
     }
 
+    std::map<SceUID, CallbackPtr> restored_vblank_callbacks;
+    if (!allow_live_host_state) {
+        const std::lock_guard<std::mutex> kernel_lock(emuenv.kernel.mutex);
+        for (const auto callback_id : snapshot.vblank_callback_ids) {
+            const auto callback = emuenv.kernel.callbacks.find(callback_id);
+            if (callback == emuenv.kernel.callbacks.end()) {
+                LOG_WARN("Refused display restore for {} because saved vblank callback {} was not restored in the kernel callback map.",
+                    slot.title_id, callback_id);
+                return false;
+            }
+            restored_vblank_callbacks[callback_id] = callback->second;
+        }
+    }
+
     {
         const std::lock_guard<std::mutex> display_lock(emuenv.display.mutex);
+        if (!allow_live_host_state)
+            emuenv.display.vblank_callbacks = std::move(restored_vblank_callbacks);
         if (emuenv.display.vblank_callbacks.size() != snapshot.vblank_callback_count) {
             LOG_WARN("Refused display restore for {} because current vblank callback count does not match the saved snapshot.", slot.title_id);
             return false;
@@ -7649,6 +7880,11 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         return fail_quick_state_restore();
     }
 
+    if (!restore_quick_state_kernel_callbacks(emuenv, slot, matched_threads, allow_live_host_state)) {
+        quick_state_last_restore_detail = "kernel callback restore failed";
+        return fail_quick_state_restore();
+    }
+
     if (!allow_live_host_state && quick_state_needs_ngs_durable_restore(emuenv, slot)) {
         std::string ngs_detail;
         if (!quick_state_parse_ngs_snapshot_header(slot, nullptr, &ngs_detail)) {
@@ -7842,6 +8078,7 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "Same-session live host restore: " << (manifest.live_host_restore_available ? "available" : "not available") << "\n";
     marker << "Timing restore layer: " << (manifest.timing_restorable ? "ready" : "missing") << "\n";
     marker << "Thread metadata restore layer: " << (manifest.thread_metadata_restorable ? "ready" : "missing") << "\n";
+    marker << "Kernel callback restore layer: " << (manifest.kernel_callbacks_restorable ? "ready" : "missing") << " (" << manifest.kernel_callback_entries << " serialized)\n";
     marker << "Sync primitive scalar restore layer: " << (manifest.sync_primitives_restorable ? "ready" : "missing") << "\n";
     marker << "Sync wait queue entries: " << manifest.sync_waiting_threads << "\n";
     marker << "Sync wait queue metadata: " << (manifest.sync_wait_queue_metadata_complete ? "ready" : "missing")
@@ -7927,6 +8164,7 @@ static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickSta
     marker << "Same-session live host restore: " << (manifest.live_host_restore_available ? "available" : "not available") << "\n";
     marker << "Timing restore layer: " << (manifest.timing_restorable ? "ready" : "missing") << "\n";
     marker << "Thread metadata restore layer: " << (manifest.thread_metadata_restorable ? "ready" : "missing") << "\n";
+    marker << "Kernel callback restore layer: " << (manifest.kernel_callbacks_restorable ? "ready" : "missing") << " (" << manifest.kernel_callback_entries << " serialized)\n";
     marker << "Sync primitive scalar restore layer: " << (manifest.sync_primitives_restorable ? "ready" : "missing") << "\n";
     marker << "Sync wait queue entries: " << manifest.sync_waiting_threads << "\n";
     marker << "Sync wait queue metadata: " << (manifest.sync_wait_queue_metadata_complete ? "ready" : "missing")

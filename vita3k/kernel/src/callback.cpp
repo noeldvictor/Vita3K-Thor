@@ -85,6 +85,13 @@ uint32_t Callback::get_num_notifications() {
     return this->num_notifications;
 }
 
+void Callback::restore_state(const uint32_t restored_notifications, const SceInt32 restored_notify_arg, const SceUID restored_notifier_id) {
+    std::lock_guard lock(this->_mutex);
+    this->num_notifications = restored_notifications;
+    this->notification_arg = restored_notify_arg;
+    this->notifier_id = restored_notifier_id;
+}
+
 void Callback::execute(KernelState &kernel, const std::function<void()> &deleter) {
     std::lock_guard lock(this->_mutex);
     if (!this->is_notified())

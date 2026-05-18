@@ -107,6 +107,11 @@ struct Callback {
     uint32_t get_num_notifications();
 
     /**
+     * @brief Restores pending notification state from a quickstate snapshot
+     */
+    void restore_state(uint32_t restored_notifications, SceInt32 restored_notify_arg, SceUID restored_notifier_id);
+
+    /**
      * @brief Runs callback in the context of creator thread
      * @note Calling this method when Callback.executable() == false returns false and does nothing
      * @note This should be called only in the creator thread

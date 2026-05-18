@@ -169,6 +169,7 @@ struct KernelState {
     ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point = Ptr<const void>(0));
     ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option);
     ThreadStatePtr create_thread_for_restore(MemState &mem, SceUID uid, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size);
+    void reserve_uid_for_restore(SceUID uid);
 
     ThreadStatePtr get_thread(SceUID thread_id);
     Ptr<Ptr<void>> get_thread_tls_addr(MemState &mem, SceUID thread_id, int key);
