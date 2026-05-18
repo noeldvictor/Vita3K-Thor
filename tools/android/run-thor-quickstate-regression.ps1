@@ -122,7 +122,10 @@ function Remove-DeviceFile([string]$Path) {
 function Wait-DeviceFile([string]$Path, [int]$TimeoutSeconds) {
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
-        $result = Get-AdbText @("shell", "sh", "-c", "test -f '$Path' && echo yes || echo no")
+        # Pass the whole shell expression as one adb argument. Windows adb can
+        # otherwise split `sh -c` scripts in a way that makes existing files
+        # report as missing.
+        $result = Get-AdbText @("shell", "test -f '$Path' && echo yes || echo no")
         if ($result -match "yes") {
             return
         }
