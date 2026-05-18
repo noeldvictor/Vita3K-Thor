@@ -8784,7 +8784,12 @@ static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickSta
 
     const fs::path state_dir = quick_state_dir(emuenv, slot.title_id);
     fs::create_directories(state_dir);
-    const auto manifest = build_quick_state_restore_manifest(emuenv, slot);
+    auto manifest = build_quick_state_restore_manifest(emuenv, slot);
+    if (success && (mode == "same-session")) {
+        manifest.restore_enabled = true;
+        manifest.live_host_restore_available = true;
+        manifest.block_reason = "same-session restore completed after live host wait queues were accepted during the restore pause";
+    }
     fs::ofstream marker(quick_state_restore_marker_file(emuenv, slot.title_id));
     marker << "Vita3K Thor quickstate restore attempt\n";
     marker << "Title ID: " << slot.title_id << "\n";

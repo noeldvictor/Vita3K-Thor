@@ -83,6 +83,30 @@ function Assert-MarkerSuccess([string]$Path, [string]$ExpectedMode = "") {
     if ($ExpectedMode -and ($text -notmatch "(?m)^Mode:\s+$([regex]::Escape($ExpectedMode))\s*$")) {
         throw "Marker did not report Mode: ${ExpectedMode}: $Path`n$text"
     }
+    if (($text -match "(?m)^Restore enabled:") -and ($text -notmatch "(?m)^Restore enabled:\s+yes\s*$")) {
+        throw "Successful restore marker did not report Restore enabled: yes: $Path`n$text"
+    }
+    if (($text -match "(?m)^Missing serializers:") -and ($text -notmatch "(?m)^Missing serializers:\s+none\s*$")) {
+        throw "Successful restore marker did not report Missing serializers: none: $Path`n$text"
+    }
+    return $text
+}
+
+function Assert-StateMarkerReady([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "State marker not found: $Path"
+    }
+
+    $text = Get-Content -LiteralPath $Path -Raw
+    if ($text -notmatch "(?m)^Restore enabled:\s+yes\s*$") {
+        throw "State marker did not report Restore enabled: yes: $Path`n$text"
+    }
+    if ($text -notmatch "(?m)^Missing serializers:\s+none\s*$") {
+        throw "State marker did not report Missing serializers: none: $Path`n$text"
+    }
+    if ($text -notmatch "(?m)^Block reason:\s+all mandatory quickstate serializers are present\s*$") {
+        throw "State marker did not report the durable-ready block reason: $Path`n$text"
+    }
     return $text
 }
 
@@ -279,20 +303,26 @@ foreach ($run in $runs) {
         Invoke-ControlAction $control1 "load_state" $TraceLimit
         Wait-FreshFile $restoreMarker $before $MarkerTimeoutSeconds | Out-Null
         Assert-MarkerSuccess $restoreMarker "durable-disk" | Out-Null
+        Add-MarkerDigest $summary "$title cycle $cycle run 1 durable restore" $restoreMarker
         Start-Sleep -Seconds $AfterActionSeconds
         Assert-HealthyProcess $process "$title durable load"
 
         $before = (Get-Date).ToUniversalTime().AddMilliseconds(-500)
         Invoke-ControlAction $control1 "save_state" $TraceLimit
         Wait-FreshFile $captureMarker $before $MarkerTimeoutSeconds | Out-Null
+        Wait-FreshFile $stateMarker $before $MarkerTimeoutSeconds | Out-Null
         Assert-MarkerSuccess $captureMarker | Out-Null
+        Assert-StateMarkerReady $stateMarker | Out-Null
+        Add-MarkerDigest $summary "$title cycle $cycle run 1 state" $stateMarker
+        Add-MarkerDigest $summary "$title cycle $cycle run 1 capture" $captureMarker
         Start-Sleep -Seconds $AfterActionSeconds
         Assert-HealthyProcess $process "$title save-again"
 
         $before = (Get-Date).ToUniversalTime().AddMilliseconds(-500)
         Invoke-ControlAction $control1 "load_state" $TraceLimit
         Wait-FreshFile $restoreMarker $before $MarkerTimeoutSeconds | Out-Null
-        Assert-MarkerSuccess $restoreMarker | Out-Null
+        Assert-MarkerSuccess $restoreMarker "same-session" | Out-Null
+        Add-MarkerDigest $summary "$title cycle $cycle run 1 same-session restore" $restoreMarker
         Start-Sleep -Seconds $AfterActionSeconds
         Assert-HealthyProcess $process "$title same-session load"
 
@@ -301,12 +331,10 @@ foreach ($run in $runs) {
             Invoke-ControlAction $control1 "undo_load_state" $TraceLimit
             Wait-FreshFile $restoreMarker $before $MarkerTimeoutSeconds | Out-Null
             Assert-MarkerSuccess $restoreMarker "durable-undo" | Out-Null
+            Add-MarkerDigest $summary "$title cycle $cycle run 1 undo restore" $restoreMarker
             Start-Sleep -Seconds $AfterActionSeconds
             Assert-HealthyProcess $process "$title undo load"
         }
-        Add-MarkerDigest $summary "$title cycle $cycle run 1 state" $stateMarker
-        Add-MarkerDigest $summary "$title cycle $cycle run 1 capture" $captureMarker
-        Add-MarkerDigest $summary "$title cycle $cycle run 1 restore" $restoreMarker
     } catch {
         $failures.Add("$title cycle $cycle run 1: $($_.Exception.Message)")
     } finally {
