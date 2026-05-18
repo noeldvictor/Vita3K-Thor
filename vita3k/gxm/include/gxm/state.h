@@ -53,6 +53,12 @@ struct PendingDisplayCallback {
     bool wait_until_empty_after_push = false;
 };
 
+struct GxmNotificationWait {
+    SceUID thread_id = 0;
+    Address address = 0;
+    uint32_t target_value = 0;
+};
+
 struct MemoryMapInfo {
     Address offset;
     std::uint32_t size;
@@ -68,6 +74,9 @@ struct GxmState {
     std::mutex display_queue_waiters_mutex;
     std::vector<SceUID> display_queue_waiters;
     std::deque<PendingDisplayCallback> pending_display_callbacks;
+    std::atomic<uint64_t> notification_wait_restore_generation{ 1 };
+    std::mutex notification_waits_mutex;
+    std::vector<GxmNotificationWait> notification_waits;
 
     // global timestamp used by sync objects
     std::atomic<uint32_t> global_timestamp{ 1 };

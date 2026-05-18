@@ -1388,6 +1388,12 @@ struct QuickStateGxmMemoryMapSnapshot {
     uint32_t perm = 0;
 };
 
+struct QuickStateGxmNotificationWaitSnapshot {
+    SceUID thread_id = 0;
+    Address address = 0;
+    uint32_t target_value = 0;
+};
+
 struct QuickStateGxmSnapshot {
     bool valid = false;
     uint32_t flags = 0;
@@ -1400,6 +1406,7 @@ struct QuickStateGxmSnapshot {
     uint32_t last_display_global = 0;
     Address notification_region = 0;
     std::vector<QuickStateGxmMemoryMapSnapshot> memory_maps;
+    std::vector<QuickStateGxmNotificationWaitSnapshot> notification_waits;
 };
 
 struct QuickStateAudioPortSnapshot {
@@ -1471,6 +1478,7 @@ struct QuickStateRestoreManifest {
     size_t display_callback_entries = 0;
     size_t kernel_callback_entries = 0;
     size_t gxm_memory_maps = 0;
+    size_t gxm_notification_waits = 0;
     size_t avplayer_players = 0;
     size_t avplayer_active_players = 0;
     QuickStateKernelObjectCounts kernel;
@@ -4041,6 +4049,13 @@ static bool quick_state_parse_gxm_memory_map_key(const std::string &key, uint32_
     return quick_state_parse_u32_text(key.substr(prefix.size()), index);
 }
 
+static bool quick_state_parse_gxm_notification_wait_key(const std::string &key, uint32_t &index) {
+    constexpr std::string_view prefix = "notification_wait.";
+    if (key.rfind(prefix, 0) != 0 || key.size() <= prefix.size())
+        return false;
+    return quick_state_parse_u32_text(key.substr(prefix.size()), index);
+}
+
 static bool quick_state_parse_gxm_memory_map_snapshot(const std::string &text, QuickStateGxmMemoryMapSnapshot &map) {
     const auto fields = quick_state_parse_semicolon_fields(text);
     if (!fields.contains("offset")
@@ -4064,6 +4079,29 @@ static bool quick_state_parse_gxm_memory_map_snapshot(const std::string &text, Q
         && end <= static_cast<uint64_t>(std::numeric_limits<Address>::max()) + 1;
 }
 
+static bool quick_state_parse_gxm_notification_wait_snapshot(const std::string &text, QuickStateGxmNotificationWaitSnapshot &wait) {
+    const auto fields = quick_state_parse_semicolon_fields(text);
+    if (!fields.contains("thread")
+        || !fields.contains("address")
+        || !fields.contains("target")) {
+        return false;
+    }
+
+    int32_t parsed_thread_id = 0;
+    uint64_t parsed_address = 0;
+    if (!quick_state_parse_i32_text(fields.at("thread"), parsed_thread_id)
+        || parsed_thread_id <= 0
+        || !quick_state_parse_u64_text(fields.at("address"), parsed_address, 0)
+        || parsed_address > std::numeric_limits<Address>::max()
+        || !quick_state_parse_u32_text(fields.at("target"), wait.target_value)) {
+        return false;
+    }
+
+    wait.thread_id = static_cast<SceUID>(parsed_thread_id);
+    wait.address = static_cast<Address>(parsed_address);
+    return wait.address != 0;
+}
+
 static bool quick_state_parse_gxm_snapshot_section(const QuickStateSlot &slot, QuickStateGxmSnapshot &snapshot) {
     snapshot = {};
     const QuickStateSection *section = quick_state_find_section(slot, "thor.gxm");
@@ -4077,6 +4115,7 @@ static bool quick_state_parse_gxm_snapshot_section(const QuickStateSlot &slot, Q
 
     uint64_t parsed_address = 0;
     size_t memory_map_count = 0;
+    size_t notification_wait_count = 0;
     int32_t parsed_thread_id = 0;
     if (!quick_state_parse_u32(values, "flags", snapshot.flags)
         || !quick_state_parse_u32(values, "display_queue_max_pending_count", snapshot.display_queue_max_pending_count)
@@ -4102,6 +4141,15 @@ static bool quick_state_parse_gxm_snapshot_section(const QuickStateSlot &slot, Q
         return false;
     }
     snapshot.notification_region = static_cast<Address>(parsed_address);
+    const auto notification_waits_value = values.find("notification_waits");
+    if (notification_waits_value != values.end()) {
+        uint64_t parsed_count = 0;
+        if (!quick_state_parse_u64_text(notification_waits_value->second, parsed_count)
+            || parsed_count > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+            return false;
+        }
+        notification_wait_count = static_cast<size_t>(parsed_count);
+    }
 
     snapshot.memory_maps.resize(memory_map_count);
     std::vector<bool> seen(memory_map_count, false);
@@ -4119,6 +4167,24 @@ static bool quick_state_parse_gxm_snapshot_section(const QuickStateSlot &slot, Q
         seen[index] = true;
     }
     if (std::any_of(seen.begin(), seen.end(), [](const bool value) { return !value; }))
+        return false;
+
+    snapshot.notification_waits.resize(notification_wait_count);
+    std::vector<bool> seen_notification_waits(notification_wait_count, false);
+    for (const auto &[key, value] : values) {
+        uint32_t index = 0;
+        if (!quick_state_parse_gxm_notification_wait_key(key, index))
+            continue;
+        if (index >= notification_wait_count)
+            return false;
+
+        QuickStateGxmNotificationWaitSnapshot wait;
+        if (!quick_state_parse_gxm_notification_wait_snapshot(value, wait))
+            return false;
+        snapshot.notification_waits[index] = wait;
+        seen_notification_waits[index] = true;
+    }
+    if (std::any_of(seen_notification_waits.begin(), seen_notification_waits.end(), [](const bool value) { return !value; }))
         return false;
 
     snapshot.valid = true;
@@ -4403,8 +4469,10 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     }
     QuickStateGxmSnapshot gxm_snapshot;
     manifest.gxm_state_restorable = quick_state_parse_gxm_snapshot_section(slot, gxm_snapshot);
-    if (manifest.gxm_state_restorable)
+    if (manifest.gxm_state_restorable) {
         manifest.gxm_memory_maps = gxm_snapshot.memory_maps.size();
+        manifest.gxm_notification_waits = gxm_snapshot.notification_waits.size();
+    }
     manifest.gxm_program_host_state_restorable = quick_state_parse_gxm_program_host_snapshot_header(slot);
     QuickStateAudioSnapshot audio_snapshot;
     manifest.audio_state_restorable = quick_state_parse_audio_snapshot_section(slot, audio_snapshot);
@@ -5854,6 +5922,18 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         text << "global_timestamp=" << emuenv.gxm.global_timestamp.load() << "\n";
         text << "last_display_global=" << emuenv.gxm.last_display_global << "\n";
         text << "notification_region=0x" << std::hex << emuenv.gxm.notification_region.address() << std::dec << "\n";
+        {
+            const std::lock_guard<std::mutex> notification_waits_lock(emuenv.gxm.notification_waits_mutex);
+            text << "notification_waits=" << emuenv.gxm.notification_waits.size() << "\n";
+            for (size_t i = 0; i < emuenv.gxm.notification_waits.size(); i++) {
+                const auto &wait = emuenv.gxm.notification_waits[i];
+                text << "notification_wait." << i
+                     << "=thread=" << wait.thread_id
+                     << ";address=0x" << std::hex << wait.address << std::dec
+                     << ";target=" << wait.target_value
+                     << "\n";
+            }
+        }
         text << "memory_maps=" << emuenv.gxm.memory_mapped_regions.size() << "\n";
         size_t map_index = 0;
         for (const auto &[_, map] : emuenv.gxm.memory_mapped_regions) {
@@ -7177,6 +7257,89 @@ static bool quick_state_unmap_current_gxm_memory_mappings(EmuEnvState &emuenv, c
     return true;
 }
 
+static void quick_state_remove_tracked_gxm_notification_wait(GxmState &gxm, const SceUID thread_id, const Address address, const uint32_t target_value) {
+    const std::lock_guard<std::mutex> lock(gxm.notification_waits_mutex);
+    auto &waits = gxm.notification_waits;
+    waits.erase(std::remove_if(waits.begin(), waits.end(), [thread_id, address, target_value](const GxmNotificationWait &wait) {
+        return wait.thread_id == thread_id && wait.address == address && wait.target_value == target_value;
+    }),
+        waits.end());
+}
+
+static void quick_state_schedule_deferred_gxm_notification_wait(EmuEnvState &emuenv, const ThreadStatePtr &thread, const Address value_address, const uint32_t target_value) {
+    renderer::State *renderer = emuenv.renderer.get();
+    DisplayState *display = &emuenv.display;
+    GxmState *gxm = &emuenv.gxm;
+    MemState *mem = &emuenv.mem;
+    const SceUID thread_id = thread ? thread->id : 0;
+    const uint64_t restore_generation = gxm->notification_wait_restore_generation.load(std::memory_order_acquire);
+
+    std::thread([renderer, display, gxm, mem, thread, thread_id, value_address, target_value, restore_generation]() {
+        Ptr<uint32_t> value_ptr(value_address);
+        if (!value_ptr.valid(*mem)) {
+            quick_state_remove_tracked_gxm_notification_wait(*gxm, thread_id, value_address, target_value);
+            return;
+        }
+
+        uint32_t volatile *value = value_ptr.get(*mem);
+        std::unique_lock<std::mutex> lock(renderer->notification_mutex);
+        renderer->notification_ready.wait(lock, [&]() { return *value == target_value || display->abort.load(); });
+        lock.unlock();
+        quick_state_remove_tracked_gxm_notification_wait(*gxm, thread_id, value_address, target_value);
+        if (restore_generation != gxm->notification_wait_restore_generation.load(std::memory_order_acquire))
+            return;
+        thread->complete_deferred_import_wait(0);
+    }).detach();
+}
+
+static bool quick_state_restore_gxm_notification_waits(EmuEnvState &emuenv, const QuickStateGxmSnapshot &snapshot) {
+    emuenv.gxm.notification_wait_restore_generation.fetch_add(1, std::memory_order_acq_rel);
+    {
+        const std::lock_guard<std::mutex> lock(emuenv.gxm.notification_waits_mutex);
+        emuenv.gxm.notification_waits.clear();
+    }
+
+    if (snapshot.notification_waits.empty())
+        return true;
+    if (!emuenv.renderer) {
+        quick_state_last_restore_detail = "GXM notification waits need an active renderer";
+        return false;
+    }
+
+    for (const QuickStateGxmNotificationWaitSnapshot &saved_wait : snapshot.notification_waits) {
+        ThreadStatePtr thread = emuenv.kernel.get_thread(saved_wait.thread_id);
+        if (!thread) {
+            quick_state_last_restore_detail = fmt::format("GXM notification wait thread {} was not matched", saved_wait.thread_id);
+            return false;
+        }
+
+        Ptr<uint32_t> value_ptr(saved_wait.address);
+        if (!value_ptr.valid(emuenv.mem)) {
+            quick_state_last_restore_detail = fmt::format("GXM notification wait address 0x{:08X} is invalid", saved_wait.address);
+            return false;
+        }
+
+        thread->restore_deferred_import_wait();
+        uint32_t volatile *value = value_ptr.get(emuenv.mem);
+        if (*value == saved_wait.target_value || emuenv.display.abort.load()) {
+            thread->complete_deferred_import_wait(0);
+            continue;
+        }
+
+        {
+            const std::lock_guard<std::mutex> lock(emuenv.gxm.notification_waits_mutex);
+            emuenv.gxm.notification_waits.push_back({
+                .thread_id = saved_wait.thread_id,
+                .address = saved_wait.address,
+                .target_value = saved_wait.target_value,
+            });
+        }
+        quick_state_schedule_deferred_gxm_notification_wait(emuenv, thread, saved_wait.address, saved_wait.target_value);
+    }
+
+    return true;
+}
+
 static bool restore_quick_state_gxm_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
     QuickStateGxmSnapshot snapshot;
     if (!quick_state_parse_gxm_snapshot_section(slot, snapshot)) {
@@ -7206,9 +7369,13 @@ static bool restore_quick_state_gxm_state(EmuEnvState &emuenv, const QuickStateS
         }
     }
 
-    LOG_INFO("Restored GXM host snapshot for {} (maps={}, global_timestamp={}, display_thread={}).",
+    if (!quick_state_restore_gxm_notification_waits(emuenv, snapshot))
+        return false;
+
+    LOG_INFO("Restored GXM host snapshot for {} (maps={}, notification_waits={}, global_timestamp={}, display_thread={}).",
         slot.title_id,
         snapshot.memory_maps.size(),
+        snapshot.notification_waits.size(),
         snapshot.global_timestamp,
         snapshot.display_queue_thread);
     return true;
@@ -8093,6 +8260,7 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "Display vblank callbacks: " << manifest.display_callback_entries << "\n";
     marker << "GXM host-state restore layer: " << (manifest.gxm_state_restorable ? "ready" : "missing") << "\n";
     marker << "GXM memory maps: " << manifest.gxm_memory_maps << "\n";
+    marker << "GXM notification waits: " << manifest.gxm_notification_waits << "\n";
     marker << "GXM shader program host-state restore layer: " << (manifest.gxm_program_host_state_restorable ? "ready" : "missing") << "\n";
     marker << "Audio scalar restore layer: " << (manifest.audio_state_restorable ? "ready" : "missing") << "\n";
     marker << "AVPlayer host-state restore layer: " << (manifest.avplayer_state_restorable ? "ready" : "missing") << "\n";
@@ -8174,6 +8342,7 @@ static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickSta
     marker << "Display vblank wait restore layer: " << (manifest.display_vblank_waits_restorable ? "ready" : "missing") << "\n";
     marker << "GXM host-state restore layer: " << (manifest.gxm_state_restorable ? "ready" : "missing") << "\n";
     marker << "GXM memory maps: " << manifest.gxm_memory_maps << "\n";
+    marker << "GXM notification waits: " << manifest.gxm_notification_waits << "\n";
     marker << "GXM shader program host-state restore layer: " << (manifest.gxm_program_host_state_restorable ? "ready" : "missing") << "\n";
     marker << "Audio scalar restore layer: " << (manifest.audio_state_restorable ? "ready" : "missing") << "\n";
     marker << "AVPlayer host-state restore layer: " << (manifest.avplayer_state_restorable ? "ready" : "missing") << "\n";

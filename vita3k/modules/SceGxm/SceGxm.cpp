@@ -19,6 +19,7 @@
 
 #include <modules/module_parent.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <span>
 #include <stack>
@@ -3105,6 +3106,11 @@ EXPORT(int, sceGxmInitialize, const SceGxmInitializeParams *params) {
         emuenv.gxm.display_queue_waiters.clear();
         emuenv.gxm.pending_display_callbacks.clear();
     }
+    emuenv.gxm.notification_wait_restore_generation.fetch_add(1, std::memory_order_acq_rel);
+    {
+        const std::lock_guard<std::mutex> lock(emuenv.gxm.notification_waits_mutex);
+        emuenv.gxm.notification_waits.clear();
+    }
     std::thread display_host_thread(display_entry_thread, std::ref(emuenv));
     display_host_thread.detach();
     emuenv.gxm.notification_region = Ptr<uint32_t>(alloc(emuenv.mem, MiB(1), "SceGxmNotificationRegion"));
@@ -3217,11 +3223,37 @@ EXPORT(int, _sceGxmMidSceneFlush, SceGxmContext *immediateContext, uint32_t flag
     return CALL_EXPORT(sceGxmMidSceneFlush, immediateContext, flags, vertexSyncObject, vertexNotification);
 }
 
-static void schedule_deferred_notification_wait(renderer::State *renderer, DisplayState *display, const ThreadStatePtr &thread, std::uint32_t volatile *value, const std::uint32_t target_value) {
-    std::thread([renderer, display, thread, value, target_value]() {
+static void remove_tracked_notification_wait(GxmState &gxm, const SceUID thread_id, const Address address, const std::uint32_t target_value) {
+    const std::lock_guard<std::mutex> lock(gxm.notification_waits_mutex);
+    auto &waits = gxm.notification_waits;
+    waits.erase(std::remove_if(waits.begin(), waits.end(), [thread_id, address, target_value](const GxmNotificationWait &wait) {
+        return wait.thread_id == thread_id && wait.address == address && wait.target_value == target_value;
+    }),
+        waits.end());
+}
+
+static void schedule_deferred_notification_wait(EmuEnvState &emuenv, const ThreadStatePtr &thread, const Address value_address, const std::uint32_t target_value) {
+    renderer::State *renderer = emuenv.renderer.get();
+    DisplayState *display = &emuenv.display;
+    GxmState *gxm = &emuenv.gxm;
+    MemState *mem = &emuenv.mem;
+    const SceUID thread_id = thread ? thread->id : 0;
+    const uint64_t restore_generation = gxm->notification_wait_restore_generation.load(std::memory_order_acquire);
+
+    std::thread([renderer, display, gxm, mem, thread, thread_id, value_address, target_value, restore_generation]() {
+        Ptr<std::uint32_t> value_ptr(value_address);
+        if (!value_ptr.valid(*mem)) {
+            remove_tracked_notification_wait(*gxm, thread_id, value_address, target_value);
+            return;
+        }
+
+        std::uint32_t volatile *value = value_ptr.get(*mem);
         std::unique_lock<std::mutex> lock(renderer->notification_mutex);
         renderer->notification_ready.wait(lock, [&]() { return *value == target_value || display->abort.load(); });
         lock.unlock();
+        remove_tracked_notification_wait(*gxm, thread_id, value_address, target_value);
+        if (restore_generation != gxm->notification_wait_restore_generation.load(std::memory_order_acquire))
+            return;
         thread->complete_deferred_import_wait(0);
     }).detach();
 }
@@ -3240,7 +3272,15 @@ EXPORT(int, sceGxmNotificationWait, const SceGxmNotification *notification) {
         lock.unlock();
         const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
         if (thread && thread->begin_deferred_import_wait()) {
-            schedule_deferred_notification_wait(emuenv.renderer.get(), &emuenv.display, thread, value, target_value);
+            {
+                const std::lock_guard<std::mutex> wait_lock(emuenv.gxm.notification_waits_mutex);
+                emuenv.gxm.notification_waits.push_back({
+                    .thread_id = thread_id,
+                    .address = notification->address.address(),
+                    .target_value = target_value,
+                });
+            }
+            schedule_deferred_notification_wait(emuenv, thread, notification->address.address(), target_value);
             return 0;
         }
 
@@ -5173,6 +5213,11 @@ EXPORT(int, sceGxmTerminate) {
         const std::lock_guard<std::mutex> lock(emuenv.gxm.display_queue_waiters_mutex);
         emuenv.gxm.display_queue_waiters.clear();
         emuenv.gxm.pending_display_callbacks.clear();
+    }
+    emuenv.gxm.notification_wait_restore_generation.fetch_add(1, std::memory_order_acq_rel);
+    {
+        const std::lock_guard<std::mutex> lock(emuenv.gxm.notification_waits_mutex);
+        emuenv.gxm.notification_waits.clear();
     }
     emuenv.gxm.display_queue.abort();
     emuenv.kernel.get_thread(emuenv.gxm.display_queue_thread)->exit_delete();
