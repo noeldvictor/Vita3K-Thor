@@ -104,6 +104,7 @@
 #endif
 
 #include <fmt/chrono.h>
+#include <fmt/ranges.h>
 #include <stb_image_write.h>
 
 #include <gdbstub/functions.h>
