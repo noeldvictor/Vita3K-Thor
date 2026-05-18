@@ -14,6 +14,7 @@ param(
     [switch]$SkipBuild,
     [switch]$StopExisting,
     [switch]$ExerciseUndoLoad,
+    [switch]$ExerciseCorruptPrimaryFallback,
     [switch]$KeepRunning
 )
 
@@ -133,6 +134,45 @@ function Assert-CleanLog([string]$Path) {
     if ($hits) {
         $snippet = ($hits | Select-Object -First 12 | ForEach-Object { "$($_.LineNumber): $($_.Line)" }) -join [Environment]::NewLine
         throw "Critical quickstate pattern found in $Path`n$snippet"
+    }
+}
+
+function Assert-BackupFallbackLog([string]$Path, [string]$Title) {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Fallback log not found: $Path"
+    }
+
+    $pattern = "Loaded durable quickstate backup for $([regex]::Escape($Title)) because the primary slot was missing or failed validation"
+    $hit = Select-String -LiteralPath $Path -Pattern $pattern -CaseSensitive:$false -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $hit) {
+        throw "Backup fallback was not observed in $Path"
+    }
+}
+
+function Start-CorruptPrimaryFallbackTest([string]$StateFile, [System.Collections.Generic.List[string]]$Summary, [string]$Label) {
+    $backupFile = "$StateFile.bak"
+    $originalFile = "$StateFile.corrupt-primary-original"
+    if (-not (Test-Path -LiteralPath $StateFile)) {
+        throw "Primary state file not found for corrupt fallback test: $StateFile"
+    }
+    if (-not (Test-Path -LiteralPath $backupFile)) {
+        throw "Backup state file not found for corrupt fallback test: $backupFile"
+    }
+
+    Copy-Item -LiteralPath $StateFile -Destination $originalFile -Force
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes("VITA3K_THOR_CORRUPT_PRIMARY_FALLBACK_TEST")
+    [System.IO.File]::WriteAllBytes($StateFile, $bytes)
+    $Summary.Add("[$Label] corrupted primary state to require backup fallback: $StateFile")
+    return $originalFile
+}
+
+function Restore-CorruptPrimaryFallbackTest([string]$StateFile, [string]$OriginalFile) {
+    if ([string]::IsNullOrWhiteSpace($OriginalFile)) {
+        return
+    }
+    if (Test-Path -LiteralPath $OriginalFile) {
+        Copy-Item -LiteralPath $OriginalFile -Destination $StateFile -Force
+        Remove-Item -LiteralPath $OriginalFile -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -273,7 +313,12 @@ $summary.Add("Commit: $(git -C $repoRoot rev-parse --short HEAD)")
 $summary.Add("Titles: $($TitleId -join ", ")")
 $summary.Add("Cycles: $Cycles")
 $summary.Add("Exercise undo load: $ExerciseUndoLoad")
+$summary.Add("Exercise corrupt primary fallback: $ExerciseCorruptPrimaryFallback")
 $summary.Add("")
+
+if ($ExerciseCorruptPrimaryFallback -and $KeepRunning) {
+    throw "-ExerciseCorruptPrimaryFallback cannot be combined with -KeepRunning because the harness must restore the primary state file after run 2."
+}
 
 if ($StopExisting) {
     Get-Vita3KProcesses | ForEach-Object { Stop-Vita3KProcess $_ }
@@ -383,7 +428,12 @@ foreach ($run in $runs) {
 
     $summary.Add("[$title cycle $cycle/$Cycles] durable run 2: $case2")
     $process = $null
+    $corruptOriginal = ""
     try {
+        if ($ExerciseCorruptPrimaryFallback) {
+            $corruptOriginal = Start-CorruptPrimaryFallbackTest $stateFile $summary "$title cycle $cycle run 2"
+        }
+
         $process = Start-TitleRun $title $case2 $ConfigPath $BackendRenderer $TraceLimit $LogLevel
         Start-Sleep -Seconds $StartupSeconds
         Assert-HealthyProcess $process "$title startup durable run 2"
@@ -401,10 +451,14 @@ foreach ($run in $runs) {
         if (-not $KeepRunning) {
             Stop-Vita3KProcess $process
         }
+        Restore-CorruptPrimaryFallbackTest $stateFile $corruptOriginal
     }
 
     try {
         Assert-CleanLog $stdout2
+        if ($ExerciseCorruptPrimaryFallback) {
+            Assert-BackupFallbackLog $stdout2 $title
+        }
     } catch {
         $failures.Add("$title cycle $cycle run 2 log: $($_.Exception.Message)")
     }
