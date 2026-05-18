@@ -159,6 +159,8 @@ function Add-MarkerDigest([System.Collections.Generic.List[string]]$Summary, [st
         "^Open std files:",
         "^Open directories:",
         "^FIOS overlays:",
+        "^Sysmem blocks:",
+        "^Sysmem VM blocks:",
         "^Display vblank waits:",
         "^Display vblank callbacks:",
         "^GXM display queue entries:",

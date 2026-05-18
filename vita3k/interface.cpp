@@ -51,6 +51,7 @@
 #include <modules/SceAudiodec/quick_state.h>
 #include <modules/SceAvPlayer/quick_state.h>
 #include <modules/SceJpeg/quick_state.h>
+#include <modules/SceSysmem/quick_state.h>
 #include <modules/SceVideodec/quick_state.h>
 #include <motion/event_handler.h>
 #include <string>
@@ -1491,6 +1492,14 @@ struct QuickStateJpegSnapshot {
     std::string detail;
 };
 
+struct QuickStateSysmemSnapshot {
+    bool valid = false;
+    size_t block_count = 0;
+    size_t vm_block_count = 0;
+    std::string schema;
+    std::string detail;
+};
+
 struct QuickStateRestoreManifest {
     uint32_t format_version = QUICKSTATE_VERSION;
     uint64_t guest_memory_bytes = 0;
@@ -1507,6 +1516,7 @@ struct QuickStateRestoreManifest {
     bool io_file_handles_restorable = false;
     bool io_directory_handles_restorable = false;
     bool io_overlays_restorable = false;
+    bool sysmem_state_restorable = false;
     bool sync_primitives_restorable = false;
     bool sync_wait_queue_metadata_complete = false;
     bool display_state_restorable = false;
@@ -1527,6 +1537,9 @@ struct QuickStateRestoreManifest {
     size_t io_memory_file_handles = 0;
     size_t io_directory_handles = 0;
     size_t io_overlay_count = 0;
+    size_t sysmem_blocks = 0;
+    size_t sysmem_vm_blocks = 0;
+    std::string sysmem_schema;
     size_t display_wait_entries = 0;
     size_t display_callback_entries = 0;
     size_t kernel_callback_entries = 0;
@@ -4564,6 +4577,27 @@ static bool quick_state_parse_avplayer_snapshot_section(const QuickStateSlot &sl
     return true;
 }
 
+static bool quick_state_parse_sysmem_snapshot_section(const QuickStateSlot &slot, QuickStateSysmemSnapshot &snapshot) {
+    snapshot = {};
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.sysmem");
+    if (!section || section->version != 1) {
+        snapshot.detail = "Sysmem host-state section is missing";
+        return false;
+    }
+
+    const auto values = quick_state_parse_text_section(*section);
+    const auto schema = values.find("schema");
+    snapshot.schema = schema == values.end() ? "" : schema->second;
+    std::string detail;
+    if (!sce_sysmem::quick_state_validate_snapshot_values(values, &snapshot.block_count, &snapshot.vm_block_count, &detail)) {
+        snapshot.detail = detail.empty() ? "Sysmem host-state section is invalid" : detail;
+        return false;
+    }
+
+    snapshot.valid = true;
+    return true;
+}
+
 static bool quick_state_parse_audiodec_snapshot_section(const QuickStateSlot &slot, QuickStateAudiodecSnapshot &snapshot) {
     snapshot = {};
     const QuickStateSection *section = quick_state_find_section(slot, "thor.audiodec");
@@ -4776,6 +4810,11 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         manifest.io_directory_handles_restorable = true;
         manifest.io_overlays_restorable = true;
     }
+    QuickStateSysmemSnapshot sysmem_snapshot;
+    manifest.sysmem_state_restorable = quick_state_parse_sysmem_snapshot_section(slot, sysmem_snapshot);
+    manifest.sysmem_blocks = sysmem_snapshot.block_count;
+    manifest.sysmem_vm_blocks = sysmem_snapshot.vm_block_count;
+    manifest.sysmem_schema = sysmem_snapshot.schema;
     QuickStateSyncSnapshot sync_snapshot;
     manifest.sync_primitives_restorable = quick_state_parse_sync_primitives_section(slot, sync_snapshot);
     if (manifest.sync_primitives_restorable) {
@@ -4851,6 +4890,8 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
     }
     if (!manifest.thread_metadata_restorable)
         manifest.missing_serializers.push_back("kernel-thread-metadata");
+    if (!manifest.sysmem_state_restorable)
+        manifest.missing_serializers.push_back("sysmem-state");
     if (!manifest.kernel_callbacks_restorable && manifest.kernel_callback_entries > 0)
         manifest.missing_serializers.push_back("kernel-callbacks");
     if (!manifest.display_state_restorable) {
@@ -4904,6 +4945,7 @@ static QuickStateRestoreManifest build_quick_state_restore_manifest(EmuEnvState 
         && manifest.timing_restorable
         && manifest.thread_metadata_restorable
         && manifest.kernel_callbacks_restorable
+        && manifest.sysmem_state_restorable
         && manifest.sync_primitives_restorable
         && manifest.io_file_positions_restorable
         && manifest.display_state_restorable
@@ -5905,6 +5947,7 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         "thor.quickstate.manifest",
         "thor.timing",
         "thor.kernel.objects",
+        "thor.sysmem",
         "thor.io.vfs",
         "thor.display",
         "thor.gxm",
@@ -6234,6 +6277,8 @@ static std::vector<QuickStateSection> build_quick_state_capture_sections(EmuEnvS
         sections.push_back(quick_state_make_text_section("thor.io.vfs", text));
     }
 
+    sections.push_back(quick_state_make_text_section("thor.sysmem", sce_sysmem::quick_state_snapshot_text(emuenv)));
+
     {
         std::ostringstream text;
         text << "schema=thor.display.v1\n";
@@ -6431,6 +6476,31 @@ static bool restore_quick_state_timing_state(EmuEnvState &emuenv, const QuickSta
         timing.kernel_guest_tick,
         timing.kernel_process_time,
         timing.kernel_speed_percent);
+    return true;
+}
+
+static bool restore_quick_state_sysmem_state(EmuEnvState &emuenv, const QuickStateSlot &slot) {
+    const QuickStateSection *section = quick_state_find_section(slot, "thor.sysmem");
+    if (!section || section->version != 1) {
+        LOG_WARN("Refused Sysmem restore for {} because the thor.sysmem section is missing.", slot.title_id);
+        quick_state_last_restore_detail = "Sysmem host-state section is missing";
+        return false;
+    }
+
+    const auto values = quick_state_parse_text_section(*section);
+    std::string detail;
+    if (!sce_sysmem::quick_state_restore_snapshot(emuenv, values, &detail)) {
+        quick_state_last_restore_detail = detail.empty() ? "Sysmem host-state restore failed" : detail;
+        LOG_WARN("Refused Sysmem restore for {} because {}.", slot.title_id, quick_state_last_restore_detail);
+        return false;
+    }
+
+    QuickStateSysmemSnapshot snapshot;
+    quick_state_parse_sysmem_snapshot_section(slot, snapshot);
+    LOG_INFO("Restored Sysmem host snapshot for {} (blocks={}, vm_blocks={}).",
+        slot.title_id,
+        snapshot.block_count,
+        snapshot.vm_block_count);
     return true;
 }
 
@@ -8713,6 +8783,12 @@ static bool restore_quick_state(EmuEnvState &emuenv, QuickStateSlot &slot) {
         return fail_quick_state_restore();
     }
 
+    if (!restore_quick_state_sysmem_state(emuenv, slot)) {
+        if (quick_state_last_restore_detail.empty())
+            quick_state_last_restore_detail = "Sysmem restore failed";
+        return fail_quick_state_restore();
+    }
+
     if (!restore_quick_state_timing_state(emuenv, slot)) {
         quick_state_last_restore_detail = "timing restore failed";
         return fail_quick_state_restore();
@@ -8958,6 +9034,10 @@ static void write_quick_state_marker(EmuEnvState &emuenv, const QuickStateSlot &
     marker << "IO file-position restore layer: " << (manifest.io_file_positions_restorable ? "ready" : "missing") << "\n";
     marker << "IO file-handle restore layer: " << (manifest.io_file_handles_restorable ? "ready" : "missing") << "\n";
     marker << "IO memory-backed file handles: " << manifest.io_memory_file_handles << "\n";
+    marker << "Sysmem host-state restore layer: " << (manifest.sysmem_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Sysmem schema: " << (manifest.sysmem_schema.empty() ? "missing" : manifest.sysmem_schema) << "\n";
+    marker << "Sysmem blocks: " << manifest.sysmem_blocks << "\n";
+    marker << "Sysmem VM blocks: " << manifest.sysmem_vm_blocks << "\n";
     marker << "Display scalar restore layer: " << (manifest.display_state_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank wait restore layer: " << (manifest.display_vblank_waits_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank waits: " << manifest.display_wait_entries << "\n";
@@ -9065,6 +9145,10 @@ static void write_quick_state_restore_marker(EmuEnvState &emuenv, const QuickSta
     marker << "Sync wait queue metadata: " << (manifest.sync_wait_queue_metadata_complete ? "ready" : "missing")
            << " (" << manifest.sync_wait_queue_entries << " serialized)\n";
     marker << "IO file-position restore layer: " << (manifest.io_file_positions_restorable ? "ready" : "missing") << "\n";
+    marker << "Sysmem host-state restore layer: " << (manifest.sysmem_state_restorable ? "ready" : "missing") << "\n";
+    marker << "Sysmem schema: " << (manifest.sysmem_schema.empty() ? "missing" : manifest.sysmem_schema) << "\n";
+    marker << "Sysmem blocks: " << manifest.sysmem_blocks << "\n";
+    marker << "Sysmem VM blocks: " << manifest.sysmem_vm_blocks << "\n";
     marker << "Display scalar restore layer: " << (manifest.display_state_restorable ? "ready" : "missing") << "\n";
     marker << "Display vblank wait restore layer: " << (manifest.display_vblank_waits_restorable ? "ready" : "missing") << "\n";
     marker << "GXM host-state restore layer: " << (manifest.gxm_state_restorable ? "ready" : "missing") << "\n";
