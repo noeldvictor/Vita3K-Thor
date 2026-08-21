@@ -55,7 +55,7 @@ bool is_cmd_ready(MemState &mem, CommandList &command_list) {
     return sync->timestamp_current >= timestamp;
 }
 
-static bool wait_cmd(MemState &mem, CommandList &command_list) {
+static renderer::SyncWaitResult wait_cmd(MemState &mem, CommandList &command_list) {
     // we assume here that the cmd starts with a WaitSyncObject
 
     SceGxmSyncObject *sync = reinterpret_cast<Ptr<SceGxmSyncObject> *>(&command_list.first->data[0])->get(mem);
@@ -122,6 +122,13 @@ void process_batches(renderer::State &state, const FeatureState &features, MemSt
     auto max_time = duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() + 500;
 
     while (!state.should_display) {
+        if (state.render_abort.load(std::memory_order_relaxed))
+            return;
+
+        // overlay requested an async present
+        if (state.async_flip_requested.load(std::memory_order_relaxed))
+            return;
+
         // Try to wait for a batch (about 2 or 3ms, game should be fast for this)
         auto cmd_list = state.command_buffer_queue.top(3);
 
@@ -134,7 +141,16 @@ void process_batches(renderer::State &state, const FeatureState &features, MemSt
             if (state.current_backend == Backend::OpenGL && config.current_config.v_sync)
                 return;
 
-            if (!cmd_list || !wait_cmd(mem, *cmd_list)) {
+            renderer::SyncWaitResult wait_result = renderer::SyncWaitResult::TimedOut;
+            if (cmd_list)
+                wait_result = wait_cmd(mem, *cmd_list);
+            if (!cmd_list || wait_result != renderer::SyncWaitResult::Ready) {
+                if (wait_result == renderer::SyncWaitResult::Shutdown)
+                    return;
+
+                if (state.async_flip_requested.load(std::memory_order_relaxed))
+                    return;
+
                 auto curr_time = duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
                 if (curr_time >= max_time)
                     // display a frame even though the game is not diplaying anything

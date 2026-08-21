@@ -31,6 +31,7 @@
 #include <shader/spirv_recompiler.h>
 #include <util/align.h>
 #include <util/log.h>
+#include <util/warning.h>
 #include <vkutil/vkutil.h>
 
 #include <SDL3/SDL_vulkan.h>
@@ -45,14 +46,22 @@
 
 #ifdef __ANDROID__
 #include <SDL3/SDL_system.h>
+<<<<<<< HEAD
 #include <adrenotools/bcenabler.h>
 #include <adrenotools/driver.h>
 #include <boost/range/iterator_range.hpp>
+=======
+>>>>>>> upstream/master
 #include <dlfcn.h>
 #include <jni.h>
 #include <sys/mman.h>
 #include <sys/system_properties.h>
 #include <util/float_to_half.h>
+
+#ifdef USE_ADRENO_TOOLS
+#include <adrenotools/bcenabler.h>
+#include <adrenotools/driver.h>
+#endif
 
 #include <android/hardware_buffer.h>
 
@@ -60,14 +69,9 @@ typedef struct native_handle {
     int version; /* sizeof(native_handle_t) */
     int numFds; /* number of file-descriptors at &data[0] */
     int numInts; /* number of ints at &data[numFds] */
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wzero-length-array"
-#endif
+    DISABLE_CLANG_WARNING_BEGIN("-Wzero-length-array")
     int data[0]; /* numFds + numInts ints */
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#endif
+    DISABLE_CLANG_WARNING_END
 } native_handle_t;
 
 typedef const native_handle_t *buffer_handle_t;
@@ -97,7 +101,7 @@ static void debug_log_message(std::string_view msg) {
 
     bool log_error = true;
     for (auto ignored_error : ignored_errors) {
-        if (msg.find(ignored_error) != std::string_view::npos) {
+        if (msg.contains(ignored_error)) {
             log_error = false;
             break;
         }
@@ -155,9 +159,23 @@ const static std::vector<const char *> required_device_extensions = {
 
 namespace renderer::vulkan {
 
+<<<<<<< HEAD
 static bool renderer_debug_env_flag(const char *name) {
     const char *value = std::getenv(name);
     if (value == nullptr || value[0] == '\0')
+=======
+#if defined(__ANDROID__) && defined(USE_ADRENO_TOOLS)
+// need to avoid patching bcn per custom driver more than once
+static bool patch_bcn_once(void *function_to_patch) {
+    static std::unordered_set<void *> patched_functions;
+
+    if (patched_functions.find(function_to_patch) != patched_functions.end()) {
+        LOG_INFO("BCeNabler patch already applied");
+        return true;
+    }
+
+    if (!adrenotools_patch_bcn(function_to_patch))
+>>>>>>> upstream/master
         return false;
 
     const std::string_view text(value);
@@ -216,6 +234,56 @@ static bool detect_patch_bcn(bool *support_dxt) {
 }
 #endif
 
+<<<<<<< HEAD
+=======
+#if defined(__linux__) && !defined(__ANDROID__)
+static bool has_instance_extension(const std::vector<vk::ExtensionProperties> &available_extensions, const std::string_view target_name) {
+    return std::find_if(available_extensions.begin(), available_extensions.end(), [&](const vk::ExtensionProperties &ext) {
+        return std::string_view(ext.extensionName.data()) == target_name;
+    }) != available_extensions.end();
+}
+
+static bool select_linux_surface_extension(VKState &vk_state, const renderer::DisplayHandle &display_handle, std::vector<const char *> &instance_extensions) {
+    const auto available_extensions = vk::enumerateInstanceExtensionProperties();
+
+#if defined(HAVE_WAYLAND)
+    if (std::holds_alternative<renderer::WaylandDisplayHandle>(display_handle)) {
+        if (!has_instance_extension(available_extensions, vk::KHRWaylandSurfaceExtensionName)) {
+            LOG_ERROR("Could not find Vulkan instance extension {}", vk::KHRWaylandSurfaceExtensionName);
+            return false;
+        }
+        vk_state.linux_surface_type = LinuxSurfaceType::Wayland;
+        instance_extensions.push_back(vk::KHRWaylandSurfaceExtensionName);
+        return true;
+    }
+#endif
+
+#if defined(HAVE_X11)
+    if (const auto *x11 = std::get_if<renderer::X11DisplayHandle>(&display_handle)) {
+        if (has_instance_extension(available_extensions, vk::KHRXlibSurfaceExtensionName)) {
+            vk_state.linux_surface_type = LinuxSurfaceType::Xlib;
+            instance_extensions.push_back(vk::KHRXlibSurfaceExtensionName);
+            return true;
+        }
+#if defined(VK_USE_PLATFORM_XCB_KHR)
+        if (x11->connection && has_instance_extension(available_extensions, "VK_KHR_xcb_surface")) {
+            vk_state.linux_surface_type = LinuxSurfaceType::Xcb;
+            instance_extensions.push_back("VK_KHR_xcb_surface");
+            LOG_INFO("Falling back to XCB Vulkan surface extension");
+            return true;
+        }
+#endif
+        LOG_ERROR("Could not find a supported Vulkan surface extension for X11 (tried xlib then xcb)");
+        return false;
+    }
+#endif
+
+    LOG_ERROR("Unsupported display handle on Linux");
+    return false;
+}
+#endif
+
+>>>>>>> upstream/master
 static bool device_is_compatible(const vk::PhysicalDevice &device) {
     const std::vector<vk::ExtensionProperties> available_extensions = device.enumerateDeviceExtensionProperties();
 
@@ -405,8 +473,15 @@ static void *load_custom_adreno_driver(const std::string &driver_name) {
 bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state, const Config &config) {
     // Create Instance
     {
+<<<<<<< HEAD
         PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_Vulkan_GetVkGetInstanceProcAddr());
         VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr);
+=======
+#if defined(__ANDROID__) && defined(USE_ADRENO_TOOLS)
+        PFN_vkGetInstanceProcAddr vk_get_instance_proc_addr = android_driver::resolve_vk_get_instance_proc_addr(config.current_config.custom_driver_name);
+        if (!vk_get_instance_proc_addr)
+            return false;
+>>>>>>> upstream/master
 
 #ifdef __ANDROID__
         if (!config.current_config.custom_driver_name.empty()) {
@@ -433,6 +508,7 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
         unsigned int instance_req_ext_count;
         auto instance_extensions_str = SDL_Vulkan_GetInstanceExtensions(&instance_req_ext_count);
         std::vector<const char *> instance_extensions;
+<<<<<<< HEAD
         instance_extensions.reserve(instance_req_ext_count + 6);
         for (size_t i = 0; i < instance_req_ext_count; i++) {
             instance_extensions.push_back(instance_extensions_str[i]);
@@ -443,6 +519,20 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
         // When using MoltenVK directly without the Vulkan Loader, this extension causes an instant crash on startup.
         // Remove it from the default instance_extensions and handle it separately in the optional extensions.
         std::erase(instance_extensions, vk::KHRPortabilityEnumerationExtensionName);
+=======
+        instance_extensions.reserve(8);
+        instance_extensions.push_back(vk::KHRSurfaceExtensionName);
+#ifdef _WIN32
+        instance_extensions.push_back(vk::KHRWin32SurfaceExtensionName);
+#elif defined(__APPLE__)
+        instance_extensions.push_back(vk::EXTMetalSurfaceExtensionName);
+#elif defined(__ANDROID__)
+        instance_extensions.push_back(vk::KHRAndroidSurfaceExtensionName);
+#else
+        auto *frame_host = this->renderer::State::frame;
+        if (!select_linux_surface_extension(*this, frame_host->handle(), instance_extensions))
+            return false;
+>>>>>>> upstream/master
 #endif
 
         const std::set<std::string> optional_instance_extensions = {
@@ -454,10 +544,15 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
             vk::EXTLayerSettingsExtensionName,
 #endif
         };
+        bool has_layer_settings_extension = false;
         for (const vk::ExtensionProperties &prop : vk::enumerateInstanceExtensionProperties()) {
             auto ite = optional_instance_extensions.find(prop.extensionName);
             if (ite != optional_instance_extensions.end()) {
                 instance_extensions.push_back(ite->c_str());
+#ifdef __APPLE__
+                if (*ite == vk::EXTLayerSettingsExtensionName)
+                    has_layer_settings_extension = true;
+#endif
             }
         }
 
@@ -521,12 +616,13 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
             .settingCount = static_cast<uint32_t>(std::size(layer_settings)),
             .pSettings = layer_settings,
         };
+        const void *instance_create_pnext = has_layer_settings_extension ? &layer_settings_info : nullptr;
 #endif
 
         vk::InstanceCreateInfo instance_info{
 #ifdef __APPLE__
             .flags = vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR,
-            .pNext = &layer_settings_info,
+            .pNext = instance_create_pnext,
 #endif
             .pApplicationInfo = &app_info,
         };
@@ -633,7 +729,6 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
 
         // use these features (because they are used by the vita GPU) if they are available
         vk::PhysicalDeviceFeatures enabled_features{
-            .depthClamp = physical_device_features.depthClamp,
             .fillModeNonSolid = physical_device_features.fillModeNonSolid,
             .wideLines = physical_device_features.wideLines,
             .samplerAnisotropy = physical_device_features.samplerAnisotropy,
@@ -970,8 +1065,10 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
         request_mapping = MappingMethod::ExernalHost;
     else if (config_mapping == "page-table")
         request_mapping = MappingMethod::PageTable;
+#ifdef __ANDROID__
     else if (config_mapping == "native-buffer")
         request_mapping = MappingMethod::NativeBuffer;
+#endif
     const std::string_view mapping_string[] = { "Disabled", "Double buffer", "External Host", "Page Table", "Native Buffer" };
 
     if ((1 << static_cast<int>(request_mapping)) & supported_mapping_methods_mask)
@@ -996,7 +1093,7 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
 
 #if defined(__linux__) && !defined(__ANDROID__) // According to my tests (Macdu), mprotect on buffers (mapped with external memory host) only works with Nvidia drivers
     surface_cache.can_mprotect_mapped_memory = mapping_method == MappingMethod::DoubleBuffer
-        || std::string_view(physical_device_properties.deviceName).find("NVIDIA") != std::string_view::npos;
+        || std::string_view(physical_device_properties.deviceName).contains("NVIDIA");
 #endif
 
     pipeline_cache.init(support_rasterized_order_access);
@@ -1267,7 +1364,7 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
         add_external_mapping(mem, address.address(), size, reinterpret_cast<uint8_t *>(mapped_location));
         mapped_memories[address.address()] = { address.address(), ExternalBuffer{ device_memory, buffer }, mapped_buffer, size, buffer_address };
 #else
-        LOG_ERROR("Native buffer is only supported on Android!\n");
+        LOG_CRITICAL("Native buffer is only supported on Android!\n");
 #endif
         break;
     }
@@ -1549,10 +1646,12 @@ bool VKState::support_custom_drivers() {
 }
 
 void VKState::set_turbo_mode(bool set) {
+#ifdef USE_ADRENO_TOOLS
     if (!support_custom_drivers())
         return;
 
     adrenotools_set_turbo(set);
+#endif
 }
 #endif
 

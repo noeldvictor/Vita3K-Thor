@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include <util/warning.h>
+
 #ifdef __ANDROID__
 #define VK_USE_PLATFORM_ANDROID_KHR
 #elif defined(__APPLE__)
@@ -26,19 +28,71 @@
 #define VULKAN_HPP_NO_CONSTRUCTORS
 #define VULKAN_HPP_NO_SPACESHIP_OPERATOR
 #include <vulkan/vulkan.hpp>
+
+#undef VK_USE_PLATFORM_ANDROID_KHR
+#undef VK_USE_PLATFORM_METAL_EXT
+#undef VK_USE_PLATFORM_WIN32_KHR
+#undef VK_USE_PLATFORM_XLIB_KHR
+#undef VK_USE_PLATFORM_WAYLAND_KHR
+#undef VK_ENABLE_BETA_EXTENSIONS
+
+#ifdef None
+#undef None
+#endif
+#ifdef Bool
+#undef Bool
+#endif
+#ifdef Status
+#undef Status
+#endif
+#ifdef Success
+#undef Success
+#endif
+#ifdef True
+#undef True
+#endif
+#ifdef False
+#undef False
+#endif
+#ifdef KeyPress
+#undef KeyPress
+#endif
+#ifdef KeyRelease
+#undef KeyRelease
+#endif
+#ifdef FocusIn
+#undef FocusIn
+#endif
+#ifdef FocusOut
+#undef FocusOut
+#endif
+#ifdef Expose
+#undef Expose
+#endif
+#ifdef GrayScale
+#undef GrayScale
+#endif
+#ifdef CursorShape
+#undef CursorShape
+#endif
+
+namespace VULKAN_HPP_NAMESPACE {
+class ValidationFailedEXTError : public SystemError {
+public:
+    ValidationFailedEXTError(std::string const &message)
+        : SystemError(make_error_code(Result::eErrorValidationFailedEXT), message) {}
+
+    ValidationFailedEXTError(char const *message)
+        : SystemError(make_error_code(Result::eErrorValidationFailedEXT), message) {}
+};
+} // namespace VULKAN_HPP_NAMESPACE
+
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wnullability-completeness"
-#endif
-
+DISABLE_CLANG_WARNING_BEGIN("-Wnullability-completeness")
 #include <vk_mem_alloc.hpp>
-
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#endif
+DISABLE_CLANG_WARNING_END
 
 #include <util/fs.h>
 

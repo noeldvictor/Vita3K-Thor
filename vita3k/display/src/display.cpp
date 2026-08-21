@@ -121,7 +121,9 @@ bool wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePt
             display.vblank_wait_infos.push_back({ wait_thread, target_vcount, false });
         }
 
-        wait_thread->status_cond.wait(thread_lock, [=]() { return wait_thread->status == ThreadStatus::run; });
+        wait_thread->status_cond.wait(thread_lock, [&]() {
+            return wait_thread->status == ThreadStatus::run;
+        });
     }
 
     if (is_cb) {

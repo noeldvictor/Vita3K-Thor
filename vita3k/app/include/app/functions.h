@@ -35,8 +35,10 @@ enum class AppRunType {
     Extracted,
 };
 
-void init_paths(Root &root_paths);
+bool init_paths(Root &root_paths);
 bool init(EmuEnvState &state, Config &cfg, const Root &root_paths);
+void shutdown_app_runtime(EmuEnvState &state);
+void reset_app_state(EmuEnvState &state);
 bool late_init(EmuEnvState &state);
 void destroy(EmuEnvState &emuenv, ImGui_State *imgui);
 void update_viewport(EmuEnvState &state);
@@ -49,7 +51,24 @@ std::string add_custom_driver_from_path(const std::string &file_path);
 void remove_custom_driver(EmuEnvState &emuenv, const std::string &driver);
 #endif
 
-void set_window_title(EmuEnvState &emuenv);
-void calculate_fps(EmuEnvState &emuenv);
+bool set_app_info(EmuEnvState &emuenv, const std::string &app_path);
+void reset_controller_binding(EmuEnvState &emuenv);
+void reset_perf_metrics(EmuEnvState &emuenv);
+void sync_perf_overlay_config(EmuEnvState &emuenv);
+FirmwareState get_firmware_state(const EmuEnvState &emuenv);
+bool has_firmware_installed(const EmuEnvState &emuenv);
+bool ensure_current_user(EmuEnvState &emuenv);
+bool switch_emulator_path(EmuEnvState &emuenv, const fs::path &vita_fs_path);
+bool setup_game_launch(EmuEnvState &emuenv, const std::string &app_path, bool update_last_time_used = true);
+void prepare_game_launch_overlay(EmuEnvState &emuenv);
+bool update_runtime_metrics(EmuEnvState &emuenv, LaunchRuntimeMetrics &metrics);
+void abort_game_launch(EmuEnvState &emuenv);
+void request_in_process_launch(EmuEnvState &emuenv, AppLaunchRequest request);
+
+void load_users(EmuEnvState &emuenv);
+void save_user(EmuEnvState &emuenv, const std::string &user_id);
+std::string create_user(EmuEnvState &emuenv, const std::string &name);
+void delete_user(EmuEnvState &emuenv, const std::string &user_id);
+bool activate_user(EmuEnvState &emuenv, const std::string &user_id);
 
 } // namespace app

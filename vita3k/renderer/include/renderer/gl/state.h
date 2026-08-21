@@ -39,6 +39,9 @@ struct GLState : public renderer::State {
     GLSurfaceCache surface_cache;
 
     ScreenRenderer screen_renderer;
+    OverlayRenderer overlay_renderer;
+
+    bool context_is_current = false;
 
     bool init() override;
     void late_init(const Config &cfg, const std::string_view game_id, MemState &mem) override;

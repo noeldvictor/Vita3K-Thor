@@ -90,6 +90,11 @@ std::string to_debug_str<SceSysmoduleModuleId>(const MemState &mem, SceSysmodule
     case SCE_SYSMODULE_MARLIN_DOWNLOADER: return "SCE_SYSMODULE_MARLIN_DOWNLOADER";
     case SCE_SYSMODULE_MARLIN_APP_LIB: return "SCE_SYSMODULE_MARLIN_APP_LIB";
     case SCE_SYSMODULE_TELEPHONY_UTIL: return "SCE_SYSMODULE_TELEPHONY_UTIL";
+    case SCE_SYSMODULE_SHACCCG: return "SCE_SYSMODULE_SHACCCG";
+    case SCE_SYSMODULE_MONO_BRIDGE: return "SCE_SYSMODULE_MONO_BRIDGE";
+    case SCE_SYSMODULE_MONO: return "SCE_SYSMODULE_MONO";
+    case SCE_SYSMODULE_PSM: return "SCE_SYSMODULE_PSM";
+    case SCE_SYSMODULE_PSM_DEVAGENT: return "SCE_SYSMODULE_PSM_DEVAGENT";
     case SCE_SYSMODULE_PSPNET_ADHOC: return "SCE_SYSMODULE_PSPNET_ADHOC";
     case SCE_SYSMODULE_DTCP_IP: return "SCE_SYSMODULE_DTCP_IP";
     case SCE_SYSMODULE_VIDEO_SEARCH_EMPR: return "SCE_SYSMODULE_VIDEO_SEARCH_EMPR";
@@ -186,7 +191,7 @@ EXPORT(int, sceSysmoduleIsLoadedInternal, SceSysmoduleInternalModuleId module_id
         return RET_ERROR(SCE_SYSMODULE_ERROR_INVALID_VALUE);
 
     std::lock_guard<std::mutex> guard(emuenv.kernel.mutex);
-    if (vector_utils::contains(emuenv.kernel.loaded_internal_sysmodules, module_id))
+    if (std::ranges::contains(emuenv.kernel.loaded_internal_sysmodules, module_id))
         return SCE_SYSMODULE_LOADED;
     else
         return RET_ERROR(SCE_SYSMODULE_ERROR_UNLOADED);
@@ -221,7 +226,7 @@ EXPORT(int, sceSysmoduleLoadModuleInternal, SceSysmoduleInternalModuleId module_
         return CALL_EXPORT(sceSysmoduleLoadModule, static_cast<SceSysmoduleModuleId>(module_id));
     }
 
-    const bool loaded = load_sys_module_internal_with_arg(emuenv, thread_id, module_id, 0, Ptr<void>(), nullptr);
+    const bool loaded = load_sys_module_internal_with_arg(emuenv, module_id, 0, Ptr<void>(), nullptr);
     return loaded ? SCE_SYSMODULE_LOADED : RET_ERROR(SCE_SYSMODULE_ERROR_FATAL);
 }
 
@@ -230,7 +235,7 @@ EXPORT(int, sceSysmoduleLoadModuleInternalWithArg, SceSysmoduleInternalModuleId 
     LOG_TRACE("sceSysmoduleLoadModuleInternalWithArg(module_id:{}, args:{}, argp:{},option:{})", to_debug_str(emuenv.mem, module_id),
         to_debug_str(emuenv.mem, args), to_debug_str(emuenv.mem, argp), to_debug_str(emuenv.mem, option));
 
-    const bool loaded = load_sys_module_internal_with_arg(emuenv, thread_id, module_id, args, argp, option ? option->result.get(emuenv.mem) : nullptr);
+    const bool loaded = load_sys_module_internal_with_arg(emuenv, module_id, args, argp, option ? option->result.get(emuenv.mem) : nullptr);
     return loaded ? SCE_SYSMODULE_LOADED : RET_ERROR(SCE_SYSMODULE_ERROR_FATAL);
 }
 

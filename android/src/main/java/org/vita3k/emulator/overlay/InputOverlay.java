@@ -118,9 +118,14 @@ public final class InputOverlay extends SurfaceView implements OnTouchListener
     // Request focus for the overlay so it has priority on presses.
     requestFocus();
 
+<<<<<<< HEAD:android/src/main/java/org/vita3k/emulator/overlay/InputOverlay.java
     /*SharedPreferences.Editor sPrefsEditor = mPreferences.edit();
     sPrefsEditor.putBoolean("OverlayInit", true);
     sPrefsEditor.apply();*/
+=======
+    applyResolvedState(OverlayStore.loadGlobalState(getContext()), false);
+
+>>>>>>> upstream/master:android/app/src/main/java/org/vita3k/emulator/overlay/InputOverlay.java
     refreshControls();
 
     mTimer = new Timer();
@@ -926,6 +931,7 @@ public final class InputOverlay extends SurfaceView implements OnTouchListener
   {
     SharedPreferences.Editor sPrefsEditor = mPreferences.edit();
 
+<<<<<<< HEAD:android/src/main/java/org/vita3k/emulator/overlay/InputOverlay.java
     // Get screen size
     Display display = ((Activity) getContext()).getWindowManager().getDefaultDisplay();
     DisplayMetrics outMetrics = new DisplayMetrics();
@@ -938,6 +944,47 @@ public final class InputOverlay extends SurfaceView implements OnTouchListener
       float tmp = maxX;
       maxX = maxY;
       maxY = tmp;
+=======
+    mAllowVirtualController = allowVirtualController;
+    updateVirtualControllerState();
+  }
+
+  public void setLayout(OverlayLayout layout)
+  {
+    setLayout(layout, true);
+  }
+
+  public OverlayLayout captureLayout()
+  {
+    return mLayout.normalized();
+  }
+
+  public void refreshOverlayScope(String scopeId)
+  {
+    boolean allowGameOverride = OverlayStore.hasGameOverride(getContext(), scopeId);
+    OverlayState state = OverlayStore.resolveState(getContext(), scopeId, allowGameOverride);
+    applyResolvedState(state, true);
+  }
+
+  public void rebindController()
+  {
+    releaseAllInputs();
+    detachVirtualController();
+    updateVirtualControllerState();
+  }
+
+  private void updateVirtualControllerState()
+  {
+    boolean shouldAttach = mAllowVirtualController && mOverlayMask != 0 && getWindowToken() != null;
+    if (shouldAttach == mControllerAttached)
+      return;
+
+    if (shouldAttach) {
+      attachController();
+      mControllerAttached = true;
+    } else {
+      detachVirtualController();
+>>>>>>> upstream/master:android/app/src/main/java/org/vita3k/emulator/overlay/InputOverlay.java
     }
     Resources res = getResources();
 
@@ -1029,6 +1076,65 @@ public final class InputOverlay extends SurfaceView implements OnTouchListener
   public native void setButton(int button, boolean value);
   public native void setTouchState(boolean is_back);
 
+<<<<<<< HEAD:android/src/main/java/org/vita3k/emulator/overlay/InputOverlay.java
+=======
+  private LayoutBounds resolveLayoutBounds() {
+    return resolveLayoutBounds(getWidth(), getHeight(), getContext());
+  }
+
+  private static LayoutBounds resolveLayoutBounds(int width, int height, Context context) {
+    if (width <= 0 || height <= 0) {
+      DisplayMetrics metrics = context.getResources().getDisplayMetrics();
+      width = metrics.widthPixels;
+      height = metrics.heightPixels;
+    }
+
+    return new LayoutBounds(width, height);
+  }
+
+  private void setLayout(OverlayLayout layout, boolean refresh)
+  {
+    OverlayLayout normalizedLayout = layout != null ? layout.normalized()
+            : OverlayStore.defaultLayout(getContext());
+    if (normalizedLayout.equals(mLayout))
+      return;
+
+    mLayout = normalizedLayout;
+
+    if (refresh)
+      refreshControls();
+  }
+
+  private void applyResolvedState(OverlayState state, boolean refresh)
+  {
+    OverlayState resolvedState = state != null ? state : OverlayStore.defaultState(getContext());
+    OverlayLayout normalizedLayout = resolvedState.getLayout().normalized();
+    OverlayConfig normalizedConfig = resolvedState.getConfig().normalized();
+    float resolvedScale = normalizedConfig.getOverlayScale() / 100f;
+    int resolvedOpacity = normalizedConfig.getOverlayOpacity();
+    boolean changed = !normalizedLayout.equals(mLayout)
+            || Float.compare(mScale, resolvedScale) != 0
+            || mOpacity != resolvedOpacity;
+
+    mLayout = normalizedLayout;
+    mScale = resolvedScale;
+    mOpacity = resolvedOpacity;
+
+    if (refresh && changed)
+      refreshControls();
+  }
+
+  private static final class LayoutBounds {
+    final int width;
+    final int height;
+
+    LayoutBounds(int width, int height) {
+      this.width = width;
+      this.height = height;
+    }
+  }
+
+>>>>>>> upstream/master:android/app/src/main/java/org/vita3k/emulator/overlay/InputOverlay.java
   public static final class ButtonType
   {
     public static final int BUTTON_CROSS = 0;

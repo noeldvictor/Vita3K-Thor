@@ -38,8 +38,9 @@ ExitCode serialize_config(Config &cfg, const fs::path &output_path);
  *        --help, --version, --log-level
  * \param cfg Config options are returned via this parameter.
  * \param root_paths Root location used throughout Vita3K.
+ * \param portable Indicates if the emulator is running in portable mode.
  * \return Success for completion, QuitRequest if Help or Version is requested, otherwise Error.
  */
-ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths);
+ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths, bool portable);
 
 } // namespace config

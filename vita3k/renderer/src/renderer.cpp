@@ -22,6 +22,114 @@
 #include <gxm/functions.h>
 
 namespace renderer {
+
+void State::update_overlays() {
+    if (!overlay_manager)
+        return;
+
+    if (show_compile_shaders) {
+        const auto now = std::chrono::steady_clock::now();
+        const uint32_t newly_compiled = shaders_count_compiled;
+        if (newly_compiled > 0) {
+            m_shaders_compiled_count += newly_compiled;
+            shaders_count_compiled = 0;
+            m_shaders_compiled_time = now;
+
+            auto notice = overlay_manager->get<overlay::shader_compile_notice>();
+            if (!notice)
+                notice = overlay_manager->create<overlay::shader_compile_notice>();
+            notice->update_count(m_shaders_compiled_count, current_backend == Backend::Vulkan);
+        } else if (m_shaders_compiled_count > 0) {
+            auto notice = overlay_manager->get<overlay::shader_compile_notice>();
+            if (notice && notice->should_hide()) {
+                overlay_manager->remove<overlay::shader_compile_notice>();
+                m_shaders_compiled_count = 0;
+            }
+        }
+    }
+
+    {
+        const bool is_paused = paused.load(std::memory_order_relaxed);
+        overlay_manager->set_paused(is_paused);
+        if (is_paused) {
+            if (!overlay_manager->get<overlay::pause_overlay>())
+                overlay_manager->create<overlay::pause_overlay>();
+        } else {
+            if (overlay_manager->get<overlay::pause_overlay>())
+                overlay_manager->remove<overlay::pause_overlay>();
+        }
+    }
+
+    if (perf_overlay.enabled && perf_overlay.fps > 0) {
+        auto perf = overlay_manager->get<overlay::perf_overlay>();
+        if (!perf)
+            perf = overlay_manager->create<overlay::perf_overlay>();
+
+        perf->set_position(static_cast<overlay::screen_quadrant>(perf_overlay.position));
+        perf->set_detail_level(static_cast<overlay::perf_detail_level>(perf_overlay.detail));
+        perf->set_fps_data(perf_overlay.fps, perf_overlay.avg_fps, perf_overlay.min_fps,
+            perf_overlay.max_fps, perf_overlay.ms_per_frame,
+            perf_overlay.fps_values.data(), perf_overlay.fps_values_count,
+            perf_overlay.current_fps_offset);
+    } else {
+        auto perf = overlay_manager->get<overlay::perf_overlay>();
+        if (perf)
+            overlay_manager->remove<overlay::perf_overlay>();
+    }
+
+    if (common_dialog) {
+        auto dlg = overlay_manager->get<overlay::common_dialog_overlay>();
+        if (common_dialog->type != NO_DIALOG && common_dialog->status == SCE_COMMON_DIALOG_STATUS_RUNNING) {
+            bool just_created = false;
+            if (!dlg) {
+                dlg = overlay_manager->create<overlay::common_dialog_overlay>();
+                just_created = true;
+            }
+            if (dlg->poll_dialog(*common_dialog, sys_date_format, sys_button)
+                && common_dialog->type != TROPHY_SETUP_DIALOG) {
+                if (just_created || dlg->input_loop_exited()) {
+                    dlg->reset_input_loop();
+                    overlay_manager->attach_thread_input("common_dialog", dlg);
+                }
+            }
+        } else {
+            if (dlg)
+                overlay_manager->remove<overlay::common_dialog_overlay>();
+        }
+    }
+}
+
+void State::init_overlay_font_dirs() {
+    overlay::fontmgr::set_system_lang(sys_lang);
+
+    if (frame) {
+        overlay::fontmgr::set_system_font_dirs(frame->font_dirs());
+    }
+
+    if (!vita_fs_path.empty()) {
+        auto fw_dir = fs_utils::path_to_utf8(vita_fs_path / "sa0" / "data" / "font" / "pvf");
+        if (!fw_dir.empty()) {
+            if (fw_dir.back() != '/' && fw_dir.back() != '\\')
+                fw_dir += '/';
+            overlay::fontmgr::set_firmware_font_dir(fw_dir);
+        }
+    }
+
+    {
+        auto icons_dir = fs_utils::path_to_utf8(static_assets / "icons");
+        if (!icons_dir.empty()) {
+            if (icons_dir.back() != '/' && icons_dir.back() != '\\')
+                icons_dir += '/';
+            overlay::resource_config::set_icons_dir(icons_dir);
+        }
+    }
+
+    LOG_INFO("Overlay font firmware dir: {}", overlay::fontmgr::get_firmware_font_dir().empty() ? "(none)" : overlay::fontmgr::get_firmware_font_dir());
+    LOG_INFO("Overlay font system dirs: {} entries", overlay::fontmgr::get_system_font_dirs().size());
+    for (const auto &d : overlay::fontmgr::get_system_font_dirs())
+        LOG_DEBUG("  system font dir: {}", d);
+}
+
 void set_depth_bias(State &state, Context *ctx, bool is_front, int factor, int units) {
     renderer::add_state_set_command(ctx, renderer::GXMState::DepthBias, is_front, factor, units);
 }

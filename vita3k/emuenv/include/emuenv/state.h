@@ -76,6 +76,8 @@ typedef int SceUID;
 
 using NIDSet = std::set<uint32_t>;
 
+#include <emuenv/app_launch_request.h>
+
 /**
  * @brief State of the emulated PlayStation Vita environment
  */
@@ -113,19 +115,14 @@ public:
     std::string license_content_id{};
     std::string license_title_id{};
     std::string current_app_title{};
-    fs::path base_path{};
     fs::path default_path{};
-    fs::path config_path{};
-    fs::path log_path{};
-    fs::path cache_path{};
-    fs::path pref_path{};
-    fs::path static_assets_path{};
-    fs::path shared_path{};
-    fs::path patch_path{};
-    bool load_exec{};
-    std::string load_app_path{};
-    std::string load_exec_argv{};
-    std::string load_exec_path{};
+    fs::path config_path{}; // Path for config files
+    fs::path log_path{}; // Path for log file
+    fs::path cache_path{}; // Path for cache files (shaders, elf/texture dumps, and compat cache)
+    fs::path vita_fs_path{}; // Path for VitaFS
+    fs::path static_assets_path{}; // Path for static assets (shaders, icons, etc)
+    fs::path shared_path{}; // Path for files (UI themes, textures, etc)
+    fs::path patch_path{}; // Path for patch files
     std::string self_name{};
     std::string self_path{};
     Config &cfg;
@@ -177,6 +174,40 @@ public:
     CameraState &camera;
     int max_font_level = 0;
     int current_font_level = 0;
+
+    std::unique_ptr<overlay::display_manager> overlay_manager;
+
+    void post_app_launch_request(AppLaunchRequest request) {
+        std::scoped_lock lock(_launch_request_mutex);
+        _pending_launch_request = std::move(request);
+    }
+
+    std::optional<AppLaunchRequest> take_app_launch_request() {
+        std::scoped_lock lock(_launch_request_mutex);
+        if (!_pending_launch_request)
+            return std::nullopt;
+
+        auto request = std::move(_pending_launch_request);
+        _pending_launch_request.reset();
+        return request;
+    }
+
+    void clear_app_launch_request() {
+        std::scoped_lock lock(_launch_request_mutex);
+        _pending_launch_request.reset();
+    }
+
+    Root get_root_paths() const {
+        Root r;
+        r.set_vita_fs_path(vita_fs_path);
+        r.set_patch_path(patch_path);
+        r.set_log_path(log_path);
+        r.set_config_path(config_path);
+        r.set_shared_path(shared_path);
+        r.set_cache_path(cache_path);
+        r.set_static_assets_path(static_assets_path);
+        return r;
+    }
 
     EmuEnvState();
     // declaring a destructor is necessary to forward declare unique_ptrs

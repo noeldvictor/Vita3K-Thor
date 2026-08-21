@@ -114,7 +114,25 @@ ExitCode add_sink(const fs::path &log_path) {
     }
 #endif
 
-    spdlog::set_default_logger(std::make_shared<spdlog::logger>("vita3k logger", begin(sinks), end(sinks)));
+    rebuild_default_logger();
+    return Success;
+}
+
+void rebuild_default_logger() {
+    std::call_once(s_async_logging_once, []() {
+        spdlog::init_thread_pool(ASYNC_LOG_QUEUE_SIZE, 1);
+    });
+
+    auto duplicate_filter = std::make_shared<spdlog::sinks::dup_filter_sink_mt>(std::chrono::seconds(2));
+    for (const auto &sink : sinks)
+        duplicate_filter->add_sink(sink);
+
+    auto logger = std::make_shared<spdlog::async_logger>(
+        "vita3k logger",
+        duplicate_filter,
+        spdlog::thread_pool(),
+        spdlog::async_overflow_policy::overrun_oldest);
+    spdlog::set_default_logger(std::move(logger));
     spdlog::set_pattern(LOG_PATTERN);
     return Success;
 }

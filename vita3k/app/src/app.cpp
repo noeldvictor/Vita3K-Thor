@@ -166,10 +166,36 @@ static std::string install_custom_driver_archive(const fs::path &file_path) {
 
     mz_zip_reader_end(&zip);
 
+<<<<<<< HEAD
     if (extract_failed || driver_so.empty()) {
         LOG_ERROR("Could not locate main driver file!");
         fs::remove_all(driver_path);
         return {};
+=======
+FirmwareState get_firmware_state(const EmuEnvState &emuenv) {
+    return FirmwareState{
+        .preinstalled_package = has_installed_firmware_content(emuenv.vita_fs_path / "pd0"),
+        .main_firmware = has_installed_firmware_content(emuenv.vita_fs_path / "vs0"),
+        .font_package = has_installed_firmware_content(emuenv.vita_fs_path / "sa0"),
+    };
+}
+
+bool has_firmware_installed(const EmuEnvState &emuenv) {
+    return has_installed_firmware_content(emuenv.vita_fs_path / "vs0");
+}
+
+bool ensure_current_user(EmuEnvState &emuenv) {
+    const auto &users = emuenv.app.user_list.users;
+
+    if (users.empty()) {
+        const std::string id = create_user(emuenv, "Vita3K");
+        if (id.empty() || !activate_user(emuenv, id))
+            return false;
+
+        emuenv.cfg.user_id = id;
+        config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
+        return true;
+>>>>>>> upstream/master
     }
 
     // last thing to do: create a driver_name.txt file with the name of the main so
@@ -181,6 +207,7 @@ static std::string install_custom_driver_archive(const fs::path &file_path) {
     return driver;
 }
 
+<<<<<<< HEAD
 std::string add_custom_driver(EmuEnvState &emuenv) {
     fs::path file_path{};
     host::dialog::filesystem::Result result = host::dialog::filesystem::open_file(file_path);
@@ -189,6 +216,47 @@ std::string add_custom_driver(EmuEnvState &emuenv) {
         return {};
 
     return install_custom_driver_archive(file_path);
+=======
+bool switch_emulator_path(EmuEnvState &emuenv, const fs::path &vita_fs_path) {
+    const fs::path normalized_vita_fs_path = vita_fs_path / "";
+    if (normalized_vita_fs_path.empty())
+        return false;
+
+    emuenv.vita_fs_path = normalized_vita_fs_path;
+    emuenv.cfg.set_vita_fs_path(emuenv.vita_fs_path);
+
+    ::io_deinit(emuenv.io);
+    if (!::init(emuenv.io, emuenv.cache_path, emuenv.log_path, emuenv.vita_fs_path, emuenv.cfg.console)) {
+        LOG_ERROR("Failed to initialize file system for switched emulator path '{}'.", emuenv.vita_fs_path);
+        return false;
+    }
+
+    load_users(emuenv);
+    emuenv.io.user_id.clear();
+    emuenv.io.user_name.clear();
+
+    const auto &users = emuenv.app.user_list.users;
+    if (users.empty()) {
+        const std::string id = create_user(emuenv, "Vita3K");
+        if (id.empty() || !activate_user(emuenv, id))
+            return false;
+        emuenv.cfg.user_id = id;
+    } else {
+        const auto &first = users.begin();
+        if (!activate_user(emuenv, first->first))
+            return false;
+        emuenv.cfg.user_id = first->first;
+    }
+
+    load_app_times(emuenv);
+    if (!scan_apps(emuenv)) {
+        LOG_ERROR("Failed to scan apps after switching emulator path to '{}'.", emuenv.vita_fs_path);
+        return false;
+    }
+
+    set_current_config(emuenv, "");
+    return true;
+>>>>>>> upstream/master
 }
 
 std::string add_custom_driver_from_path(const std::string &file_path) {
@@ -201,6 +269,41 @@ void remove_custom_driver(EmuEnvState &emuenv, const std::string &driver) {
     if (!fs::exists(driver_path)) {
         LOG_ERROR("Path {} does not exist", driver_path.c_str());
         return;
+<<<<<<< HEAD
+=======
+
+    auto &renderer = *emuenv.renderer;
+    renderer.precompile_bg_path.clear();
+    renderer.precompile_queue.clear();
+    renderer.precompile_total = 0;
+    renderer.precompile_progress = 0;
+    renderer.precompile_requested = false;
+    renderer.precompile_complete.store(false, std::memory_order_relaxed);
+
+    const auto bg_path = emuenv.vita_fs_path / "ux0/app" / emuenv.io.app_path / "sce_sys/pic0.png";
+    if (fs::exists(bg_path))
+        renderer.precompile_bg_path = fs_utils::path_to_utf8(bg_path);
+
+    if (renderer::get_shaders_cache_hashs(renderer) && emuenv.cfg.shader_cache) {
+        renderer.precompile_queue = renderer.shaders_cache_hashs;
+        renderer.precompile_progress = 0;
+        renderer.precompile_complete.store(false, std::memory_order_relaxed);
+        renderer.precompile_requested = true;
+    }
+}
+
+bool update_runtime_metrics(EmuEnvState &emuenv, LaunchRuntimeMetrics &metrics) {
+    sync_perf_overlay_config(emuenv);
+
+    if (emuenv.frame_count == 0)
+        return false;
+
+    if (!metrics.tracking_started) {
+        metrics.tracking_started = true;
+        metrics.last_fps_time = std::chrono::steady_clock::now();
+        emuenv.frame_count = 0;
+        return false;
+>>>>>>> upstream/master
     }
 
     fs::remove_all(driver_path);

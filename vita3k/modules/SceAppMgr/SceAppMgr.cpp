@@ -411,7 +411,7 @@ EXPORT(SceInt32, _sceAppMgrLoadExec, const char *appPath, Ptr<char> const argv[]
 
     // Create exec path
     auto exec_path = static_cast<std::string>(appPath);
-    if (exec_path.find("app0:/") != std::string::npos)
+    if (exec_path.contains("app0:/"))
         exec_path.erase(0, 6);
     else
         exec_path.erase(0, 5);
@@ -420,7 +420,8 @@ EXPORT(SceInt32, _sceAppMgrLoadExec, const char *appPath, Ptr<char> const argv[]
 
     // Load exec executable
     vfs::FileBuffer exec_buffer;
-    if (vfs::read_current_app_file(exec_buffer, emuenv.io, emuenv.pref_path, exec_path)) {
+    if (vfs::read_current_app_file(exec_buffer, emuenv.io, emuenv.vita_fs_path, exec_path)) {
+        std::vector<std::string> exec_argv;
         if (argv && argv->get(emuenv.mem)) {
             size_t args = 0;
             emuenv.load_exec_argv = "\"";
@@ -437,13 +438,7 @@ EXPORT(SceInt32, _sceAppMgrLoadExec, const char *appPath, Ptr<char> const argv[]
                 return RET_ERROR(SCE_APPMGR_ERROR_TOO_LONG_ARGV);
         }
 
-        emuenv.kernel.exit_delete_all_threads();
-
-        emuenv.load_app_path = emuenv.io.app_path;
-        emuenv.load_exec_path = exec_path;
-        emuenv.load_exec = true;
-        // make sure we are not stuck waiting for a gpu command
-        emuenv.renderer->should_display = true;
+        emuenv.kernel.request_process_exit(0, AppLaunchRequest{ .app_path = emuenv.io.app_path, .self_path = std::move(exec_path), .argv = std::move(exec_argv), .reason = AppLaunchReason::LoadExec });
 
         return SCE_KERNEL_OK;
     }

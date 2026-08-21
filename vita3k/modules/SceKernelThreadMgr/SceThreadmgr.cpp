@@ -492,9 +492,19 @@ EXPORT(int, _sceKernelGetThreadEventInfo) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceKernelGetThreadExitStatus) {
-    TRACY_FUNC(_sceKernelGetThreadExitStatus);
-    return UNIMPLEMENTED();
+EXPORT(int, _sceKernelGetThreadExitStatus, SceUID thid, SceInt32 *pExitStatus) {
+    TRACY_FUNC(_sceKernelGetThreadExitStatus, thid, pExitStatus);
+    const ThreadStatePtr thread = emuenv.kernel.get_thread(thid ? thid : thread_id);
+    if (!thread) {
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+    }
+    if (thread->status != ThreadStatus::dormant) {
+        return SCE_KERNEL_ERROR_NOT_DORMANT;
+    }
+    if (pExitStatus) {
+        *pExitStatus = thread->returned_value;
+    }
+    return 0;
 }
 
 EXPORT(SceInt32, _sceKernelGetThreadInfo, SceUID threadId, Ptr<SceKernelThreadInfo> pInfo) {
@@ -888,7 +898,9 @@ static int wait_thread_end(ThreadStatePtr &waiter, ThreadStatePtr &target, int *
         waiter->update_status(ThreadStatus::wait);
         target->waiting_threads.push_back(waiter);
     }
-    waiter->status_cond.wait(waiter_lock, [&]() { return waiter->status == ThreadStatus::run; });
+    waiter->status_cond.wait(waiter_lock, [&]() {
+        return waiter->status == ThreadStatus::run;
+    });
     return 0;
 }
 
@@ -1088,12 +1100,17 @@ EXPORT(int, sceKernelCreateThreadForUser, const char *name, SceKernelThreadEntry
     return thread->id;
 }
 
-static int delay_thread(EmuEnvState &emuenv, SceUInt delay_us) {
+static int delay_thread(EmuEnvState &emuenv, SceUID thread_id, SceUInt delay_us) {
     if (delay_us == 0)
         return SCE_KERNEL_ERROR_INVALID_ARGUMENT;
 
-    std::this_thread::sleep_for(std::chrono::microseconds(speed_to_host_us(emuenv, delay_us)));
-
+    const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
+    std::unique_lock<std::mutex> lock(thread->mutex);
+    thread->update_status(ThreadStatus::wait);
+    thread->status_cond.wait_for(lock, std::chrono::microseconds(speed_to_host_us(emuenv, delay_us)),
+        [&] { return thread->status == ThreadStatus::run; });
+    if (thread->status != ThreadStatus::run)
+        thread->update_status(ThreadStatus::run);
     return SCE_KERNEL_OK;
 }
 
@@ -1105,21 +1122,21 @@ static int delay_thread_cb(EmuEnvState &emuenv, SceUID thread_id, SceUInt delay_
 
     const uint64_t elapsed_guest_us = speed_to_guest_us(emuenv, static_cast<uint64_t>(elapsed.count()));
     if (delay_us > elapsed_guest_us) // If we spent less time than requested processing callbacks, sleep the remaining time
-        return delay_thread(emuenv, static_cast<SceUInt>(delay_us - elapsed_guest_us));
+        return delay_thread(emuenv, thread_id, static_cast<SceUInt>(delay_us - elapsed_guest_us));
     else // Else return directly
         return SCE_KERNEL_OK;
 }
 
 EXPORT(int, sceKernelDelayThread, SceUInt delay) {
     TRACY_FUNC(sceKernelDelayThread, delay);
-    return delay_thread(emuenv, delay);
+    return delay_thread(emuenv, thread_id, delay);
 }
 
 EXPORT(int, sceKernelDelayThread200, SceUInt delay) {
     TRACY_FUNC(sceKernelDelayThread200, delay);
     if (delay < 201)
         delay = 201;
-    return delay_thread(emuenv, delay);
+    return delay_thread(emuenv, thread_id, delay);
 }
 
 EXPORT(int, sceKernelDelayThreadCB, SceUInt delay) {

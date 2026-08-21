@@ -79,9 +79,12 @@ static int SDLCALL thread_function(void *data) {
     thread->run_loop();
     const uint32_t r0 = read_reg(*thread->cpu, 0);
 
-    std::lock_guard<std::mutex> lock(params.kernel->mutex);
-    params.kernel->threads.erase(thread->id);
-    params.kernel->corenum_allocator.free_corenum(get_processor_id(*thread->cpu));
+    {
+        std::lock_guard<std::mutex> lock(params.kernel->mutex);
+        params.kernel->threads.erase(thread->id);
+        params.kernel->corenum_allocator.free_corenum(get_processor_id(*thread->cpu));
+        params.kernel->thread_deleted_cond.notify_all();
+    }
 
     return r0;
 }
@@ -312,15 +315,14 @@ ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<c
     return create_thread(mem, name, entry_point, SCE_KERNEL_DEFAULT_PRIORITY, SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT, SCE_KERNEL_STACK_SIZE_USER_MAIN, nullptr);
 }
 
-static ThreadStatePtr create_thread_with_uid(KernelState &kernel, MemState &mem, const SceUID uid, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option) {
-    ThreadStatePtr thread = std::make_shared<ThreadState>(uid, kernel, mem);
+ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option) {
+    ThreadStatePtr thread = std::make_shared<ThreadState>(get_next_uid(), *this, mem);
     if (thread->init(name, entry_point, init_priority, affinity_mask, stack_size, option) < 0)
         return nullptr;
+
     {
-        const auto lock = std::lock_guard(kernel.mutex);
-        if (kernel.threads.contains(thread->id))
-            return nullptr;
-        kernel.threads.emplace(thread->id, thread);
+        const std::lock_guard<std::mutex> lock(mutex);
+        threads.emplace(thread->id, thread);
     }
 
     ThreadParams params;
@@ -331,6 +333,7 @@ static ThreadStatePtr create_thread_with_uid(KernelState &kernel, MemState &mem,
     SDL_DetachThread(SDL_CreateThread(&thread_function, thread->name.c_str(), &params));
     SDL_WaitSemaphore(params.host_may_destroy_params);
     SDL_DestroySemaphore(params.host_may_destroy_params);
+
     return thread;
 }
 
@@ -378,6 +381,23 @@ void KernelState::exit_delete_all_threads() {
     for (auto &[_, thread] : threads)
         // Skip end callbacks; running guest code can access torn-down state
         thread->exit_delete(false);
+
+void KernelState::request_process_exit(int res, std::optional<AppLaunchRequest> relaunch) {
+    if (process_exit_callback)
+        process_exit_callback(res, std::move(relaunch));
+}
+
+void KernelState::process_exit() {
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (auto &[_, timer] : timers)
+            timer->condvar.notify_all();
+        for (auto &[_, thread] : threads)
+            thread->exit_delete(false);
+    }
+
+    std::unique_lock<std::mutex> lock(mutex);
+    thread_deleted_cond.wait(lock, [this] { return threads.empty(); });
 }
 
 void KernelState::pause_threads() {
@@ -398,6 +418,65 @@ void KernelState::resume_threads() {
         const auto paused_status = paused_threads_status.find(thread->id);
         thread->resume_after_pause_if_needed(paused_status != paused_threads_status.end() && paused_status->second == ThreadStatus::run);
     }
+    paused_threads_status.clear();
+}
+
+void KernelState::deinit(MemState &mem) {
+    process_exit();
+    threads.clear();
+
+    simple_events.clear();
+    timers.clear();
+    semaphores.clear();
+    condvars.clear();
+    lwcondvars.clear();
+    mutexes.clear();
+    lwmutexes.clear();
+    rwlocks.clear();
+    eventflags.clear();
+    msgpipes.clear();
+    callbacks.clear();
+
+    loaded_modules.clear();
+    loaded_sysmodules.clear();
+    loaded_internal_sysmodules.clear();
+
+    {
+        std::lock_guard<std::mutex> lock(export_nids_mutex);
+        export_nids.clear();
+        func_binding_infos.clear();
+        var_binding_infos.clear();
+        module_uid_by_nid.clear();
+    }
+
+    corenum_allocator.alloc.reset();
+    corenum_allocator.alloc.set_maximum(0);
+
+    obj_store.clear();
+
+    tls_address = Ptr<const void>(0);
+    tls_psize = 0;
+    tls_msize = 0;
+
+    thread_event_start = Ptr<const void>(0);
+    thread_event_start_arg = 0;
+    thread_event_end = Ptr<const void>(0);
+    thread_event_end_arg = 0;
+
+    codec_blocks.clear();
+
+    halt_instruction = nullptr;
+    halt_instruction_pc = 0;
+
+    process_param = nullptr;
+    client_vtable = Ptr<void>(0);
+    shellsvc_client = Ptr<Address>(0);
+    libc_dso_handle_main = Ptr<void>(0);
+
+    debugger.deinit();
+
+    next_uid = 1;
+
     paused_threads_status.clear();
 }
 

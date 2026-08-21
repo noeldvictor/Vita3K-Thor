@@ -27,10 +27,12 @@ struct SDL_Window;
 
 namespace renderer {
 struct Context;
+class FrameHost;
 struct FragmentProgram;
 struct RenderTarget;
 struct State;
 struct VertexProgram;
+struct YUVConversionCache;
 
 bool create(std::unique_ptr<FragmentProgram> &fp, State &state, const SceGxmProgram &program, const SceGxmBlendInfo *blend, GXPPtrMap &gxp_ptr_map);
 bool create(std::unique_ptr<VertexProgram> &vp, State &state, const SceGxmProgram &program, GXPPtrMap &gxp_ptr_map, const std::vector<SceGxmVertexAttribute> &attributes);
@@ -38,12 +40,18 @@ void create(SceGxmSyncObject *sync, State &state);
 void destroy(SceGxmSyncObject *sync, State &state);
 void finish(State &state, Context *context);
 
+enum class SyncWaitResult {
+    Ready,
+    TimedOut,
+    Shutdown
+};
+
 /**
  * \brief Wait for all subjects to be done with the given sync object.
  *
- * Return true if the wait didn't timeout
+ * Return the reason the wait completed.
  */
-bool wishlist(SceGxmSyncObject *sync_object, const uint32_t timestamp, const int32_t timeout_micros = -1);
+SyncWaitResult wishlist(SceGxmSyncObject *sync_object, const uint32_t timestamp, const int32_t timeout_micros = -1);
 
 /**
  * \brief Set list of subject with sync object to done.
@@ -57,8 +65,10 @@ void reset_command_list(CommandList &command_list);
 void submit_command_list(State &state, renderer::Context *context, CommandList &command_list);
 bool is_cmd_ready(MemState &mem, CommandList &command_list);
 void process_batch(State &state, MemState &mem, Config &config, CommandList &command_list);
-void process_batches(State &state, const FeatureState &features, MemState &mem, Config &config);
-bool init(SDL_Window *window, std::unique_ptr<State> &state, Backend backend, const Config &config, const Root &root_paths);
+void process_batches(State &state, const FeatureState &features, MemState &mem, Config &config, int64_t max_wait_ms = 500);
+void start_render_thread(State &state, DisplayState &display, GxmState &gxm, MemState &mem, Config &config);
+void stop_render_thread(State &state);
+bool init(FrameHost &frame, std::unique_ptr<State> &state, Backend backend, const Config &config, const Root &root_paths);
 bool map_memory_now(State &state, MemState &mem, Ptr<void> address, uint32_t size);
 bool unmap_memory_now(State &state, MemState &mem, Ptr<void> address);
 

@@ -60,6 +60,7 @@
 #include <tracy/Tracy.hpp>
 #endif
 
+<<<<<<< HEAD
 #ifdef __ANDROID__
 #include <SDL3/SDL_system.h>
 #include <jni.h>
@@ -67,6 +68,9 @@
 #include <unistd.h>
 #include <xxh3.h>
 #endif
+=======
+#include "gui-qt/qt_utils.h"
+>>>>>>> upstream/master
 
 #include <SDL3/SDL_cpuinfo.h>
 #include <SDL3/SDL_hints.h>
@@ -938,14 +942,37 @@ static void run_execv(char *argv[], EmuEnvState &emuenv) {
 #endif
 
 int main(int argc, char *argv[]) {
+<<<<<<< HEAD
+=======
+#ifdef __APPLE__
+    qputenv("QT_MTL_NO_TRANSACTION", "1");
+    qputenv("QT_MAC_NO_CONTAINER_LAYER", "1");
+#endif
+
+    QApplication app(argc, argv);
+    QCoreApplication::setOrganizationName(QStringLiteral("Vita3K"));
+    QCoreApplication::setApplicationName(QStringLiteral("Vita3K"));
+
+>>>>>>> upstream/master
 #ifdef TRACY_ENABLE
     ZoneScoped; // Tracy - Track main function scope
 #endif
     Root root_paths;
+<<<<<<< HEAD
 
     app::init_paths(root_paths);
 
     if (logging::init(root_paths, true) != Success)
+=======
+    bool portable = app::init_paths(root_paths);
+
+    if (!fs::exists(root_paths.get_vita_fs_path())) {
+        fs::create_directories(root_paths.get_vita_fs_path());
+    }
+
+    LogWidget::register_callback();
+    if (logging::init(root_paths, true) != Success) {
+>>>>>>> upstream/master
         return InitConfigFailed;
 
 #ifdef __ANDROID__
@@ -1002,9 +1029,9 @@ int main(int argc, char *argv[]) {
 
     Config cfg{};
     EmuEnvState emuenv;
-    const auto config_err = config::init_config(cfg, argc, argv, root_paths);
+    const auto config_err = config::init_config(cfg, argc, argv, root_paths, portable);
 
-    fs::create_directories(cfg.get_pref_path());
+    fs::create_directories(cfg.get_vita_fs_path());
 
     if (config_err != Success) {
         if (config_err == QuitRequested) {
@@ -1014,21 +1041,21 @@ int main(int argc, char *argv[]) {
             }
             if (cfg.delete_title_id.has_value()) {
                 LOG_INFO("Deleting title id {}", *cfg.delete_title_id);
-                fs::remove_all(cfg.get_pref_path() / "ux0/app" / *cfg.delete_title_id);
-                fs::remove_all(cfg.get_pref_path() / "ux0/addcont" / *cfg.delete_title_id);
-                fs::remove_all(cfg.get_pref_path() / "ux0/user/00/savedata" / *cfg.delete_title_id);
+                fs::remove_all(cfg.get_vita_fs_path() / "ux0/app" / *cfg.delete_title_id);
+                fs::remove_all(cfg.get_vita_fs_path() / "ux0/addcont" / *cfg.delete_title_id);
+                fs::remove_all(cfg.get_vita_fs_path() / "ux0/user/00/savedata" / *cfg.delete_title_id);
                 fs::remove_all(root_paths.get_cache_path() / "shaders" / *cfg.delete_title_id);
             }
             if (cfg.pup_path.has_value()) {
                 LOG_INFO("Installing firmware file {}", *cfg.pup_path);
-                install_pup(cfg.get_pref_path(), *cfg.pup_path, [](uint32_t progress) {
+                install_pup(cfg.get_vita_fs_path(), *cfg.pup_path, [](uint32_t progress) {
                     LOG_INFO("Firmware installation progress: {}%", progress);
                 });
             }
             if (cfg.pkg_path.has_value() && cfg.pkg_zrif.has_value()) {
                 LOG_INFO("Installing pkg from {} ", *cfg.pkg_path);
                 emuenv.cache_path = root_paths.get_cache_path().generic_path();
-                emuenv.pref_path = cfg.get_pref_path();
+                emuenv.vita_fs_path = cfg.get_vita_fs_path();
                 auto pkg_path = fs_utils::utf8_to_path(*cfg.pkg_path);
                 install_pkg(pkg_path, emuenv, *cfg.pkg_zrif, [](float) {});
             }
@@ -1038,6 +1065,11 @@ int main(int argc, char *argv[]) {
         return InitConfigFailed;
     }
 
+<<<<<<< HEAD
+=======
+    gui::i18n::apply_ui_language(app, cfg.user_lang, emuenv.static_assets_path);
+
+>>>>>>> upstream/master
 #ifdef _WIN32
     {
         auto res = CoInitializeEx(NULL, COINIT_MULTITHREADED);
@@ -1364,6 +1396,7 @@ int main(int argc, char *argv[]) {
     auto runtime_cheats = load_runtime_cheats(emuenv, main_module_id);
     SDL_SetWindowTitle(emuenv.window.get(), fmt::format("{} | {} ({}) | Please wait, loading...", window_title, emuenv.current_app_title, emuenv.io.title_id).c_str());
 
+<<<<<<< HEAD
     while (handle_events(emuenv, gui) && (emuenv.frame_count == 0) && !emuenv.load_exec) {
 #ifdef TRACY_ENABLE
         ZoneScopedN("Game loading"); // Tracy - Track game loading loop scope
@@ -1372,6 +1405,11 @@ int main(int argc, char *argv[]) {
         update_thor_adb_debug_toggles(emuenv);
         runtime_poll_control_file(emuenv);
         apply_runtime_cheats(emuenv, runtime_cheats);
+=======
+    const QString gui_configs_dir = gui::utils::to_qt_path(emuenv.config_path / "gui-configs");
+    auto gui_settings = std::make_shared<GuiSettings>(gui_configs_dir);
+    auto persistent_settings = std::make_shared<PersistentSettings>(gui_configs_dir);
+>>>>>>> upstream/master
 
         // Driver acto!
         renderer::process_batches(*emuenv.renderer.get(), emuenv.renderer->features, emuenv.mem, emuenv.cfg);

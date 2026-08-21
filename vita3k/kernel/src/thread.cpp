@@ -135,15 +135,14 @@ void ThreadState::raise_waiting_threads() {
 }
 
 int ThreadState::start(SceSize arglen, const Ptr<void> argp, bool run_entry_callback) {
-    if (status == ThreadStatus::run || call_level > 0)
-        return SCE_KERNEL_ERROR_RUNNING;
     std::unique_lock<std::mutex> thread_lock(mutex);
+    if (status != ThreadStatus::dormant)
+        return SCE_KERNEL_ERROR_RUNNING;
 
     deferred_import_wait = false;
     deferred_import_return = false;
     deferred_resume_after_pause = false;
     run_start_callback = run_entry_callback;
-    call_level = 1;
     load_context(*cpu, init_cpu_ctx);
     write_pc(*cpu, entry_point);
     write_lr(*cpu, kernel.halt_instruction_pc);
@@ -159,14 +158,12 @@ int ThreadState::start(SceSize arglen, const Ptr<void> argp, bool run_entry_call
     }
 
     if (kernel.debugger.wait_for_debugger) {
-        to_do = ThreadToDo::suspend;
-        status = ThreadStatus::suspend;
         kernel.debugger.wait_for_debugger = false;
+        status = ThreadStatus::suspend;
     } else {
-        to_do = ThreadToDo::run;
         status = ThreadStatus::run;
     }
-    something_to_do.notify_one();
+    status_cond.notify_one();
 
     return SCE_KERNEL_OK;
 }
@@ -174,28 +171,36 @@ int ThreadState::start(SceSize arglen, const Ptr<void> argp, bool run_entry_call
 void ThreadState::exit(SceInt32 status) {
     std::lock_guard<std::mutex> guard(mutex);
     run_end_callback = true;
-    call_level = 0;
+    exit_requested = true;
     returned_value = static_cast<uint32_t>(status);
 }
 
 void ThreadState::exit_delete_locked(bool exit) {
     run_end_callback = exit;
+<<<<<<< HEAD
     deferred_import_wait = false;
     deferred_import_return = false;
     deferred_resume_after_pause = false;
+=======
+    delete_requested = true;
+>>>>>>> upstream/master
 
-    const ThreadToDo last_to_do = to_do;
-    to_do = ThreadToDo::remove;
-    if (last_to_do == ThreadToDo::wait) {
-        something_to_do.notify_one();
-    } else {
+    if (status == ThreadStatus::run) {
         stop(*cpu);
+<<<<<<< HEAD
     }
 
     // Removing a thread must unwind any host wait even while quickstate restore
     // has globally paused guest execution. Normal wake paths remain pause-aware.
     if (status == ThreadStatus::wait) {
         status = ThreadStatus::run;
+=======
+    } else if (status == ThreadStatus::wait) {
+        // wake threads blocked in a sync primitive so they can observe delete_requested
+        update_status(ThreadStatus::run);
+    } else {
+        // dormant or suspend: wake run_loop() so it can observe delete_requested
+>>>>>>> upstream/master
         status_cond.notify_all();
     }
 
@@ -203,6 +208,7 @@ void ThreadState::exit_delete_locked(bool exit) {
     signal.send();
 }
 
+<<<<<<< HEAD
 void ThreadState::exit_delete(bool exit) {
     std::lock_guard<std::mutex> lock(mutex);
     exit_delete_locked(exit);
@@ -243,6 +249,10 @@ bool ThreadState::try_exit_delete_for_quick_state(const std::chrono::millisecond
 bool ThreadState::run_loop() {
     int res = 0;
     int run_level = std::max(call_level, 1);
+=======
+void ThreadState::run_loop() {
+    bool guest_returned = false;
+>>>>>>> upstream/master
 
     // Set thread-local CPU state so signal handlers can access it.
     // The guard clears it on any exit so a recycled host thread never sees
@@ -253,6 +263,8 @@ bool ThreadState::run_loop() {
     } cpu_state_guard;
 
     std::unique_lock<std::mutex> lock(mutex);
+    ++call_level;
+    const bool top_level = call_level == 1;
 
     auto run_thread_end_callback = [&]() {
         if (!run_end_callback)
@@ -262,71 +274,81 @@ bool ThreadState::run_loop() {
         if (!kernel.thread_event_end)
             return;
 
-        ThreadToDo old_to_do = to_do;
-        int old_call_level = call_level;
-        uint32_t old_returned_value = returned_value;
-        to_do = ThreadToDo::run;
-        call_level = 1;
+        const ThreadStatus old_status = status;
+        const uint32_t old_returned_value = returned_value;
+        status = ThreadStatus::run;
 
         lock.unlock();
-        int ret = run_callback(kernel.thread_event_end.address(), { SCE_KERNEL_THREAD_EVENT_TYPE_END, static_cast<uint32_t>(id), 0, kernel.thread_event_end_arg });
+        const int ret = run_callback(kernel.thread_event_end.address(), { SCE_KERNEL_THREAD_EVENT_TYPE_END, static_cast<uint32_t>(id), 0, kernel.thread_event_end_arg });
         if (ret != 0)
-            LOG_WARN("Thread start event handler returned {}", log_hex(ret));
+            LOG_WARN("Thread end event handler returned {}", log_hex(ret));
         lock.lock();
 
-        to_do = old_to_do;
-        call_level = old_call_level;
+        status = old_status;
         returned_value = old_returned_value;
     };
 
     while (true) {
-        switch (to_do) {
-        case ThreadToDo::remove:
-            if (run_level == 1) {
+        // Check if this call-level is done (normal exit, guest return, or delete).
+        if (exit_requested || guest_returned || delete_requested) {
+            // Top-level fires the end callback and parks dormant
+            if (top_level && status != ThreadStatus::dormant) {
                 run_thread_end_callback();
                 update_status(ThreadStatus::dormant);
             }
-
-            return true;
-        case ThreadToDo::run:
-        case ThreadToDo::step:
-
-            if (call_level == 0) {
-                run_thread_end_callback();
-
-                // nothing to do
-                update_status(ThreadStatus::dormant);
-                to_do = ThreadToDo::wait;
+            // Return from nested levels to the top level (or completely if deleted)
+            if (!top_level || delete_requested)
                 break;
-            }
+            exit_requested = false;
+            guest_returned = false;
+            // Status is now dormant: we'll park until the next start() or exit_delete().
+        }
 
-            update_status(ThreadStatus::run);
+        // Park until we have something to do.
+        if (status != ThreadStatus::run) {
+            status_cond.wait(lock, [&] {
+                return status == ThreadStatus::run || delete_requested;
+            });
+            continue;
+        }
+
+        // Fire the thread-start event once per start.
+        if (run_start_callback) {
+            run_start_callback = false;
+            lock.unlock();
+            if (kernel.thread_event_start) {
+                const int ret = run_callback(kernel.thread_event_start.address(), { SCE_KERNEL_THREAD_EVENT_TYPE_START, static_cast<uint32_t>(id), 0, kernel.thread_event_start_arg });
+                if (ret != 0)
+                    LOG_WARN("Thread start event handler returned {}", log_hex(ret));
+            }
+            lock.lock();
+        }
+
+        // Active JIT loop. Lock held on entry and exit; unlocked only around run/step.
+        while (!delete_requested && !exit_requested && !guest_returned && status == ThreadStatus::run) {
+            const bool do_step = single_stepping;
+            if (do_step)
+                single_stepping = false;
 
             lock.unlock();
 
-            if (run_start_callback) {
-                run_start_callback = false;
+            // Single step or run
+            const int res = do_step ? step(*cpu) : run(*cpu);
 
-                if (kernel.thread_event_start) {
-                    int ret = run_callback(kernel.thread_event_start.address(), { SCE_KERNEL_THREAD_EVENT_TYPE_START, static_cast<uint32_t>(id), 0, kernel.thread_event_start_arg });
-                    if (ret != 0)
-                        LOG_WARN("Thread start event handler returned {}", log_hex(ret));
-                }
+            // handle svc call if this was what stopped the cpu
+            if (cpu->svc_called) {
+                const uint32_t nid = *Ptr<uint32_t>(read_pc(*cpu) + 4).get(mem);
+                kernel.call_import(*cpu, nid, id);
+                clear_exclusive(*cpu);
             }
 
-            // Run the cpu — lock is NOT held on entry, HELD on exit
-            while (true) {
-                lock.lock();
-                const bool do_step = (to_do == ThreadToDo::step);
-                if (do_step)
-                    to_do = ThreadToDo::suspend;
-                lock.unlock();
+            // handle pending abort (exception handler from page fault)
+            if (cpu->abort_pending.exchange(false))
+                dispatch_abort(*cpu);
 
-                if (do_step)
-                    res = step(*cpu);
-                else
-                    res = run(*cpu);
+            lock.lock();
 
+<<<<<<< HEAD
                 // handle svc call if this was what stopped the cpu
                 if (cpu->svc_called) {
                     const uint32_t nid = *Ptr<uint32_t>(read_pc(*cpu) + 4).get(mem);
@@ -365,31 +387,28 @@ bool ThreadState::run_loop() {
             }
 
             if (hit_breakpoint(*cpu) || to_do == ThreadToDo::suspend) {
+=======
+            if (do_step || suspend_requested || hit_breakpoint(*cpu)) {
+                suspend_requested = false;
+>>>>>>> upstream/master
                 update_status(ThreadStatus::suspend);
-                to_do = ThreadToDo::wait;
             }
 
-            if (call_level < run_level && run_level > 1)
-                // exit requested, exit this callback now
-                return true;
-
-            if (res) {
-                returned_value = read_reg(*cpu, 0);
-                call_level--;
-                if (call_level > 0)
-                    // only return if we are inside a callback
-                    return true;
+            // Guest function for this run_loop returned (or errored).
+            if (res != 0) {
+                if (res < 0) {
+                    LOG_ERROR("Thread {} ({}) experienced a cpu error.", name, cpu->thread_id);
+                    returned_value = 0xDEADDEAD;
+                } else {
+                    // Halt-sentinel (res = 1): guest function returned cleanly.
+                    returned_value = read_reg(*cpu, 0);
+                }
+                guest_returned = true;
             }
-            break;
-        case ThreadToDo::wait:
-            something_to_do.wait(lock);
-            break;
-        case ThreadToDo::suspend:
-            update_status(ThreadStatus::suspend);
-            something_to_do.wait(lock);
-            break;
         }
     }
+
+    --call_level;
 }
 
 void ThreadState::push_arguments(const std::vector<uint32_t> &args) {
@@ -407,17 +426,16 @@ void ThreadState::push_arguments(const std::vector<uint32_t> &args) {
 }
 
 uint32_t ThreadState::run_callback(Address callback_address, const std::vector<uint32_t> &args) {
+    std::unique_lock<std::mutex> thread_lock(mutex);
     if (call_level == 0) {
         LOG_ERROR("run_callback should not be called as the first thread entry");
         return 0;
     }
 
-    // first save the current context
+    // save the current context before overwriting PC/LR for the callback
     const CPUContext previous_ctx = save_context(*cpu);
     const uint32_t previous_tpidruro = read_tpidruro(*cpu);
 
-    std::unique_lock<std::mutex> thread_lock(mutex);
-    call_level++;
     // we shouldn't have to clean the context I believe
     write_pc(*cpu, callback_address);
     write_lr(*cpu, kernel.halt_instruction_pc);
@@ -479,13 +497,16 @@ uint32_t ThreadState::run_guest_function(Address callback_address, SceSize args,
 
     start(args, argp);
     {
-        // wait for the function to return
         std::unique_lock<std::mutex> lock(mutex);
+<<<<<<< HEAD
         if (status != ThreadStatus::dormant || to_do == ThreadToDo::run) {
             status_cond.wait(lock, [&]() {
                 return status == ThreadStatus::dormant && to_do != ThreadToDo::run;
             });
         }
+=======
+        status_cond.wait(lock, [&]() { return status == ThreadStatus::dormant; });
+>>>>>>> upstream/master
     }
 
     entry_point = old_entry_point;
@@ -502,6 +523,7 @@ void ThreadState::update_status(ThreadStatus status, std::optional<ThreadStatus>
     if (expected)
         assert(expected.value() == this->status);
 
+<<<<<<< HEAD
     if (status == ThreadStatus::run && kernel.is_threads_paused()) {
         deferred_resume_after_pause = true;
         if (this->status == ThreadStatus::wait && (to_do == ThreadToDo::run || to_do == ThreadToDo::step)) {
@@ -512,6 +534,11 @@ void ThreadState::update_status(ThreadStatus status, std::optional<ThreadStatus>
         }
         status = ThreadStatus::suspend;
     }
+=======
+    // Don't apply the requested wait transition if being removed to not block deletion
+    if (status == ThreadStatus::wait && delete_requested)
+        return;
+>>>>>>> upstream/master
 
     this->status = status;
     status_cond.notify_all();
@@ -526,22 +553,21 @@ Address ThreadState::stack_top() const {
 }
 
 void ThreadState::suspend() {
-    assert(to_do == ThreadToDo::run);
+    assert(status == ThreadStatus::run);
     {
         const std::lock_guard<std::mutex> lock(mutex);
-        to_do = ThreadToDo::suspend;
+        suspend_requested = true;
     }
     stop(*cpu);
 }
 
 void ThreadState::resume(bool step) {
-    assert(to_do == ThreadToDo::wait || to_do == ThreadToDo::suspend);
-
+    assert(status == ThreadStatus::suspend || status == ThreadStatus::dormant);
     {
-        const auto thread_lock = std::lock_guard(mutex);
-        to_do = step ? ThreadToDo::step : ThreadToDo::run;
+        const std::lock_guard<std::mutex> lock(mutex);
+        single_stepping = step;
+        update_status(ThreadStatus::run);
     }
-    something_to_do.notify_one();
 }
 
 bool ThreadState::is_quick_state_pause_quiesced() const {

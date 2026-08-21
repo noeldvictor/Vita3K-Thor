@@ -17,6 +17,7 @@
 
 #pragma once
 
+<<<<<<<< HEAD:vita3k/bgm_player/include/bgm_player/functions.h
 #include <util/fs.h>
 
 namespace bgm_player {
@@ -30,3 +31,8 @@ void stop_bgm();
 void switch_bgm_state(const bool pause);
 
 } // namespace bgm_player
+========
+#ifdef __APPLE__
+extern "C" void *get_metal_layer_from_view(void *nsview);
+#endif
+>>>>>>>> upstream/master:vita3k/vkutil/include/vkutil/native_surface.h
