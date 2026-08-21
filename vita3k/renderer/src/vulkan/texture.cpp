@@ -142,7 +142,10 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
     vk::DescriptorImageInfo &image_info = is_vertex
         ? context.vertex_textures[index - SCE_GXM_MAX_TEXTURE_UNITS]
         : context.fragment_textures[index];
-    if (image_info.sampler != sampler || image_info.imageView != lookup_result->view) {
+    // The layout is part of the descriptor, so a view that comes back in a
+    // different layout needs the descriptor rewritten even though it compares
+    // equal on sampler and view.
+    if (image_info.sampler != sampler || image_info.imageView != lookup_result->view || image_info.imageLayout != layout) {
         image_info = vk::DescriptorImageInfo{
             .sampler = sampler,
             .imageView = lookup_result->view,

@@ -919,14 +919,19 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
     uint32_t delta_col_samples = delta_samples % stride_samples;
     uint32_t delta_row_samples = delta_samples / stride_samples;
 
-    vk::ImageView ds_attachment = reinterpret_cast<VKContext *>(state.context)->current_ds_view;
-    const bool reading_ds_attachment = cached_info.texture.view == ds_attachment;
+    VKContext *context = reinterpret_cast<VKContext *>(state.context);
+    const bool reading_ds_attachment = context->current_ds_base_image && cached_info.texture.image == context->current_ds_base_image->image;
     const bool same_dimension = memory_width == cached_info.memory_width
         && memory_height == cached_info.memory_height
         && delta_col_samples == 0
         && delta_row_samples == 0;
 
-    if (!reading_ds_attachment && (state.features.use_texture_viewport || same_dimension)) {
+    // Sampling a depth/stencil surface directly can bind an image that a later
+    // command buffer still treats as a framebuffer attachment, and layout is
+    // tracked per view rather than per image, so it does not notice. Stay on the
+    // copy path below until that tracking moves to the image.
+    const bool can_sample_depth_stencil_directly = false;
+    if (can_sample_depth_stencil_directly && !reading_ds_attachment && (state.features.use_texture_viewport || same_dimension)) {
         // we can just sample from the surface itself
 
         // we must create a new read-only view if it is not already present
@@ -964,7 +969,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
         };
     }
 
-    const uint64_t scene_timestamp = reinterpret_cast<VKContext *>(state.context)->scene_timestamp;
+    const uint64_t scene_timestamp = context->scene_timestamp;
 
     int read_surface_idx = -1;
     for (int i = 0; i < cached_info.read_surfaces.size(); i++) {
@@ -1025,7 +1030,6 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
     read_only.scene_timestamp = scene_timestamp;
 
     // use prerender cmd as we can't copy an image or use pipeline barriers in a render pass
-    VKContext *context = reinterpret_cast<VKContext *>(state.context);
     vk::CommandBuffer cmd_buffer = context->prerender_cmd;
 
     delta_row_samples *= state.res_multiplier;
@@ -1122,7 +1126,7 @@ Framebuffer &VKSurfaceCache::retrieve_framebuffer_handle(MemState &mem, SceGxmCo
         fb_interlock = state.device.createFramebuffer(fb_info);
     }
 
-    return (framebuffer_array[key] = { fb_standard, fb_interlock, color_result.base_image });
+    return (framebuffer_array[key] = { fb_standard, fb_interlock, color_result.base_image, ds_result.base_image });
 }
 
 bool VKSurfaceCache::check_for_surface(MemState &mem, Address source_address, CallbackRequestFunction &callback, Address target_address) {

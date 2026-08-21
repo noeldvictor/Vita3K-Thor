@@ -25,6 +25,7 @@
 
 #include <gxm/types.h>
 
+#include <algorithm>
 #include <array>
 #include <condition_variable>
 #include <memory>
@@ -101,6 +102,21 @@ struct SceGxmDepthStencilSurface {
     void set_format(SceGxmDepthStencilFormat format) {
         _type_and_format &= ~0x7EEE;
         _type_and_format |= (static_cast<uint32_t>(format) >> 12) & 0x7EEE;
+    }
+
+    /**
+     * @brief The depth to clear this surface to, clamped to the Vulkan range.
+     *
+     * Thor: background_depth is whatever the guest put there. Games that build
+     * a SceGxmDepthStencilSurface by hand rather than through
+     * sceGxmDepthStencilSurfaceInit* leave it uninitialised - Chaos Rings III
+     * hands us -9.8e29 - and passing that to vkCmdBeginRenderPass violates
+     * VUID-VkClearDepthStencilValue-depth-00022, so the resulting clear is
+     * undefined and depth testing for the pass is garbage. glClearDepthf
+     * clamps by spec, so the GL backend never saw this.
+     */
+    float get_background_depth() const {
+        return std::clamp(background_depth, 0.0f, 1.0f);
     }
 
     bool disabled() const {

@@ -188,6 +188,7 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.current_framebuffer = framebuffer.standard;
     context.current_shader_interlock_framebuffer = framebuffer.shader_interlock;
     context.current_color_base_image = framebuffer.base_image;
+    context.current_ds_base_image = framebuffer.ds_base_image;
 
     // make sure we are not keeping any texture from the previous pass
     // (textures can be still bound even though they are not used)
@@ -348,7 +349,7 @@ void VKContext::start_render_pass(bool create_descriptor_set) {
     // only the depth-stencil attachment may be clear if not force loaded
     std::array<vk::ClearValue, 2> curr_clear_values{};
     curr_clear_values[1].depthStencil = vk::ClearDepthStencilValue{
-        .depth = record.depth_stencil_surface.background_depth,
+        .depth = record.depth_stencil_surface.get_background_depth(),
         .stencil = record.depth_stencil_surface.stencil
     };
     curr_renderpass_info.setClearValues(curr_clear_values);

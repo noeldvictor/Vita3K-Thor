@@ -218,7 +218,7 @@ void sync_depth_data(const renderer::GxmRecordState &state) {
     glDepthMask(GL_TRUE);
 
     if (!state.depth_stencil_surface.force_load && state.depth_stencil_surface.depth_data) {
-        glClearDepthf(state.depth_stencil_surface.background_depth);
+        glClearDepthf(state.depth_stencil_surface.get_background_depth());
         glClear(GL_DEPTH_BUFFER_BIT);
     }
 }
