@@ -38,12 +38,36 @@
 #include <miniz.h>
 
 #include <algorithm>
+#include <fstream>
 #include <map>
 #include <set>
 #include <string>
 #include <vector>
 
 namespace app {
+
+// The scan runs before SDL is initialised, and these are ordinary files on
+// external storage rather than APK assets, so read them directly.
+// fs_utils::read_data would route through SDL_IOFromFile -> Android_JNI_FileOpen,
+// which aborts with "CallStaticObjectMethod received NULL jclass" that early.
+static bool read_scan_file(const fs::path &path, vfs::FileBuffer &buffer) {
+    buffer.clear();
+
+    std::ifstream file(path.string(), std::ios::binary | std::ios::ate);
+    if (!file)
+        return false;
+
+    const std::streamsize size = file.tellg();
+    if (size < 0)
+        return false;
+
+    file.seekg(0, std::ios::beg);
+    buffer.resize(static_cast<size_t>(size));
+    if (size == 0)
+        return true;
+
+    return static_cast<bool>(file.read(reinterpret_cast<char *>(buffer.data()), size));
+}
 
 static size_t write_archive_to_buffer(void *pOpaque, mz_uint64 file_ofs, const void *pBuf, size_t n) {
     vfs::FileBuffer *const buffer = static_cast<vfs::FileBuffer *>(pOpaque);
@@ -296,11 +320,11 @@ static int64_t virtual_cartridge_source_mtime(const fs::path &source_path) {
 
 static bool virtual_cartridge_directory_appears_encrypted(const fs::path &content_path) {
     vfs::FileBuffer buffer;
-    if (fs_utils::read_data(content_path / "eboot.bin", buffer) && buffer_looks_encrypted_executable(buffer))
+    if (read_scan_file(content_path / "eboot.bin", buffer) && buffer_looks_encrypted_executable(buffer))
         return true;
 
     buffer.clear();
-    return fs_utils::read_data(content_path / "sce_sys/icon0.png", buffer) && buffer_looks_encrypted_icon(buffer);
+    return read_scan_file(content_path / "sce_sys/icon0.png", buffer) && buffer_looks_encrypted_icon(buffer);
 }
 
 static bool virtual_cartridge_archive_appears_encrypted(mz_zip_archive &zip, const std::string &root) {
@@ -375,7 +399,7 @@ static void add_virtual_cartridge_candidate(std::map<std::string, AppEntry> &can
 
 static std::optional<AppEntry> app_from_cartridge_directory(EmuEnvState &emuenv, const fs::path &content_path) {
     vfs::FileBuffer param_sfo;
-    if (!fs_utils::read_data(content_path / "sce_sys/param.sfo", param_sfo))
+    if (!read_scan_file(content_path / "sce_sys/param.sfo", param_sfo))
         return std::nullopt;
 
     auto app = app_from_param(emuenv, param_sfo, content_path.generic_path(), {});
