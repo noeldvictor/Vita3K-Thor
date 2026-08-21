@@ -177,30 +177,18 @@ void ThreadState::exit(SceInt32 status) {
 
 void ThreadState::exit_delete_locked(bool exit) {
     run_end_callback = exit;
-<<<<<<< HEAD
     deferred_import_wait = false;
     deferred_import_return = false;
     deferred_resume_after_pause = false;
-=======
     delete_requested = true;
->>>>>>> upstream/master
 
     if (status == ThreadStatus::run) {
         stop(*cpu);
-<<<<<<< HEAD
-    }
-
-    // Removing a thread must unwind any host wait even while quickstate restore
-    // has globally paused guest execution. Normal wake paths remain pause-aware.
-    if (status == ThreadStatus::wait) {
-        status = ThreadStatus::run;
-=======
     } else if (status == ThreadStatus::wait) {
         // wake threads blocked in a sync primitive so they can observe delete_requested
         update_status(ThreadStatus::run);
     } else {
         // dormant or suspend: wake run_loop() so it can observe delete_requested
->>>>>>> upstream/master
         status_cond.notify_all();
     }
 
@@ -208,33 +196,23 @@ void ThreadState::exit_delete_locked(bool exit) {
     signal.send();
 }
 
-<<<<<<< HEAD
 void ThreadState::exit_delete(bool exit) {
     std::lock_guard<std::mutex> lock(mutex);
     exit_delete_locked(exit);
 }
 
 bool ThreadState::try_exit_delete_for_quick_state(const std::chrono::milliseconds timeout) {
+    // Quickstate restore tears threads down while guest execution is globally
+    // paused, so a thread may be holding its own mutex with no one to release
+    // it. Blocking here would deadlock the restore, hence the bounded try_lock.
     LOG_DEBUG("Quickstate requesting thread exit for {} ({}).", id, name);
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
         std::unique_lock<std::mutex> lock(mutex, std::try_to_lock);
         if (lock.owns_lock()) {
-            LOG_DEBUG("Quickstate acquired thread exit mutex for {} ({}).", id, name);
-            run_end_callback = false;
-            deferred_import_wait = false;
-            deferred_import_return = false;
-            deferred_resume_after_pause = false;
-            to_do = ThreadToDo::remove;
-            something_to_do.notify_one();
-            LOG_DEBUG("Quickstate notified thread exit for {} ({}).", id, name);
-
-            if (status == ThreadStatus::wait) {
-                status = ThreadStatus::run;
-                status_cond.notify_all();
-            }
-
-            signal.send();
+            // exit(false): no end callback - running guest code can touch
+            // state the restore has already torn down.
+            exit_delete_locked(false);
             LOG_DEBUG("Quickstate signaled thread exit for {} ({}).", id, name);
             return true;
         }
@@ -246,13 +224,8 @@ bool ThreadState::try_exit_delete_for_quick_state(const std::chrono::millisecond
     return false;
 }
 
-bool ThreadState::run_loop() {
-    int res = 0;
-    int run_level = std::max(call_level, 1);
-=======
 void ThreadState::run_loop() {
     bool guest_returned = false;
->>>>>>> upstream/master
 
     // Set thread-local CPU state so signal handlers can access it.
     // The guard clears it on any exit so a recycled host thread never sees
@@ -326,6 +299,12 @@ void ThreadState::run_loop() {
 
         // Active JIT loop. Lock held on entry and exit; unlocked only around run/step.
         while (!delete_requested && !exit_requested && !guest_returned && status == ThreadStatus::run) {
+            if (suspend_requested) {
+                suspend_requested = false;
+                update_status(ThreadStatus::suspend);
+                break;
+            }
+
             const bool do_step = single_stepping;
             if (do_step)
                 single_stepping = false;
@@ -338,7 +317,13 @@ void ThreadState::run_loop() {
             // handle svc call if this was what stopped the cpu
             if (cpu->svc_called) {
                 const uint32_t nid = *Ptr<uint32_t>(read_pc(*cpu) + 4).get(mem);
+                active_import_pc.store(read_pc(*cpu), std::memory_order_relaxed);
+                active_import_detail.store(0, std::memory_order_relaxed);
+                active_import_nid.store(nid, std::memory_order_relaxed);
                 kernel.call_import(*cpu, nid, id);
+                active_import_nid.store(0, std::memory_order_relaxed);
+                active_import_pc.store(0, std::memory_order_relaxed);
+                active_import_detail.store(0, std::memory_order_relaxed);
                 clear_exclusive(*cpu);
             }
 
@@ -348,49 +333,8 @@ void ThreadState::run_loop() {
 
             lock.lock();
 
-<<<<<<< HEAD
-                // handle svc call if this was what stopped the cpu
-                if (cpu->svc_called) {
-                    const uint32_t nid = *Ptr<uint32_t>(read_pc(*cpu) + 4).get(mem);
-                    active_import_pc.store(read_pc(*cpu), std::memory_order_relaxed);
-                    active_import_detail.store(0, std::memory_order_relaxed);
-                    active_import_nid.store(nid, std::memory_order_relaxed);
-                    kernel.call_import(*cpu, nid, id);
-                    active_import_nid.store(0, std::memory_order_relaxed);
-                    active_import_pc.store(0, std::memory_order_relaxed);
-                    active_import_detail.store(0, std::memory_order_relaxed);
-                    clear_exclusive(*cpu);
-                }
-
-                // handle pending abort (exception handler from page fault)
-                if (cpu->abort_pending.exchange(false))
-                    dispatch_abort(*cpu);
-
-                lock.lock();
-                if (to_do != ThreadToDo::run || res != 0 || call_level != run_level || hit_breakpoint(*cpu))
-                    break;
-                lock.unlock();
-            }
-
-            // Handle errors
-            if (to_do == ThreadToDo::remove)
-                continue;
-
-            if (res < 0) {
-                LOG_ERROR("Thread {} ({}) experienced a cpu error.", name, cpu->thread_id);
-                returned_value = 0xDEADDEAD;
-                call_level--;
-                if (call_level > 0)
-                    // only return if we are inside a callback
-                    return true;
-                break;
-            }
-
-            if (hit_breakpoint(*cpu) || to_do == ThreadToDo::suspend) {
-=======
             if (do_step || suspend_requested || hit_breakpoint(*cpu)) {
                 suspend_requested = false;
->>>>>>> upstream/master
                 update_status(ThreadStatus::suspend);
             }
 
@@ -498,15 +442,7 @@ uint32_t ThreadState::run_guest_function(Address callback_address, SceSize args,
     start(args, argp);
     {
         std::unique_lock<std::mutex> lock(mutex);
-<<<<<<< HEAD
-        if (status != ThreadStatus::dormant || to_do == ThreadToDo::run) {
-            status_cond.wait(lock, [&]() {
-                return status == ThreadStatus::dormant && to_do != ThreadToDo::run;
-            });
-        }
-=======
         status_cond.wait(lock, [&]() { return status == ThreadStatus::dormant; });
->>>>>>> upstream/master
     }
 
     entry_point = old_entry_point;
@@ -523,22 +459,25 @@ void ThreadState::update_status(ThreadStatus status, std::optional<ThreadStatus>
     if (expected)
         assert(expected.value() == this->status);
 
-<<<<<<< HEAD
+    // Don't apply the requested wait transition if being removed to not block deletion
+    if (status == ThreadStatus::wait && delete_requested)
+        return;
+
+    // Quickstate restore pauses guest execution globally. A resume that lands
+    // during the pause is recorded and replayed on resume rather than applied
+    // now, so the restore is not raced by a thread waking early.
     if (status == ThreadStatus::run && kernel.is_threads_paused()) {
         deferred_resume_after_pause = true;
-        if (this->status == ThreadStatus::wait && (to_do == ThreadToDo::run || to_do == ThreadToDo::step)) {
+        if (this->status == ThreadStatus::wait) {
+            // Unblock the sync-primitive wait, then let run_loop() park it in
+            // suspend before it executes any further guest code.
             this->status = ThreadStatus::run;
-            to_do = ThreadToDo::suspend;
+            suspend_requested = true;
             status_cond.notify_all();
             return;
         }
         status = ThreadStatus::suspend;
     }
-=======
-    // Don't apply the requested wait transition if being removed to not block deletion
-    if (status == ThreadStatus::wait && delete_requested)
-        return;
->>>>>>> upstream/master
 
     this->status = status;
     status_cond.notify_all();
@@ -572,8 +511,7 @@ void ThreadState::resume(bool step) {
 
 bool ThreadState::is_quick_state_pause_quiesced() const {
     return status != ThreadStatus::run
-        && to_do != ThreadToDo::run
-        && to_do != ThreadToDo::step
+        && !single_stepping
         && active_import_nid.load(std::memory_order_relaxed) == 0;
 }
 
@@ -583,12 +521,11 @@ bool ThreadState::needs_quick_state_stop_pulse() const {
 
 bool ThreadState::begin_deferred_import_wait() {
     std::lock_guard<std::mutex> lock(mutex);
-    if (to_do != ThreadToDo::run && to_do != ThreadToDo::step && to_do != ThreadToDo::suspend)
+    if (delete_requested || status == ThreadStatus::wait)
         return false;
 
     deferred_import_wait = true;
     deferred_import_return = true;
-    to_do = ThreadToDo::wait;
     if (status == ThreadStatus::run)
         update_status(ThreadStatus::wait, ThreadStatus::run);
     else
@@ -601,7 +538,6 @@ bool ThreadState::restore_deferred_import_wait() {
     deferred_import_wait = true;
     deferred_import_return = false;
     deferred_resume_after_pause = false;
-    to_do = ThreadToDo::wait;
     status = ThreadStatus::wait;
     status_cond.notify_all();
     return true;
@@ -667,18 +603,15 @@ bool ThreadState::complete_deferred_import_wait(uint32_t return_value) {
             status = ThreadStatus::suspend;
             status_cond.notify_all();
         }
-        if (to_do == ThreadToDo::wait || to_do == ThreadToDo::run)
-            to_do = ThreadToDo::suspend;
         return true;
     }
 
-    if (status == ThreadStatus::wait) {
+    // run_loop() parks on status_cond until status is run again, so moving the
+    // status is what the old to_do = run + something_to_do.notify_one() did.
+    if (status == ThreadStatus::wait || status == ThreadStatus::suspend) {
+        suspend_requested = false;
         status = ThreadStatus::run;
         status_cond.notify_all();
-    }
-    if (to_do == ThreadToDo::wait || to_do == ThreadToDo::suspend) {
-        to_do = ThreadToDo::run;
-        something_to_do.notify_one();
     }
     return true;
 }
@@ -698,14 +631,12 @@ void ThreadState::resume_after_pause_if_needed(bool saved_running_before_pause) 
     if (!should_resume)
         return;
 
-    if (deferred_resume) {
+    // Clear the request that parked the thread, then let run_loop() pick it up.
+    suspend_requested = false;
+
+    if (deferred_resume || status == ThreadStatus::suspend) {
         status = ThreadStatus::run;
         status_cond.notify_all();
-    }
-
-    if (to_do == ThreadToDo::wait || to_do == ThreadToDo::suspend) {
-        to_do = ThreadToDo::run;
-        something_to_do.notify_one();
     }
 }
 
@@ -732,27 +663,13 @@ static const char *thread_status_name(const ThreadStatus status) {
     return "unknown";
 }
 
-static const char *thread_todo_name(const ThreadToDo to_do) {
-    switch (to_do) {
-    case ThreadToDo::remove:
-        return "remove";
-    case ThreadToDo::run:
-        return "run";
-    case ThreadToDo::step:
-        return "step";
-    case ThreadToDo::suspend:
-        return "suspend";
-    case ThreadToDo::wait:
-        return "wait";
-    }
-    return "unknown";
-}
-
 std::string ThreadState::quick_state_debug_summary() const {
     std::ostringstream out;
     out << id << ":" << name
         << " status=" << thread_status_name(status)
-        << " todo=" << thread_todo_name(to_do)
+        << " delete_req=" << delete_requested
+        << " suspend_req=" << suspend_requested
+        << " stepping=" << single_stepping
         << " call_level=" << call_level
         << " deferred_wait=" << deferred_import_wait
         << " deferred_return=" << deferred_import_return
