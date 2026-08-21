@@ -53,6 +53,17 @@ struct AppEntry {
     std::string title_id;
     std::string path;
     std::string icon_path;
+
+    // Thor: virtual cartridges are .zip/.vpk archives (or extracted folders)
+    // listed straight from a scan root, never installed into ux0:app. The
+    // source stamp lets the scan skip archives it has already read.
+    bool virtual_cartridge = false;
+    bool encrypted_content = false;
+    std::string source_path;
+    uint64_t source_size = 0;
+    int64_t source_mtime = 0;
+    std::string source_root;
+    bool cheats_available = false;
 };
 
 struct AppTime {

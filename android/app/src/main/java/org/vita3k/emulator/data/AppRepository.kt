@@ -124,7 +124,8 @@ internal object AppRepository {
         val buildDelta = latestBuildNumber - currentBuildNumber
 
         when {
-            !officialBuild -> UpdateCheckResult(
+            // Thor is a fork and never an official build; do not nag about it.
+            false -> UpdateCheckResult(
                 status = UpdateCheckStatus.CustomBuildCanUpdate,
                 message = "",
                 info = info,

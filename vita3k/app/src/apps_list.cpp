@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <app/functions.h>
+#include <app/virtual_cartridge.h>
 #include <app/state.h>
 #include <config/state.h>
 #include <emuenv/state.h>
@@ -234,19 +235,29 @@ static std::vector<AppTime>::iterator find_app_time(
 bool init_apps_list(EmuEnvState &emuenv) {
     if (!load_cached_apps(emuenv))
         return scan_apps(emuenv);
+
+    // Thor: the cache covers installed apps; cartridges are re-scanned every
+    // time, since the archives live outside VitaFS and can appear or vanish.
+    auto &state = emuenv.app.apps_list;
+    std::lock_guard<std::mutex> lock(state.mutex);
+    append_virtual_cartridge_apps(state.apps, emuenv);
     return true;
 }
 
 bool scan_apps(EmuEnvState &emuenv) {
     const fs::path app_path{ emuenv.vita_fs_path / "ux0/app" };
-    if (!fs::exists(app_path))
-        return false;
 
-    const auto sources = collect_app_cache_sources(emuenv);
     std::vector<AppEntry> scanned;
-    scanned.reserve(sources.size());
-    for (const auto &source : sources)
-        scanned.push_back(read_app_info(emuenv, source.title_id));
+    if (fs::exists(app_path)) {
+        const auto sources = collect_app_cache_sources(emuenv);
+        scanned.reserve(sources.size());
+        for (const auto &source : sources)
+            scanned.push_back(read_app_info(emuenv, source.title_id));
+    }
+
+    // Thor: virtual cartridges join the list without being installed. A setup
+    // with no ux0:app at all is still valid when everything is a cartridge.
+    append_virtual_cartridge_apps(scanned, emuenv);
 
     auto &state = emuenv.app.apps_list;
 

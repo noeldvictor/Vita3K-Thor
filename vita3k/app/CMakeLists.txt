@@ -3,11 +3,13 @@ add_library(
 	STATIC
 	include/app/functions.h
 	include/app/sdl_frame_host.h
+	include/app/virtual_cartridge.h
 	include/app/session_controller.h
 	include/app/discord.h
 	include/app/state.h
 	src/app_init.cpp
 	src/sdl_frame_host.cpp
+	src/virtual_cartridge.cpp
 	src/app.cpp
 	src/apps_list.cpp
 	src/discord.cpp

@@ -202,10 +202,9 @@ updater::UpdateCheckResult build_check_result() {
     const auto current_build_number = static_cast<std::uint64_t>(app_number);
     const auto build_delta = static_cast<std::int64_t>(result.info.build_number) - static_cast<std::int64_t>(current_build_number);
 
-    if (!updater::is_official_build()) {
-        result.status = updater::UpdateCheckStatus::CustomBuildCanUpdate;
-        return result;
-    }
+    // Thor is a fork and is never an "official build"; upstream would otherwise
+    // nag on every check and offer to replace it with an upstream release.
+    // Fall through to the normal build-number comparison instead.
 
     if (build_delta > 0) {
         result.status = updater::UpdateCheckStatus::UpdateAvailable;
