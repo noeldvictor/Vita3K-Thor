@@ -292,6 +292,13 @@ if (${BUILD_APPIMAGE})
 	endif()
 endif()
 
+# Upstream's Qt frontend needs Qt 6.11+. Thor still ships the SDL/ImGui
+# frontend, so the Qt one is opt-in until its features are ported over.
+option(VITA3K_ENABLE_QT_GUI "Build the upstream Qt frontend (requires Qt 6.11+)" OFF)
+if(VITA3K_ENABLE_QT_GUI)
+	include("cmake/qt6.cmake")
+endif()
+
 add_subdirectory(external)
 add_subdirectory(vita3k)
 add_subdirectory(tools/gen-modules)

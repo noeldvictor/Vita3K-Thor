@@ -390,6 +390,7 @@ if(NOT CURL_FOUND)
 	option(BUILD_TESTING "Build tests" OFF)
 	option(BUILD_EXAMPLES "Build libcurl examples" OFF)
 	option(CURL_USE_LIBPSL "Use libpsl" OFF)
+	set(CURL_USE_LIBPSL OFF CACHE BOOL "Use libpsl" FORCE)
 	FetchContent_Declare(curl
 		GIT_REPOSITORY https://github.com/curl/curl.git
 		GIT_TAG        68720b4837284335b2d63cb358f8f6ce65f5bc55 # release 8.21.0

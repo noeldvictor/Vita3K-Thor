@@ -1,8 +1,8 @@
 add_library(
 	util
 	STATIC
+	src/android_driver.cpp
 	src/arm.cpp
-	src/byte.cpp
 	src/cheat_paths.cpp
 	src/float_to_half.cpp
 	src/fs_utils.cpp
