@@ -105,7 +105,6 @@ AudioOutPortPtr CubebAudioAdapter::open_port(int nb_channels, int freq, int nb_s
     }
 
     port->len_bytes = nb_sample * nb_channels * sizeof(uint16_t);
-    port->len_microseconds = (nb_sample * 1'000'000ULL) / freq;
 
     // allocate enough buffers to be able to satisfy a callback (+1 to make sure one buffer can be ready)
     const int nb_buffers = (latency + nb_sample - 1) / nb_sample + 1;
@@ -124,13 +123,14 @@ void CubebAudioAdapter::audio_output(AudioOutPort &out_port, const void *buffer)
     CubebAudioOutPort &port = static_cast<CubebAudioOutPort &>(out_port);
 
     std::unique_lock<std::mutex> lock(port.mutex);
+
+    if (out_port.stopping)
+        return;
+
     if (port.nb_buffers_ready == port.audio_buffers.size()) {
-        if (state.speed_percent.load() > 100) {
-            port.next_audio_buffer = (port.next_audio_buffer + 1) % port.audio_buffers.size();
-            port.nb_buffers_ready--;
-        } else {
-            port.cond_var.wait(lock);
-        }
+        port.cond_var.wait(lock);
+        if (out_port.stopping)
+            return;
     }
 
     assert(port.nb_buffers_ready < port.audio_buffers.size());
@@ -159,5 +159,15 @@ void CubebAudioAdapter::switch_state(const bool pause) {
             cubeb_stream_stop(port.out_stream);
         else
             cubeb_stream_start(port.out_stream);
+    }
+}
+
+void CubebAudioAdapter::wake_all_ports() {
+    for (auto &[_, port_ptr] : state.out_ports) {
+        auto &port = static_cast<CubebAudioOutPort &>(*port_ptr);
+        {
+            std::lock_guard<std::mutex> lock(port.mutex);
+        }
+        port.cond_var.notify_all();
     }
 }

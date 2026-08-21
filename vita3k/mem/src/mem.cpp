@@ -22,11 +22,8 @@
 #include <util/log.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cassert>
-#include <cstdlib>
 #include <cstring>
-#include <limits>
 #include <mutex>
 #include <utility>
 
@@ -37,9 +34,6 @@
 #include <csignal>
 #include <sys/mman.h>
 #include <unistd.h>
-#ifdef __ANDROID__
-#include <sys/system_properties.h>
-#endif
 #endif
 
 constexpr uint32_t STANDARD_PAGE_SIZE = KiB(4);
@@ -57,66 +51,6 @@ static void register_access_violation_handler(const AccessViolationHandler &hand
 
 static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_count, const char *name, const bool force);
 static void delete_memory(uint8_t *memory);
-static bool commit_range_inner(MemState &state, Address addr, uint32_t size);
-
-static bool debug_value_enabled(const char *value) {
-    if (!value || !*value)
-        return false;
-
-    return std::strcmp(value, "1") == 0
-        || std::strcmp(value, "true") == 0
-        || std::strcmp(value, "TRUE") == 0
-        || std::strcmp(value, "on") == 0
-        || std::strcmp(value, "ON") == 0
-        || std::strcmp(value, "yes") == 0
-        || std::strcmp(value, "YES") == 0;
-}
-
-static bool read_mem_protect_trace_enabled() {
-    if (debug_value_enabled(std::getenv("VITA3K_MEM_PROTECT_TRACE")))
-        return true;
-
-#ifdef __ANDROID__
-    char value[PROP_VALUE_MAX] = {};
-    if (__system_property_get("debug.vita3k.mem_protect_trace", value) > 0)
-        return debug_value_enabled(value);
-#endif
-
-    return false;
-}
-
-static bool mem_protect_trace_enabled() {
-    static std::atomic<uint32_t> query_counter{ 0 };
-    static std::atomic<bool> cached_enabled{ false };
-
-    const uint32_t query = query_counter.fetch_add(1, std::memory_order_relaxed);
-    if (query == 0 || (query % 64) == 0) {
-        cached_enabled.store(read_mem_protect_trace_enabled(), std::memory_order_relaxed);
-    }
-
-    return cached_enabled.load(std::memory_order_relaxed);
-}
-
-static bool should_log_protect_fault(const uint64_t fault_count) {
-    return fault_count <= 32 || (fault_count % 300) == 0;
-}
-
-static const char *mem_perm_name(const MemPerm perm) {
-    switch (perm) {
-    case MemPerm::None: return "none";
-    case MemPerm::ReadOnly: return "read-only";
-    case MemPerm::WriteOnly: return "write-only";
-    case MemPerm::ReadWrite: return "read-write";
-    default: return "unknown";
-    }
-}
-
-static const char *protect_debug_name(const ProtectSegmentInfo &info) {
-    if (info.blocks.empty())
-        return "unknown";
-
-    return info.blocks.begin()->second.debug_name ? info.blocks.begin()->second.debug_name : "unknown";
-}
 
 #ifdef _WIN32
 static std::string get_error_msg() {
@@ -236,7 +170,19 @@ static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_c
     const uint32_t size = page_count * STANDARD_PAGE_SIZE;
     const Address addr = page_num * STANDARD_PAGE_SIZE;
 
-    LOG_CRITICAL_IF(!commit_range_inner(state, addr, size), "Failed to commit guest memory allocation at 0x{:X} ({} bytes)", addr, size);
+    const Address commit_start = align_down(addr, state.host_page_size);
+    const Address commit_end = align(addr + size, state.host_page_size);
+    const uint32_t commit_size = commit_end - commit_start;
+    uint8_t *const commit_ptr = &state.memory[commit_start];
+
+    // Make memory chunk available to access
+#ifdef _WIN32
+    const void *const ret = VirtualAlloc(commit_ptr, commit_size, MEM_COMMIT, PAGE_READWRITE);
+    LOG_CRITICAL_IF(!ret, "VirtualAlloc failed: {}", get_error_msg());
+#else
+    const int ret = mprotect(commit_ptr, commit_size, PROT_READ | PROT_WRITE);
+    LOG_CRITICAL_IF(ret == -1, "mprotect failed: {}", get_error_msg());
+#endif
     std::memset(&state.memory[addr], 0, size);
 
     AllocMemPage &page = state.alloc_table[page_num];
@@ -273,42 +219,6 @@ Address alloc_aligned(MemState &state, uint32_t size, const char *name, unsigned
     }
 
     return align_addr;
-}
-
-static bool commit_range_inner(MemState &state, Address addr, uint32_t size) {
-    if (size == 0)
-        return true;
-
-    if (addr > std::numeric_limits<Address>::max() - size)
-        return false;
-
-    const Address commit_start = align_down(addr, state.host_page_size);
-    const Address commit_end = align(addr + size, state.host_page_size);
-    if (commit_end <= commit_start)
-        return false;
-
-    const uint32_t commit_size = commit_end - commit_start;
-    uint8_t *const commit_ptr = &state.memory[commit_start];
-
-#ifdef _WIN32
-    const void *const ret = VirtualAlloc(commit_ptr, commit_size, MEM_COMMIT, PAGE_READWRITE);
-    if (!ret) {
-        LOG_ERROR("VirtualAlloc commit failed at 0x{:X} ({} bytes): {}", commit_start, commit_size, get_error_msg());
-        return false;
-    }
-#else
-    const int ret = mprotect(commit_ptr, commit_size, PROT_READ | PROT_WRITE);
-    if (ret == -1) {
-        LOG_ERROR("mprotect commit failed at 0x{:X} ({} bytes): {}", commit_start, commit_size, get_error_msg());
-        return false;
-    }
-#endif
-
-    return true;
-}
-
-bool commit_range(MemState &state, Address addr, uint32_t size) {
-    return commit_range_inner(state, addr, size);
 }
 
 static void align_to_page(MemState &state, Address &addr, Address &size) {
@@ -384,8 +294,6 @@ bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcep
     if (!is_valid_addr(state, vaddr)) {
         return false;
     }
-    const uint64_t fault_count = state.protect_fault_count.fetch_add(1, std::memory_order_relaxed) + 1;
-    const bool trace_fault = mem_protect_trace_enabled() && should_log_protect_fault(fault_count);
     if (LOG_PROTECT) {
         fmt::print("Access: {}\n", log_hex(vaddr));
     }
@@ -394,10 +302,6 @@ bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcep
     if (it == state.protect_tree.end()) {
         // HACK: keep going
         unprotect_inner(state, align_down(vaddr, state.host_page_size), state.host_page_size);
-        if (trace_fault) {
-            LOG_INFO("ThorMemProtectFault count={} handled=true source=untracked-valid-region write={} vaddr=0x{:08X} range=0x{:08X}-0x{:08X} perm=unknown blocks=0",
-                fault_count, write, vaddr, align_down(vaddr, state.host_page_size), align_down(vaddr, state.host_page_size) + state.host_page_size);
-        }
         LOG_CRITICAL("Unhandled write protected region was valid. Address=0x{:X}", vaddr);
         return true;
     }
@@ -406,17 +310,8 @@ bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcep
     if (vaddr < it->first || vaddr >= it->first + info.size) {
         // HACK: keep going
         unprotect_inner(state, align_down(vaddr, state.host_page_size), state.host_page_size);
-        if (trace_fault) {
-            LOG_INFO("ThorMemProtectFault count={} handled=true source=outside-protect-segment write={} vaddr=0x{:08X} range=0x{:08X}-0x{:08X} perm={} blocks={}",
-                fault_count, write, vaddr, it->first, it->first + info.size, mem_perm_name(info.perm), info.blocks.size());
-        }
         LOG_CRITICAL("Unhandled write protected region was valid. Address=0x{:X}", vaddr);
         return true;
-    }
-
-    if (trace_fault) {
-        LOG_INFO("ThorMemProtectFault count={} handled=true source={} write={} vaddr=0x{:08X} range=0x{:08X}-0x{:08X} perm={} blocks={}",
-            fault_count, protect_debug_name(info), write, vaddr, it->first, it->first + info.size, mem_perm_name(info.perm), info.blocks.size());
     }
 
     Address previous_beg = it->first;
@@ -430,7 +325,7 @@ bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcep
     return true;
 }
 
-bool add_protect(MemState &state, Address addr, const uint32_t size, const MemPerm perm, const ProtectCallback &callback, const char *debug_name) {
+bool add_protect(MemState &state, Address addr, const uint32_t size, const MemPerm perm, const ProtectCallback &callback) {
     const std::lock_guard<std::mutex> lock(state.protect_mutex);
     ProtectSegmentInfo protect(size, perm);
     align_to_page(state, addr, protect.size);
@@ -438,7 +333,6 @@ bool add_protect(MemState &state, Address addr, const uint32_t size, const MemPe
     ProtectBlockInfo block;
     block.size = size;
     block.callback = callback;
-    block.debug_name = debug_name ? debug_name : "unknown";
 
     protect.blocks.emplace(addr, std::move(block));
 
@@ -595,8 +489,7 @@ void free(MemState &state, Address address) {
 
     AllocMemPage &page = state.alloc_table[page_num];
     if (!page.allocated) {
-        const uint32_t page_size = page.size;
-        LOG_CRITICAL("Freeing unallocated page at 0x{:08X} (page={}, size={})", address, page_num, page_size);
+        LOG_CRITICAL("Freeing unallocated page");
     }
     page.allocated = 0;
 
@@ -661,6 +554,24 @@ const char *mem_name(Address address, MemState &state) {
         return state.page_name_map.find(address / STANDARD_PAGE_SIZE)->second.c_str();
     }
     return "";
+}
+
+void deinit_mem(MemState &state) {
+    const std::lock_guard<std::mutex> gen_lock(state.generation_mutex);
+
+    {
+        const std::lock_guard<std::mutex> prot_lock(state.protect_mutex);
+        state.protect_tree.clear();
+    }
+
+    state.memory.reset();
+    state.alloc_table.reset();
+    state.allocator.reset();
+    state.page_name_map.clear();
+    state.page_table.reset();
+    state.external_mapping.clear();
+    state.use_page_table = false;
+    state.host_page_size = 0;
 }
 
 #ifdef _WIN32

@@ -28,8 +28,6 @@
 #include <mutex>
 #include <thread>
 
-struct EmuEnvState;
-
 typedef std::map<int, SocketPtr> NetSockets;
 typedef std::map<int, EpollPtr> NetEpolls;
 
@@ -44,6 +42,9 @@ struct NetState {
     int current_addr_index = 0;
     uint32_t broadcastAddr = 0xFFFFFFFF;
     uint32_t netAddr = 0xFFFFFFFF;
+
+    void abort_all();
+    void deinit();
 };
 
 struct NetCtlState {
@@ -60,16 +61,26 @@ struct NetCtlState {
     std::atomic<bool> adhocThreadRun = false;
     std::mutex mutex;
 
-    ~NetCtlState() {
+    void deinit() {
         {
             const std::lock_guard<std::mutex> lock(mutex);
             adhocThreadRun = false;
+            adhocCondVarReady = false;
         }
         adhocCondVar.notify_all();
         if (adhocThread.joinable())
             adhocThread.join();
+
+        adhocCallbacks.fill({ 0, 0 });
+        callbacks.fill({ 0, 0 });
+        adhocPeers.clear();
+        adhocState = SCE_NET_CTL_STATE_DISCONNECTED;
+        adhocEvent = SCE_NET_CTL_EVENT_TYPE_NONE;
+        lastNotifiedAdhocEvent = SCE_NET_CTL_EVENT_TYPE_NONE;
+        inited = false;
+    }
+
+    ~NetCtlState() {
+        deinit();
     }
 };
-
-void netctl_start_adhoc_thread(EmuEnvState &emuenv, int thread_id);
-void netctl_stop_adhoc_thread(EmuEnvState &emuenv);

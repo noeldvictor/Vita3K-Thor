@@ -16,10 +16,9 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <config/functions.h>
-
-#include <string_view>
 #include <config/state.h>
 #include <config/version.h>
+#include <input/physical_key.h>
 #include <yaml-cpp/yaml.h>
 
 #include <util/fs.h>
@@ -33,11 +32,64 @@
 #include <CLI11.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <exception>
 #include <iostream>
 #include <vector>
 
 namespace config {
+static bool is_numeric_scalar(const YAML::Node &node) {
+    if (!node.IsScalar())
+        return false;
+
+    const std::string value = node.Scalar();
+    if (value.empty())
+        return false;
+
+    return std::all_of(value.begin(), value.end(), [](const unsigned char c) {
+        return std::isdigit(c) != 0;
+    });
+}
+} // namespace config
+
+namespace YAML {
+
+template <>
+struct convert<input::PhysicalKeyCode> {
+    static Node encode(const input::PhysicalKeyCode &rhs) {
+        Node node;
+        node = rhs == input::PhysicalKeyCode::Unbound
+            ? std::string("Unbound")
+            : std::string(input::physical_key_code_name(rhs));
+        return node;
+    }
+
+    static bool decode(const Node &node, input::PhysicalKeyCode &rhs) {
+        if (!node.IsScalar())
+            return false;
+
+        const std::string value = node.Scalar();
+        if (value.empty() || value == "Unbound" || config::is_numeric_scalar(node)) {
+            rhs = input::PhysicalKeyCode::Unbound;
+            return true;
+        }
+
+        rhs = input::physical_key_from_code_name(value);
+        if (rhs == input::PhysicalKeyCode::Unbound)
+            LOG_WARN("Unknown physical keyboard binding '{}'; falling back to Unbound.", value);
+
+        return true;
+    }
+};
+
+} // namespace YAML
+
+namespace config {
+
+static void sync_update_preferences(Config &self) {
+    self.check_for_updates = self.check_for_updates_mode != static_cast<int>(UPDATE_STARTUP_OFF);
+}
+
 // Update the members of the Config object based on the YAML node.
 // Use this function when the YAML file is updated before the members.
 static void update_members(Config &self, const YAML::Node &p_yaml_node) {
@@ -50,10 +102,31 @@ static void update_members(Config &self, const YAML::Node &p_yaml_node) {
 
     CONFIG_LIST(UPDATE_MEMBERS)
 #undef UPDATE_MEMBERS
+
+    if (!p_yaml_node["check-for-updates-mode"].IsDefined() && p_yaml_node["check-for-updates"].IsDefined()) {
+        self.check_for_updates_mode = p_yaml_node["check-for-updates"].as<bool>()
+            ? static_cast<int>(UPDATE_STARTUP_PROMPT)
+            : static_cast<int>(UPDATE_STARTUP_OFF);
+    }
+
+    sync_update_preferences(self);
 #ifdef TRACY_ENABLE
     tracy_module_utils::cleanup(self.tracy_advanced_profiling_modules);
     tracy_module_utils::load_from(self.tracy_advanced_profiling_modules);
 #endif
+}
+
+static bool has_legacy_keyboard_bindings(const YAML::Node &yaml_node) {
+    bool legacy_keyboard_bindings = false;
+
+#define CHECK_LEGACY_KEYBOARD_BINDINGS(option_type, option_name, option_default, member_name) \
+    if (is_numeric_scalar(yaml_node[option_name]))                                            \
+        legacy_keyboard_bindings = true;
+
+    CONFIG_KEYBOARD(CHECK_LEGACY_KEYBOARD_BINDINGS)
+#undef CHECK_LEGACY_KEYBOARD_BINDINGS
+
+    return legacy_keyboard_bindings;
 }
 
 static void update_members(Config &self, const Config &rhs) {
@@ -62,6 +135,7 @@ static void update_members(Config &self, const Config &rhs) {
 
     CONFIG_LIST(UPDATE_MEMBERS)
 #undef UPDATE_MEMBERS
+    sync_update_preferences(self);
 #ifdef TRACY_ENABLE
     tracy_module_utils::cleanup(self.tracy_advanced_profiling_modules);
     tracy_module_utils::load_from(self.tracy_advanced_profiling_modules);
@@ -92,8 +166,6 @@ static void check_members(Config &self, const Config &rhs) {
     self.console = rhs.console;
     self.app_args = rhs.app_args;
     self.load_app_list = rhs.load_app_list;
-    self.cartridge_mode = rhs.cartridge_mode;
-    self.thor_renderer_trace = rhs.thor_renderer_trace;
     self.self_path = rhs.self_path;
 }
 
@@ -103,9 +175,6 @@ static YAML::Node get(const Config &self);
 static void merge(Config &self, const Config &rhs) {
     bool init = false;
     if (get(rhs) == get(Config{})) {
-        init = true;
-    }
-    if (!rhs.config_path.empty() && rhs.config_path != self.config_path) {
         init = true;
     }
 
@@ -125,6 +194,7 @@ static void merge(Config &self, const Config &rhs) {
 #undef COMBINE_VECTOR
 
     check_members(self, rhs);
+    sync_update_preferences(self);
 }
 
 // Generate a YAML node based on the current values of the members.
@@ -137,14 +207,18 @@ static YAML::Node get(const Config &self) {
     CONFIG_LIST(GEN_VALUES)
 #undef GEN_VALUES
 
+    out.remove("check-for-updates");
+
     return out;
 }
 
 // Load a function to the node network, and then update the members
-static void load_new_config(Config &self, const fs::path &path) {
+static bool load_new_config(Config &self, const fs::path &path) {
     fs::ifstream fin(path);
     YAML::Node yaml_node = YAML::Load(fin);
+    const bool legacy_keyboard_bindings = has_legacy_keyboard_bindings(yaml_node);
     update_members(self, yaml_node);
+    return legacy_keyboard_bindings;
 }
 
 static std::set<std::string> get_file_set(const fs::path &loc, bool dirs_only = true) {
@@ -182,11 +256,10 @@ static fs::path check_path(const fs::path &output_path) {
 void reset_keyboard_bindings(Config &cfg) {
     const Config defaults{};
 
-#define RESET_KEYBOARD_BINDING(option_type, option_name, option_default, member_name)   \
-    if (std::string_view(option_name).starts_with("keyboard-"))      \
-        cfg.member_name = defaults.member_name;
+#define RESET_KEYBOARD_BINDING(option_type, option_name, option_default, member_name) \
+    cfg.member_name = defaults.member_name;
 
-    CONFIG_INDIVIDUAL(RESET_KEYBOARD_BINDING)
+    CONFIG_KEYBOARD(RESET_KEYBOARD_BINDING)
 #undef RESET_KEYBOARD_BINDING
 }
 
@@ -198,7 +271,10 @@ static ExitCode parse(Config &cfg, const fs::path &load_path, const fs::path &ro
     }
 
     try {
-        load_new_config(cfg, loaded_path);
+        if (load_new_config(cfg, loaded_path)) {
+            reset_keyboard_bindings(cfg);
+            LOG_INFO("Legacy numeric keyboard binding config detected; keyboard bindings were reset to physical defaults.");
+        }
     } catch (YAML::Exception &exception) {
         LOG_ERROR("Config file can't be loaded: Error: {}", exception.what());
         return FileNotFound;
@@ -249,13 +325,10 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
     } else {
         serialize_config(command_line, check_path(root_paths.get_config_path()));
     }
-    cfg.config_path = root_paths.get_config_path();
 
     // Declare all options
     CLI::App app{ "Vita3K Command Line Interface" }; // "--help,-h" is automatically generated
-#ifdef _WIN32
     app.allow_windows_style_options();
-#endif
     app.allow_extras();
     app.enabled_by_default();
     app.get_formatter()->column_width(38);
@@ -275,8 +348,6 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
     input->add_option("--app-args,-Z", command_line.app_args, "Argument for app, use ', ' to separate arguments.")
         ->default_str("")->group("Input");
     input->add_option("--load-app-list,-a", command_line.load_app_list, "Starts the emulator with load app list.")
-       ->default_val(false)->group("Input");
-    input->add_flag("--cartridge", command_line.cartridge_mode, "Mount content-path as a virtual read-only game card instead of installing it to the app library.")
        ->default_val(false)->group("Input");
     input->add_option("--self,-S", command_line.self_path, "Path to the self to run inside Title ID")
         ->default_str("eboot.bin")->group("Input");
@@ -319,8 +390,6 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
         ->group("Logging");
     config->add_flag("--log-uniforms,-U", command_line.log_uniforms, "Log Uniforms")
         ->group("Logging");
-    config->add_flag("--thor-render-trace", command_line.thor_renderer_trace, "Enable Thor renderer GXM trace logging at startup")
-        ->default_val(false)->group("Logging");
     // clang-format on
 
     // Parse the inputs

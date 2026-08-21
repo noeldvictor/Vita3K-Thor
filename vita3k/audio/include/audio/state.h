@@ -19,8 +19,8 @@
 
 #include <util/types.h>
 
-#include <functional>
 #include <atomic>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -30,6 +30,10 @@
 #define SCE_AUDIO_VOLUME_0DB SCE_AUDIO_OUT_MAX_VOL //!< Maximum output port volume
 
 struct AudioOutPort {
+    virtual ~AudioOutPort() = default;
+
+    // shutdown flag
+    std::atomic<bool> stopping{ false };
     // Channel range from 0 - 32768
     int left_channel_volume = SCE_AUDIO_VOLUME_0DB;
     int right_channel_volume = SCE_AUDIO_VOLUME_0DB;
@@ -76,6 +80,7 @@ public:
     virtual void set_volume(AudioOutPort &out_port, float volume) {}
     virtual void switch_state(const bool pause) {}
     virtual int get_rest_sample(AudioOutPort &out_port) { return 0; };
+    virtual void wake_all_ports() {}
     friend struct AudioState;
 };
 
@@ -88,9 +93,10 @@ struct AudioState {
     AudioInPort in_port;
     std::string audio_backend;
     float global_volume = 1;
-    std::atomic<uint32_t> speed_percent{ 100 };
 
     bool init(const std::string &adapter_name);
+    void deinit();
+    void stop_all_ports();
     void set_backend(const std::string &adapter_name);
     AudioOutPortPtr open_port(int nb_channels, int freq, int nb_sample);
     void audio_output(AudioOutPort &out_port, const void *buffer);
@@ -98,4 +104,5 @@ struct AudioState {
     void set_global_volume(float volume);
     void switch_state(const bool pause);
     int get_rest_sample(AudioOutPort &out_port);
+    void wake_all_ports();
 };

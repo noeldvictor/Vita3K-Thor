@@ -44,8 +44,6 @@ struct Config {
     bool fullscreen = false;
     bool console = false;
     bool load_app_list = false;
-    bool cartridge_mode = false;
-    bool thor_renderer_trace = false;
 
     fs::path get_vita_fs_path() const {
         return fs_utils::utf8_to_path(vita_fs_path);
@@ -85,11 +83,13 @@ struct Config {
         bool export_textures = false;
         bool export_as_png = false;
         bool fps_hack = false;
+        bool shader_cache = true;
+        bool spirv_shader = false;
+        bool texture_cache = true;
         bool stretch_the_display_area = false;
         bool fullscreen_hd_res_pixel_perfect = false;
-        bool show_touchpad_cursor = true;
         int file_loading_delay = 0;
-        bool psn_signed_in = true;
+        bool psn_signed_in = false;
         int sys_button = static_cast<int>(SCE_SYSTEM_PARAM_ENTER_BUTTON_CROSS);
         int sys_lang = static_cast<int>(SCE_SYSTEM_PARAM_LANG_ENGLISH_US);
         int sys_date_format = static_cast<int>(SCE_SYSTEM_PARAM_DATE_FORMAT_MMDDYYYY);

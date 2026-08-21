@@ -25,6 +25,8 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
+#include <vector>
 
 // forward declare everything used in EmuEnvState
 namespace sfo {
@@ -34,6 +36,7 @@ struct SfoAppInfo;
 namespace renderer {
 enum class Backend : uint32_t;
 struct State;
+struct VulkanDeviceInfo;
 } // namespace renderer
 
 namespace ngs {
@@ -41,10 +44,12 @@ struct State;
 };
 
 struct Config;
+struct CompatState;
 struct MemState;
 struct CtrlState;
 struct TouchState;
 struct KernelState;
+struct AppState;
 struct AudioState;
 struct GxmState;
 struct IOState;
@@ -65,12 +70,6 @@ struct CameraState;
 namespace overlay {
 class display_manager;
 }
-
-typedef int32_t SceInt;
-struct IVector2 {
-    SceInt x;
-    SceInt y;
-};
 
 typedef float SceFloat;
 struct FVector2 {
@@ -96,6 +95,7 @@ private:
     std::unique_ptr<CtrlState> _ctrl;
     std::unique_ptr<TouchState> _touch;
     std::unique_ptr<KernelState> _kernel;
+    std::unique_ptr<AppState> _app;
     std::unique_ptr<AudioState> _audio;
     std::unique_ptr<GxmState> _gxm;
     std::unique_ptr<IOState> _io;
@@ -113,6 +113,7 @@ private:
     std::unique_ptr<GDBState> _gdb;
     std::unique_ptr<HTTPState> _http;
     std::unique_ptr<CameraState> _camera;
+    std::unique_ptr<CompatState> _compat;
     mutable std::mutex _launch_request_mutex;
     std::optional<AppLaunchRequest> _pending_launch_request;
 
@@ -136,7 +137,6 @@ public:
     Config &cfg;
     SceUID main_thread_id{};
     size_t frame_count = 0;
-    uint32_t sdl_ticks = 0;
     uint32_t fps = 0;
     uint32_t avg_fps = 0;
     uint32_t min_fps = 0;
@@ -144,23 +144,17 @@ public:
     float fps_values[20] = {};
     uint32_t current_fps_offset = 0;
     uint32_t ms_per_frame = 0;
-    WindowPtr window = WindowPtr(nullptr, nullptr);
     renderer::Backend backend_renderer{};
     RendererPtr renderer{};
-    IVector2 drawable_size = { 0, 0 };
-    IVector2 window_size = { 0, 0 }; // Logical size of the window
-    FVector2 logical_viewport_pos = { 0, 0 }; // Position of the logical viewport in the window. For ImGui
-    FVector2 logical_viewport_size = { 0, 0 }; // Size of the logical viewport in the window. For ImGui
-    FVector2 drawable_viewport_pos = { 0, 0 }; // Position of the drawable viewport in the window. For OpenGL/Vulkan
-    FVector2 drawable_viewport_size = { 0, 0 }; // Size of the drawable viewport in the window. For OpenGL/Vulkan
+    std::unique_ptr<renderer::VulkanDeviceInfo> vulkan_device_info;
     bool drop_inputs{};
     MemState &mem;
     CtrlState &ctrl;
     TouchState &touch;
     KernelState &kernel;
+    AppState &app;
     AudioState &audio;
     GxmState &gxm;
-    bool renderer_focused{};
     IOState &io;
     MotionState &motion;
     NetState &net;
@@ -180,6 +174,7 @@ public:
     GDBState &gdb;
     HTTPState &http;
     CameraState &camera;
+    CompatState &compat;
     int max_font_level = 0;
     int current_font_level = 0;
 

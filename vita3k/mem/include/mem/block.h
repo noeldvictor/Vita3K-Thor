@@ -65,15 +65,17 @@ public:
         return addr != 0;
     }
 
-    Address get() const {
-        return addr;
-    }
-
+    // Thor: hand the address back without running the deleter, so quickstate
+    // restore can rebind a thread's stack/TLS to blocks it did not allocate.
     Address release() {
         const Address released_addr = addr;
         addr = 0;
         deleter = nullptr;
         return released_addr;
+    }
+
+    Address get() const {
+        return addr;
     }
 
     template <class T>

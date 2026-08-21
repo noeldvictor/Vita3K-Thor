@@ -39,6 +39,8 @@ execute_process(COMMAND ${CMD}
 	OUTPUT_VARIABLE GIT_REPO
 	OUTPUT_STRIP_TRAILING_WHITESPACE)
 
+set(VITA3K_OFFICIAL_UPDATE_BUILD 0)
+
 if (NOT GIT_REPO STREQUAL "")
 	string(FIND ${GIT_REPO} "git@github.com:" IS_GIT_SSH)
 	if (IS_GIT_SSH EQUAL 0)
@@ -105,7 +107,6 @@ add_subdirectory(dialog)
 add_subdirectory(display)
 add_subdirectory(features)
 add_subdirectory(glutil)
-add_subdirectory(gui)
 if(VITA3K_ENABLE_QT_GUI)
 	add_subdirectory(gui-qt)
 	add_subdirectory(updater)
@@ -197,7 +198,10 @@ if(WIN32)
 	target_sources(vita3k PRIVATE util/src/vc_runtime_checker.cpp)
 endif()
 
-target_link_libraries(vita3k PRIVATE app audio bgm_player camera config cppcommon ctrl display gdbstub gui gxm http io miniz modules motion net ngs np packages patch renderer shader touch util)
+target_link_libraries(vita3k PRIVATE app audio bgm_player camera config cppcommon ctrl dialog display gdbstub gxm http io miniz modules motion net ngs np packages patch renderer shader touch util)
+if(VITA3K_ENABLE_QT_GUI)
+	target_link_libraries(vita3k PRIVATE gui-qt updater)
+endif()
 if(USE_DISCORD_RICH_PRESENCE)
 	target_link_libraries(vita3k PRIVATE discord-rpc)
 endif()
@@ -419,11 +423,11 @@ elseif(WIN32)
 		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_BINARY_DIR}/external/discord_game_sdk/lib/x86_64/discord_game_sdk.dll" "$<TARGET_FILE_DIR:vita3k>")
 	endif()
 	if(EXISTS "${OPENSSL_ROOT_DIR}")
+		file(GLOB OPENSSL_RUNTIME_DLLS "${OPENSSL_ROOT_DIR}/bin/libssl-*-x64.dll" "${OPENSSL_ROOT_DIR}/bin/libcrypto-*-x64.dll")
 		add_custom_command(
 		TARGET vita3k
 		POST_BUILD
-		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${OPENSSL_ROOT_DIR}/bin/libssl-4-x64.dll" "$<TARGET_FILE_DIR:vita3k>"
-		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${OPENSSL_ROOT_DIR}/bin/libcrypto-4-x64.dll" "$<TARGET_FILE_DIR:vita3k>")
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OPENSSL_RUNTIME_DLLS} "$<TARGET_FILE_DIR:vita3k>")
 	endif()
 elseif(ANDROID)
 	add_custom_command(

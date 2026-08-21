@@ -48,12 +48,12 @@ constexpr MemPerm most_restrictive_perm(MemPerm a, MemPerm b) {
 }
 
 bool init(MemState &state, const bool use_page_table);
+void deinit_mem(MemState &state);
 Address alloc(MemState &state, uint32_t size, const char *name, Address start_addr = user_main_memory_start);
 Address alloc_aligned(MemState &state, uint32_t size, const char *name, unsigned int alignment, Address start_addr = user_main_memory_start);
-bool commit_range(MemState &state, Address addr, uint32_t size);
 void protect_inner(MemState &state, Address addr, uint32_t size, const MemPerm perm);
 void unprotect_inner(MemState &state, Address addr, uint32_t size);
-bool add_protect(MemState &state, Address addr, const uint32_t size, const MemPerm perm, const ProtectCallback &callback, const char *debug_name = "unknown");
+bool add_protect(MemState &state, Address addr, const uint32_t size, const MemPerm perm, const ProtectCallback &callback);
 void open_access_parent_protect_segment(MemState &state, Address addr);
 void close_access_parent_protect_segment(MemState &state, Address addr);
 void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *addr_ptr);
