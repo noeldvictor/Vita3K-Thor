@@ -37,7 +37,6 @@ typedef std::shared_ptr<ThreadState> ThreadStatePtr;
 struct DisplayStateVBlankWaitInfo {
     ThreadStatePtr target_thread;
     uint64_t target_vcount;
-    bool deferred_import_wait = false;
 };
 
 struct DisplayFrameInfo {
@@ -53,6 +52,13 @@ struct PredictedDisplayFrame {
 };
 
 struct DisplayState {
+    int viewport_drawable_w = 0;
+    int viewport_drawable_h = 0;
+    float viewport_x = 0;
+    float viewport_y = 0;
+    float viewport_w = 0;
+    float viewport_h = 0;
+
     // next frame as seen by SceDisplay
     DisplayFrameInfo sce_frame;
 
@@ -65,7 +71,6 @@ struct DisplayState {
     std::atomic<bool> abort{ false };
     std::atomic<bool> imgui_render{ true };
     std::atomic<bool> fullscreen{ false };
-    std::atomic<uint32_t> speed_percent{ 100 };
     std::atomic<std::uint64_t> vblank_count{ 0 };
     std::vector<DisplayStateVBlankWaitInfo> vblank_wait_infos;
     std::atomic<uint64_t> last_setframe_vblank_count = 0;
@@ -87,4 +92,6 @@ struct DisplayState {
     std::atomic<bool> predicting = false;
 
     std::atomic<Address> current_sync_object;
+
+    void deinit();
 };

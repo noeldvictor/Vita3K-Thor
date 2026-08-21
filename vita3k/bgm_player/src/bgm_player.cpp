@@ -426,7 +426,12 @@ void set_current_bgm_path(const std::pair<std::string, std::string> &path) {
 }
 
 bool init_bgm(const fs::path &pref_path, const bool is_enable) {
-    const auto device = VitaIoDevice::_from_string(current_path_bgm.first.c_str());
+    // upstream replaced better-enums with boost::describe for VitaIoDevice
+    VitaIoDevice device = VitaIoDevice::_INVALID;
+    if (!boost::describe::enum_from_string(current_path_bgm.first.c_str(), device)) {
+        LOG_ERROR("Unknown device in background music path: {}", current_path_bgm.first);
+        return false;
+    }
     const auto &path = current_path_bgm.second;
 
     // Check if the path is initialsetup.at9 and if the stream is already initialized

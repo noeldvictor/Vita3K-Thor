@@ -25,6 +25,12 @@
 #include <exception>
 
 #ifdef _WIN32
+// vulkan_win32.h uses HWND/HANDLE and does not pull in the Win32 headers itself;
+// vkutil.h deliberately #undefs VK_USE_PLATFORM_WIN32_KHR before vulkan.hpp.
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
 #include <vulkan/vulkan_win32.h>
 #elif defined(__APPLE__)
 #include <vkutil/native_surface.h>

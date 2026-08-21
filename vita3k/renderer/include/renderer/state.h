@@ -23,14 +23,27 @@
 #include <renderer/types.h>
 #include <threads/queue.h>
 
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <functional>
+#include <memory>
 #include <mutex>
+#include <string>
 #include <string_view>
+#include <thread>
+#include <vector>
 
 struct SDL_Window;
+struct DialogState;
 struct DisplayState;
 struct GxmState;
 struct Config;
+
+namespace overlay {
+class display_manager;
+}
 
 enum struct MappingMethod : int {
     Disabled,
@@ -109,6 +122,19 @@ struct State {
     uint32_t programs_count_pre_compiled = 0;
 
     bool should_display;
+
+    std::atomic<bool> async_flip_requested{ false };
+    std::atomic<int> pending_vsync{ -1 };
+
+    std::unique_ptr<std::thread> render_thread;
+    std::atomic<bool> render_abort{ false };
+
+    std::vector<ShadersHash> precompile_queue;
+    bool precompile_requested = false;
+    std::atomic<bool> precompile_complete{ false };
+    int precompile_progress = 0;
+    int precompile_total = 0;
+    std::string precompile_bg_path;
 
     // only support disabled by default
     int supported_mapping_methods_mask = 1;

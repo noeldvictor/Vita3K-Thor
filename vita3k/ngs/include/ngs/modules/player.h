@@ -101,6 +101,7 @@ public:
     std::unique_ptr<ModuleRuntimeState> create_runtime_state() const override;
     void on_state_change(const MemState &mem, ModuleData &v, const VoiceState previous) override;
     void on_param_change(const MemState &mem, ModuleData &data) override;
+    void cleanup_voice_state(ModuleData &data) override;
 
     static constexpr uint32_t get_max_parameter_size() {
         return sizeof(SceNgsPlayerParams);

@@ -20,10 +20,14 @@
 #include <renderer/commands.h>
 #include <renderer/types.h>
 
+#include <string>
+
 struct MemState;
 struct FeatureState;
 struct Config;
 struct SDL_Window;
+struct DisplayState;
+struct GxmState;
 
 namespace renderer {
 struct Context;

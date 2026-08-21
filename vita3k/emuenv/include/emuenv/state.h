@@ -21,6 +21,8 @@
 #include <util/fs.h>
 
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -59,6 +61,10 @@ struct SfoFile;
 struct GDBState;
 struct HTTPState;
 struct CameraState;
+
+namespace overlay {
+class display_manager;
+}
 
 typedef int32_t SceInt;
 struct IVector2 {
@@ -107,6 +113,8 @@ private:
     std::unique_ptr<GDBState> _gdb;
     std::unique_ptr<HTTPState> _http;
     std::unique_ptr<CameraState> _camera;
+    mutable std::mutex _launch_request_mutex;
+    std::optional<AppLaunchRequest> _pending_launch_request;
 
 public:
     // App info contained in its `param.sfo` file

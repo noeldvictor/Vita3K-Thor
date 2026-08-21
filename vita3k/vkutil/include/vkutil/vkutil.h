@@ -23,6 +23,22 @@
 #define VK_USE_PLATFORM_ANDROID_KHR
 #elif defined(__APPLE__)
 #define VK_ENABLE_BETA_EXTENSIONS
+#define VK_USE_PLATFORM_METAL_EXT
+#elif defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#define VK_USE_PLATFORM_WIN32_KHR
+#else
+#if defined(HAVE_X11)
+#define VK_USE_PLATFORM_XLIB_KHR
+#endif
+#if defined(HAVE_WAYLAND)
+#define VK_USE_PLATFORM_WAYLAND_KHR
+#endif
 #endif
 #define VK_NO_PROTOTYPES
 #define VULKAN_HPP_NO_CONSTRUCTORS
@@ -76,7 +92,18 @@
 #undef CursorShape
 #endif
 
-// ValidationFailedEXTError comes from vulkan.hpp in the Vulkan-Headers we vendor.
+// Newer Vulkan-Headers dropped ValidationFailedEXTError, but VMA-Hpp still throws
+// it; upstream carries this shim for exactly that reason.
+namespace VULKAN_HPP_NAMESPACE {
+class ValidationFailedEXTError : public SystemError {
+public:
+    ValidationFailedEXTError(std::string const &message)
+        : SystemError(make_error_code(Result::eErrorValidationFailedEXT), message) {}
+
+    ValidationFailedEXTError(char const *message)
+        : SystemError(make_error_code(Result::eErrorValidationFailedEXT), message) {}
+};
+} // namespace VULKAN_HPP_NAMESPACE
 
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1

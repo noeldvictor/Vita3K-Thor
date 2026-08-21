@@ -17,18 +17,18 @@
 
 #pragma once
 
-#include <display/state.h>
 #include <gxm/types.h>
 #include <mem/ptr.h>
 #include <threads/queue.h>
 
-#include <atomic>
-#include <deque>
 #include <map>
 #include <mutex>
+#include <display/state.h>
 #include <optional>
 #include <utility>
 #include <vector>
+#include <deque>
+#include <atomic>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -54,6 +54,13 @@ struct DisplayCallback {
     bool frame_predicted;
 };
 
+struct MemoryMapInfo {
+    Address offset;
+    std::uint32_t size;
+    std::uint32_t perm;
+};
+
+// Thor: deferred display callbacks, used by SceGxm and the quickstate path
 struct PendingDisplayCallback {
     SceUID thread_id = 0;
     DisplayCallback callback;
@@ -112,30 +119,12 @@ struct PendingDisplayCallback {
     }
 };
 
-struct GxmNotificationWait {
-    SceUID thread_id = 0;
-    Address address = 0;
-    uint32_t target_value = 0;
-};
-
-struct MemoryMapInfo {
-    Address offset;
-    std::uint32_t size;
-    std::uint32_t perm;
-};
-
 struct GxmState {
     SceGxmInitializeParams params;
 
     Queue<DisplayCallback> display_queue;
     SceUID display_queue_thread;
-    std::atomic<uint64_t> display_queue_restore_generation{ 1 };
-    std::mutex display_queue_waiters_mutex;
-    std::vector<SceUID> display_queue_waiters;
-    std::deque<PendingDisplayCallback> pending_display_callbacks;
-    std::atomic<uint64_t> notification_wait_restore_generation{ 1 };
-    std::mutex notification_waits_mutex;
-    std::vector<GxmNotificationWait> notification_waits;
+    std::thread display_host_thread;
 
     // global timestamp used by sync objects
     std::atomic<uint32_t> global_timestamp{ 1 };
