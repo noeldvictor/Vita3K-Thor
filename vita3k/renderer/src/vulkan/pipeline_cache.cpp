@@ -28,6 +28,7 @@
 
 #include <util/fs.h>
 #include <util/log.h>
+#include <util/spin_wait.h>
 
 #include <SDL3/SDL_cpuinfo.h>
 
@@ -544,8 +545,11 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
             lock.unlock();
 
             // we shouldn't need atomics and the compiler shouldn't be able to optimize this
-            while (*shader_module == shader_compiling)
-                std::this_thread::yield();
+            {
+                spin::Backoff backoff;
+                while (*shader_module == shader_compiling)
+                    backoff();
+            }
         }
 
         if (*shader_module == nullptr)

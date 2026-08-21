@@ -110,3 +110,7 @@ reports/*.sqlite-wal
 reports/*.sqlite-shm
 reports/**/*.sqlite-wal
 reports/**/*.sqlite-shm
+
+# Arm reference PDFs (~72MB): kept locally for optimisation work, not committed.
+# See docs/reference/arm/README.md for how to re-fetch them.
+docs/reference/arm/*.pdf

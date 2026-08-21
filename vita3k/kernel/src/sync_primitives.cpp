@@ -22,6 +22,7 @@
 #include <kernel/types.h>
 #include <util/lock_and_find.h>
 #include <util/log.h>
+#include <util/spin_wait.h>
 
 #include <algorithm>
 #include <thread>
@@ -2485,8 +2486,11 @@ SceInt32 msgpipe_delete(KernelState &kernel, const char *export_name, SceUID thr
         for (auto it : *msgpipe->receivers) {
             it.thread->update_status(ThreadStatus::run, ThreadStatus::wait);
         }
-        while (std::atomic_load(&msgpipe->remainingThreads) != 0) // FIXME busy loop bad
-            std::this_thread::yield();
+        {
+            spin::Backoff backoff;
+            while (std::atomic_load(&msgpipe->remainingThreads) != 0)
+                backoff();
+        }
     }
 
     const std::lock_guard<std::mutex> kernel_lock(kernel.mutex);

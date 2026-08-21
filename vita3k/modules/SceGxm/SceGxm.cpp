@@ -46,6 +46,7 @@
 #include <util/align.h>
 #include <util/bytes.h>
 #include <util/log.h>
+#include <util/spin_wait.h>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceGxm);
@@ -1493,8 +1494,7 @@ static bool gxmEnsureFragmentProgramHostState(EmuEnvState &emuenv, SceGxmFragmen
     if (fragment_program->host_generation == gxmHostGeneration() && fragment_program->renderer_data)
         return true;
 
-    while (fragment_program->compile_threads_on.load(std::memory_order_acquire) > 0)
-        std::this_thread::yield();
+    spin::wait_until([&] { return fragment_program->compile_threads_on.load(std::memory_order_acquire) == 0; });
 
     new (&fragment_program->renderer_data) std::unique_ptr<renderer::FragmentProgram>();
 
@@ -1534,8 +1534,7 @@ static bool gxmEnsureVertexProgramHostState(EmuEnvState &emuenv, SceGxmVertexPro
     if (vertex_program->host_generation == gxmHostGeneration() && vertex_program->renderer_data)
         return true;
 
-    while (vertex_program->compile_threads_on.load(std::memory_order_acquire) > 0)
-        std::this_thread::yield();
+    spin::wait_until([&] { return vertex_program->compile_threads_on.load(std::memory_order_acquire) == 0; });
 
     if (vertex_program->host_state_magic != GXM_PROGRAM_HOST_STATE_MAGIC) {
         LOG_ERROR("Failed to rebuild restored GXM vertex program host state: missing saved vertex layout.");
@@ -5062,8 +5061,7 @@ EXPORT(int, sceGxmShaderPatcherForceUnregisterProgram, SceGxmShaderPatcher *shad
         for (auto it = shaderPatcher->vertex_program_cache.begin(); it != shaderPatcher->vertex_program_cache.end();) {
             if (it->first.vertex_program.program == rp->program) {
                 SceGxmVertexProgram *vertex_program = it->second.get(emuenv.mem);
-                while (vertex_program->compile_threads_on.load(std::memory_order_acquire) > 0)
-                    std::this_thread::yield();
+                spin::wait_until([&] { return vertex_program->compile_threads_on.load(std::memory_order_acquire) == 0; });
 
                 free_callbacked(emuenv, thread_id, shaderPatcher, it->second.address());
                 it = shaderPatcher->vertex_program_cache.erase(it);
@@ -5075,8 +5073,7 @@ EXPORT(int, sceGxmShaderPatcherForceUnregisterProgram, SceGxmShaderPatcher *shad
         for (auto it = shaderPatcher->fragment_program_cache.begin(); it != shaderPatcher->fragment_program_cache.end();) {
             if (it->first.fragment_program.program == rp->program) {
                 SceGxmFragmentProgram *frag_program = it->second.get(emuenv.mem);
-                while (frag_program->compile_threads_on.load(std::memory_order_acquire) > 0)
-                    std::this_thread::yield();
+                spin::wait_until([&] { return frag_program->compile_threads_on.load(std::memory_order_acquire) == 0; });
 
                 free_callbacked(emuenv, thread_id, shaderPatcher, it->second.address());
                 it = shaderPatcher->fragment_program_cache.erase(it);
@@ -5183,8 +5180,7 @@ EXPORT(int, sceGxmShaderPatcherReleaseFragmentProgram, SceGxmShaderPatcher *shad
     SceGxmFragmentProgram *const fp = fragmentProgram.get(emuenv.mem);
     --fp->reference_count;
     if (fp->reference_count == 0) {
-        while (fp->compile_threads_on.load(std::memory_order_acquire) > 0)
-            std::this_thread::yield();
+        spin::wait_until([&] { return fp->compile_threads_on.load(std::memory_order_acquire) == 0; });
 
         for (FragmentProgramCache::const_iterator it = shaderPatcher->fragment_program_cache.begin(); it != shaderPatcher->fragment_program_cache.end(); ++it) {
             if (it->second == fragmentProgram) {
@@ -5207,8 +5203,7 @@ EXPORT(int, sceGxmShaderPatcherReleaseVertexProgram, SceGxmShaderPatcher *shader
     SceGxmVertexProgram *const vp = vertexProgram.get(emuenv.mem);
     --vp->reference_count;
     if (vp->reference_count == 0) {
-        while (vp->compile_threads_on.load(std::memory_order_acquire) > 0)
-            std::this_thread::yield();
+        spin::wait_until([&] { return vp->compile_threads_on.load(std::memory_order_acquire) == 0; });
 
         for (VertexProgramCache::const_iterator it = shaderPatcher->vertex_program_cache.begin(); it != shaderPatcher->vertex_program_cache.end(); ++it) {
             if (it->second == vertexProgram) {

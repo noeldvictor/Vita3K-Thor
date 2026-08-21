@@ -20,6 +20,7 @@
 #include <cpu/state.h>
 #include <util/bit_cast.h>
 #include <util/log.h>
+#include <util/spin_wait.h>
 
 #include <mem/ptr.h>
 
@@ -294,9 +295,15 @@ public:
         case Dynarmic::A32::Exception::PreloadInstruction:
         case Dynarmic::A32::Exception::SendEvent:
         case Dynarmic::A32::Exception::SendEventLocal:
-        case Dynarmic::A32::Exception::WaitForEvent:
             break;
+        case Dynarmic::A32::Exception::WaitForEvent:
         case Dynarmic::A32::Exception::Yield:
+            // The guest asked to back off. Discarding the hint turns a guest
+            // spinlock into a flat-out busy loop on a host core; on AArch64 the
+            // host YIELD hint is a NOP, so ISB is the only backoff that stalls
+            // the front end. WFE may wake spuriously by spec, so relaxing here
+            // is semantics-preserving.
+            spin::cpu_relax();
             break;
         case Dynarmic::A32::Exception::UndefinedInstruction:
             LOG_WARN("Undefined instruction at address 0x{:X}, instruction 0x{:X} ({})", pc, MemoryReadCode(pc).value(), disassemble(*parent, pc, nullptr));
