@@ -221,7 +221,31 @@ int main(int argc, char *argv[]) {
 
         std::string boot_title_id;
 
-        if (is_archive) {
+        // Thor: --cartridge mounts the archive as a read-only virtual game card
+        // instead of installing it into ux0:app. On Android an archive is
+        // always treated as a cartridge, since that is how the file/intent
+        // launch path delivers games.
+#ifdef __ANDROID__
+        const bool use_cartridge_mode = cfg.cartridge_mode || is_archive;
+#else
+        const bool use_cartridge_mode = cfg.cartridge_mode;
+#endif
+
+        if (is_archive && use_cartridge_mode) {
+            LOG_INFO("Mounting archive as virtual cartridge from CLI: {}", cfg.content_path->string());
+            const ContentInfo content = mount_archive_as_cartridge(emuenv, *cfg.content_path);
+            if (content.state)
+                boot_title_id = content.title_id;
+            else
+                LOG_ERROR("Failed to mount cartridge: {}", cfg.content_path->string());
+        } else if (is_directory && use_cartridge_mode) {
+            LOG_INFO("Mounting directory as virtual cartridge from CLI: {}", cfg.content_path->string());
+            const ContentInfo content = mount_directory_as_cartridge(emuenv, *cfg.content_path);
+            if (content.state)
+                boot_title_id = content.title_id;
+            else
+                LOG_ERROR("Failed to mount cartridge directory: {}", cfg.content_path->string());
+        } else if (is_archive) {
             LOG_INFO("Installing archive from CLI: {}", cfg.content_path->string());
             std::vector<ContentInfo> contents_info = install_archive(emuenv, *cfg.content_path);
             const auto content_index = std::find_if(contents_info.begin(), contents_info.end(), [](const ContentInfo &c) {

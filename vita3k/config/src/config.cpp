@@ -343,6 +343,9 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
 
     // Grouped options
     auto input = app.add_option_group("Input", "Special options for Vita3K");
+    input->add_flag("--cartridge", command_line.cartridge_mode,
+        "Mount content-path as a virtual read-only game card instead of installing it to the app library.")
+        ->group("Input");
     input->add_flag("--console,-z", command_line.console, "Start the emulator in console mode.")
        ->default_val(false)->group("Input");
     input->add_option("--app-args,-Z", command_line.app_args, "Argument for app, use ', ' to separate arguments.")
