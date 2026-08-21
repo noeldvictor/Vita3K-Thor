@@ -446,6 +446,11 @@ SDLMAIN_DECLSPEC int SDL_main(int argc, char *argv[]) {
         while (running) {
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
+                // Thor: runtime chords (fast forward, save/load quickstate)
+                // get first look at the event.
+                if (handle_runtime_gamepad_hotkey(*emuenv, event))
+                    continue;
+
                 switch (event.type) {
                 case SDL_EVENT_QUIT:
                 case SDL_EVENT_WINDOW_CLOSE_REQUESTED:

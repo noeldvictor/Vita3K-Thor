@@ -10682,7 +10682,7 @@ static bool runtime_any_gamepad_button_down(EmuEnvState &emuenv, const SDL_Gamep
     return false;
 }
 
-static bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &event) {
+bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &event) {
     static bool osd_chord_latched = false;
     static bool fast_forward_latched = false;
     static bool save_state_latched = false;

@@ -1267,6 +1267,11 @@ void MainWindow::pump_sdl_events() {
 
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+        // Thor: runtime chords (fast forward, save/load quickstate) get first
+        // look, so they are not swallowed by the normal gamepad handling.
+        if (handle_runtime_gamepad_hotkey(emuenv, event))
+            continue;
+
         switch (event.type) {
         case SDL_EVENT_GAMEPAD_ADDED:
         case SDL_EVENT_GAMEPAD_REMOVED:

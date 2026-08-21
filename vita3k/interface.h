@@ -56,3 +56,9 @@ void runtime_request_load_state(EmuEnvState &emuenv);
 void runtime_request_undo_load_state(EmuEnvState &emuenv);
 void runtime_take_screenshot(EmuEnvState &emuenv);
 void runtime_poll_control_file(EmuEnvState &emuenv);
+
+// Thor: gamepad chords for the runtime controls - Select+R1 toggles fast
+// forward, Select + right stick down/up save and load a quickstate. Returns
+// true when the event was consumed. Call from the frontend's SDL pump.
+union SDL_Event;
+bool handle_runtime_gamepad_hotkey(EmuEnvState &emuenv, const SDL_Event &event);
