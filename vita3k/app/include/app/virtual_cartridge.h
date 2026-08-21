@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <string>
 #include <vector>
 
 struct EmuEnvState;
@@ -33,5 +34,17 @@ struct AppEntry;
  * unchanged (same path, size and mtime) are kept as-is rather than re-read.
  */
 void append_virtual_cartridge_apps(std::vector<AppEntry> &apps, EmuEnvState &emuenv);
+
+/**
+ * @brief Adds a just-mounted cartridge to the in-memory app list so it can be
+ *        booted by title id.
+ *
+ * The entry is transient on purpose: it is never written to the installed-apps
+ * cache, because the content lives outside VitaFS. Replaces any existing entry
+ * with the same path.
+ */
+void add_transient_cartridge_entry(EmuEnvState &emuenv, const std::string &title_id,
+    const std::string &title, const std::string &category, const std::string &content_id,
+    const std::string &source_path);
 
 } // namespace app

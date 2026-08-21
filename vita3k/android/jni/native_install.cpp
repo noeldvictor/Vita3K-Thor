@@ -16,9 +16,11 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include "android_state.h"
+#include "interface.h"
 #include "archive.h"
 
 #include <app/functions.h>
+#include <app/virtual_cartridge.h>
 #include <packages/functions.h>
 #include <packages/license.h>
 #include <packages/pkg.h>
@@ -145,6 +147,38 @@ Java_org_vita3k_emulator_NativeLib_convertRifToZrif(JNIEnv *env, jclass, jstring
 
     const std::string zrif = rif2zrif(binfile);
     return env->NewStringUTF(zrif.c_str());
+}
+
+/**
+ * Thor: mount a .zip/.vpk (or an extracted folder) as a read-only virtual game
+ * card and return its title id, so the caller can boot it. Nothing is written
+ * into ux0:app.
+ */
+JNIEXPORT jstring JNICALL
+Java_org_vita3k_emulator_NativeLib_mountCartridge(JNIEnv *env, jclass, jstring path_str) {
+    auto *emuenv = get_emuenv();
+    if (!emuenv)
+        return env->NewStringUTF("");
+
+    const std::string path = jstring_to_string(env, path_str);
+    const fs::path content_path{ path };
+
+    const ContentInfo content = fs::is_directory(content_path)
+        ? mount_directory_as_cartridge(*emuenv, content_path)
+        : mount_archive_as_cartridge(*emuenv, content_path);
+
+    if (!content.state) {
+        LOG_ERROR("Failed to mount cartridge: {}", path);
+        return env->NewStringUTF("");
+    }
+
+    // The boot path looks the title up by id, so the cartridge needs an entry
+    // in the in-memory list. It is deliberately not written to the apps cache.
+    app::add_transient_cartridge_entry(*emuenv, content.title_id, content.title,
+        content.category, content.content_id, path);
+
+    LOG_INFO("Mounted cartridge {} [{}]", content.title, content.title_id);
+    return env->NewStringUTF(content.title_id.c_str());
 }
 
 } // extern "C"

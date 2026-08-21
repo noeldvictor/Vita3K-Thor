@@ -19,6 +19,7 @@
 #include "interface.h"
 
 #include <app/functions.h>
+#include <app/virtual_cartridge.h>
 #include <config/functions.h>
 #include <config/version.h>
 #include <emuenv/state.h>
@@ -234,15 +235,21 @@ int main(int argc, char *argv[]) {
         if (is_archive && use_cartridge_mode) {
             LOG_INFO("Mounting archive as virtual cartridge from CLI: {}", cfg.content_path->string());
             const ContentInfo content = mount_archive_as_cartridge(emuenv, *cfg.content_path);
-            if (content.state)
+            if (content.state) {
+                app::add_transient_cartridge_entry(emuenv, content.title_id, content.title,
+                    content.category, content.content_id, cfg.content_path->string());
                 boot_title_id = content.title_id;
+            }
             else
                 LOG_ERROR("Failed to mount cartridge: {}", cfg.content_path->string());
         } else if (is_directory && use_cartridge_mode) {
             LOG_INFO("Mounting directory as virtual cartridge from CLI: {}", cfg.content_path->string());
             const ContentInfo content = mount_directory_as_cartridge(emuenv, *cfg.content_path);
-            if (content.state)
+            if (content.state) {
+                app::add_transient_cartridge_entry(emuenv, content.title_id, content.title,
+                    content.category, content.content_id, cfg.content_path->string());
                 boot_title_id = content.title_id;
+            }
             else
                 LOG_ERROR("Failed to mount cartridge directory: {}", cfg.content_path->string());
         } else if (is_archive) {

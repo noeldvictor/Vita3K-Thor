@@ -58,6 +58,13 @@ object NativeLib {
      * @param forceReinstall If true, silently reinstalls if already present (no prompt).
      */
     external fun installArchive(path: String, callback: InstallCallback, forceReinstall: Boolean): Boolean
+
+    /**
+     * Thor: mounts a .zip/.vpk or extracted folder as a read-only virtual game
+     * card. Returns the mounted title id, or an empty string on failure.
+     * Nothing is installed into ux0:app.
+     */
+    external fun mountCartridge(path: String): String
     /** Copies a .rif or .bin license file. */
     external fun copyLicense(path: String): Boolean
     /** Creates and installs a license from a zRIF key. */

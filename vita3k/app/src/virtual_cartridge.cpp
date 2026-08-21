@@ -40,6 +40,7 @@
 #include <algorithm>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -585,6 +586,33 @@ void append_virtual_cartridge_apps(std::vector<AppEntry> &apps, EmuEnvState &emu
 
     for (const auto &[title_key, app] : virtual_candidates)
         apps.push_back(app);
+}
+
+
+void add_transient_cartridge_entry(EmuEnvState &emuenv, const std::string &title_id,
+    const std::string &title, const std::string &category, const std::string &content_id,
+    const std::string &source_path) {
+    if (title_id.empty())
+        return;
+
+    auto &state = emuenv.app.apps_list;
+    std::lock_guard<std::mutex> lock(state.mutex);
+
+    std::erase_if(state.apps, [&](const AppEntry &app) { return app.path == title_id; });
+
+    AppEntry entry;
+    entry.title_id = title_id;
+    entry.path = title_id;
+    entry.title = title.empty() ? title_id : title;
+    entry.stitle = entry.title;
+    entry.category = category;
+    entry.content_id = content_id;
+    entry.app_ver = "01.00";
+    entry.virtual_cartridge = true;
+    entry.source_path = source_path;
+
+    state.apps.push_back(std::move(entry));
+    LOG_INFO("Added transient cartridge entry {} [{}]", title, title_id);
 }
 
 } // namespace app
