@@ -76,16 +76,7 @@
 #undef CursorShape
 #endif
 
-namespace VULKAN_HPP_NAMESPACE {
-class ValidationFailedEXTError : public SystemError {
-public:
-    ValidationFailedEXTError(std::string const &message)
-        : SystemError(make_error_code(Result::eErrorValidationFailedEXT), message) {}
-
-    ValidationFailedEXTError(char const *message)
-        : SystemError(make_error_code(Result::eErrorValidationFailedEXT), message) {}
-};
-} // namespace VULKAN_HPP_NAMESPACE
+// ValidationFailedEXTError comes from vulkan.hpp in the Vulkan-Headers we vendor.
 
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1

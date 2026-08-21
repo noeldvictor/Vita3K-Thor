@@ -185,6 +185,13 @@ struct KernelState {
     ThreadStatus snapshot_thread_status_unlocked(SceUID thread_id, ThreadStatus current_status) const;
     void set_paused_thread_status_for_restore(SceUID thread_id, ThreadStatus status);
 
+    Ptr<void> client_vtable = Ptr<void>(0);
+    Ptr<Address> shellsvc_client = Ptr<Address>(0);
+    Ptr<void> libc_dso_handle_main = Ptr<void>(0);
+
+    void deinit(MemState &mem);
+    // Thor: quickstate teardown path, kept alongside upstream's process_exit()
+    void exit_delete_all_threads();
     bool is_threads_paused() const { return threads_pause_active.load(); }
     void pause_threads();
     void resume_threads();

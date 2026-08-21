@@ -363,7 +363,7 @@ static bool read_archive_file(const IOState::ArchiveMount &mount, const std::str
     return extracted;
 }
 
-static fs::path archive_cache_path(const fs::path &pref_path, const IOState &io, const std::string &relative_path) {
+static fs::path archive_cache_path(const fs::path &vita_fs_path, const IOState &io, const std::string &relative_path) {
     fs::path safe_relative_path;
     std::string segment;
     std::stringstream stream(relative_path);
@@ -382,7 +382,7 @@ static fs::path archive_cache_path(const fs::path &pref_path, const IOState &io,
     const auto key_source = io.app0_archive.archive_path.generic_string() + "|" + io.app0_archive.content_root;
     const auto archive_key = fmt::format("{:016X}", static_cast<std::uint64_t>(std::hash<std::string>{}(key_source)));
     const auto title_id = io.title_id.empty() ? std::string("unknown-title") : io.title_id;
-    return pref_path / "cache" / "cartridge_archive" / title_id / archive_key / safe_relative_path;
+    return vita_fs_path / "cache" / "cartridge_archive" / title_id / archive_key / safe_relative_path;
 }
 
 static bool cached_archive_file_ready(const fs::path &cache_path, const std::uint64_t expected_size) {
@@ -476,15 +476,15 @@ static std::vector<std::string> list_archive_dir(const IOState::ArchiveMount &mo
     return entries;
 }
 
-static fs::path get_app_file_path(const IOState &io, const fs::path &pref_path, const fs::path &vfs_file_path) {
+static fs::path get_app_file_path(const IOState &io, const fs::path &vita_fs_path, const fs::path &vfs_file_path) {
     if (!io.app0_host_path.empty())
         return (io.app0_host_path / vfs_file_path).generic_path();
 
-    return (pref_path / "ux0/app" / io.app_path / vfs_file_path).generic_path();
+    return (vita_fs_path / "ux0/app" / io.app_path / vfs_file_path).generic_path();
 }
 
-bool read_file(const VitaIoDevice device, FileBuffer &buf, const fs::path &pref_path, const fs::path &vfs_file_path) {
-    const auto host_file_path = device::construct_emulated_path(device, vfs_file_path, pref_path).generic_path();
+bool read_file(const VitaIoDevice device, FileBuffer &buf, const fs::path &vita_fs_path, const fs::path &vfs_file_path) {
+    const auto host_file_path = device::construct_emulated_path(device, vfs_file_path, vita_fs_path).generic_path();
     return fs_utils::read_data(host_file_path, buf);
 }
 
@@ -492,11 +492,11 @@ bool read_app_file(FileBuffer &buf, const fs::path &vita_fs_path, const std::str
     return read_file(VitaIoDevice::ux0, buf, vita_fs_path, fs::path("app") / app_path / vfs_file_path);
 }
 
-bool read_current_app_file(FileBuffer &buf, const IOState &io, const fs::path &pref_path, const fs::path &vfs_file_path) {
+bool read_current_app_file(FileBuffer &buf, const IOState &io, const fs::path &vita_fs_path, const fs::path &vfs_file_path) {
     if (io.app0_archive.mounted())
         return read_archive_file(io.app0_archive, normalize_archive_path(vfs_file_path), buf);
 
-    return fs_utils::read_data(get_app_file_path(io, pref_path, vfs_file_path), buf);
+    return fs_utils::read_data(get_app_file_path(io, vita_fs_path, vfs_file_path), buf);
 }
 
 bool mount_current_app_archive(IOState &io, const fs::path &archive_path, const std::string &content_root, const std::string &title_id) {
@@ -613,8 +613,8 @@ std::vector<std::string> list_current_app_directory(const IOState &io, const fs:
     return entries;
 }
 
-SceSize get_directory_used_size(const VitaIoDevice device, const std::string &vfs_path, const fs::path &pref_path) {
-    const auto emuenv_path = device::construct_emulated_path(device, vfs_path, pref_path);
+SceSize get_directory_used_size(const VitaIoDevice device, const std::string &vfs_path, const fs::path &vita_fs_path) {
+    const auto emuenv_path = device::construct_emulated_path(device, vfs_path, vita_fs_path);
 
     SceSize total_size = 0;
     for (const auto &entry : fs::recursive_directory_iterator(emuenv_path)) {
@@ -697,7 +697,7 @@ void io_deinit(IOState &io) {
 
     // Thor: a virtual cartridge stays mounted across the session; drop it too
     // so a path switch or relaunch does not read from the previous archive.
-    unmount_current_app_archive(io);
+    vfs::unmount_current_app_archive(io);
 }
 
 void init_device_paths(IOState &io) {
@@ -784,7 +784,7 @@ static std::optional<fs::path> current_app_relative_path(const IOState &io, cons
     return fs::path(translated.substr(app0.size() + 1)).generic_path();
 }
 
-static fs::path construct_io_path(const IOState &io, const VitaIoDevice device, const fs::path &translated_path, const fs::path &pref_path) {
+static fs::path construct_io_path(const IOState &io, const VitaIoDevice device, const fs::path &translated_path, const fs::path &vita_fs_path) {
     if (is_current_app_path(io, device, translated_path)) {
         const auto translated = translated_path.generic_path().string();
         const auto app0 = fs::path(io.device_paths.app0).generic_path().string();
@@ -797,7 +797,7 @@ static fs::path construct_io_path(const IOState &io, const VitaIoDevice device, 
         return (io.app0_host_path / translated.substr(app0.size() + 1)).generic_path();
     }
 
-    return device::construct_emulated_path(device, translated_path, pref_path, io.redirect_stdio);
+    return device::construct_emulated_path(device, translated_path, vita_fs_path, io.redirect_stdio);
 }
 
 static void fill_virtual_stat(SceIoStat *statp, bool directory, SceOff size);
@@ -889,7 +889,7 @@ fs::path expand_path(IOState &io, const char *path, const fs::path &vita_fs_path
     auto device = device::get_device(path);
 
     const auto translated_path = translate_path(path, device, io.device_paths);
-    return construct_io_path(io, device, translated_path, pref_path).string();
+    return construct_io_path(io, device, translated_path, vita_fs_path).string();
 }
 
 SceUID open_file(IOState &io, const char *path, const int flags, const fs::path &vita_fs_path, const char *export_name) {
@@ -941,7 +941,7 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
 
         const auto normalized_path = device::construct_normalized_path(device, translated_path);
         if (archive_entry->size > archive_memory_file_limit) {
-            const auto cache_path = vfs::archive_cache_path(pref_path, io, archive_relative);
+            const auto cache_path = vfs::archive_cache_path(vita_fs_path, io, archive_relative);
             if (cache_path.empty() || !vfs::extract_archive_file_to_cache(io.app0_archive, *archive_entry, cache_path))
                 return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
 
@@ -954,10 +954,10 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
         }
 
         vfs::FileBuffer buffer;
-        if (!vfs::read_current_app_file(buffer, io, pref_path, *app_relative))
+        if (!vfs::read_current_app_file(buffer, io, vita_fs_path, *app_relative))
             return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
 
-        FileStats f{ path, normalized_path, construct_io_path(io, device, translated_path, pref_path), flags, buffer };
+        FileStats f{ path, normalized_path, construct_io_path(io, device, translated_path, vita_fs_path), flags, buffer };
         const auto fd = io.next_fd++;
         io.std_files.emplace(fd, f);
 
@@ -965,7 +965,7 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
         return fd;
     }
 
-    auto system_path = construct_io_path(io, device, translated_path, pref_path);
+    auto system_path = construct_io_path(io, device, translated_path, vita_fs_path);
     if (fs::is_directory(system_path)) {
         LOG_ERROR("Cannot open directory: {}", system_path);
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
@@ -1167,7 +1167,7 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
             return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
         }
 
-        file_path = construct_io_path(io, device, translated_path, pref_path);
+        file_path = construct_io_path(io, device, translated_path, vita_fs_path);
 
         if (!fs::exists(file_path)) {
             if (io.case_isens_find_enabled) {
@@ -1273,7 +1273,7 @@ static void fill_virtual_stat(SceIoStat *statp, const bool directory, const SceO
     __RtcTicksToPspTime(&statp->st_ctime, now_ticks);
 }
 
-int stat_file_by_fd(IOState &io, const SceUID fd, SceIoStat *statp, const fs::path &pref_path, const char *export_name) {
+int stat_file_by_fd(IOState &io, const SceUID fd, SceIoStat *statp, const fs::path &vita_fs_path, const char *export_name) {
     assert(statp != nullptr);
     memset(statp, '\0', sizeof(SceIoStat));
 
@@ -1315,7 +1315,7 @@ int remove_file(IOState &io, const char *file, const fs::path &vita_fs_path, con
         return IO_ERROR(SCE_ERROR_ERRNO_EOPNOTSUPP);
     }
 
-    const auto emulated_path = construct_io_path(io, device, translated_path, pref_path);
+    const auto emulated_path = construct_io_path(io, device, translated_path, vita_fs_path);
     if (!fs::exists(emulated_path) || fs::is_directory(emulated_path)) {
         LOG_ERROR("File does not exist at path: {} (target path: {})", emulated_path, file);
     }
@@ -1358,13 +1358,13 @@ int rename(IOState &io, const char *old_name, const char *new_name, const fs::pa
         return IO_ERROR(SCE_ERROR_ERRNO_EOPNOTSUPP);
     }
 
-    const auto emulated_old_path = construct_io_path(io, device, translated_old_path, pref_path);
+    const auto emulated_old_path = construct_io_path(io, device, translated_old_path, vita_fs_path);
     if (!fs::exists(emulated_old_path)) {
         LOG_ERROR("File does not exist at path: {} (target path: {})", emulated_old_path, old_name);
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
 
-    const auto emulated_new_path = construct_io_path(io, device, translated_new_path, pref_path);
+    const auto emulated_new_path = construct_io_path(io, device, translated_new_path, vita_fs_path);
 
     LOG_TRACE_IF(log_file_op, "{}: Renaming file {} to {} ({} to {})", export_name, old_name, new_name, emulated_old_path, emulated_new_path);
 
@@ -1393,7 +1393,7 @@ SceUID open_dir(IOState &io, const char *path, const fs::path &vita_fs_path, con
         }
 
         const auto normalized = device::construct_normalized_path(device, translated_path);
-        const DirStats d{ path, normalized, construct_io_path(io, device, translated_path, pref_path), vfs::list_current_app_directory(io, *app_relative) };
+        const DirStats d{ path, normalized, construct_io_path(io, device, translated_path, vita_fs_path), vfs::list_current_app_directory(io, *app_relative) };
         const auto fd = io.next_fd++;
         io.dir_entries.emplace(fd, d);
 
@@ -1401,7 +1401,7 @@ SceUID open_dir(IOState &io, const char *path, const fs::path &vita_fs_path, con
         return fd;
     }
 
-    auto dir_path = construct_io_path(io, device, translated_path, pref_path) / "";
+    auto dir_path = construct_io_path(io, device, translated_path, vita_fs_path) / "";
     if (!fs::exists(dir_path)) {
         if (io.case_isens_find_enabled) {
             // Attempt a case-insensitive file search.
@@ -1463,7 +1463,7 @@ SceUID read_dir(IOState &io, const SceUID fd, SceIoDirent *dent, const fs::path 
             const auto file_path = std::string(dir->second.get_vita_loc()) + '/' + d_name_utf8;
 
             LOG_TRACE_IF(log_file_op, "{}: Reading archive entry {} of fd: {}", export_name, file_path, log_hex(fd));
-            if (stat_file(io, file_path.c_str(), &dent->d_stat, pref_path, export_name) < 0)
+            if (stat_file(io, file_path.c_str(), &dent->d_stat, vita_fs_path, export_name) < 0)
                 return IO_ERROR(SCE_ERROR_ERRNO_EMFILE);
 
             return 1;
@@ -1520,7 +1520,7 @@ int create_dir(IOState &io, const char *dir, int mode, const fs::path &vita_fs_p
         return IO_ERROR(SCE_ERROR_ERRNO_EOPNOTSUPP);
     }
 
-    const auto emulated_path = construct_io_path(io, device, translated_path, pref_path);
+    const auto emulated_path = construct_io_path(io, device, translated_path, vita_fs_path);
     if (recursive)
         return fs::create_directories(emulated_path);
     if (fs::exists(emulated_path))
@@ -1574,7 +1574,7 @@ int remove_dir(IOState &io, const char *dir, const fs::path &vita_fs_path, const
         return IO_ERROR(SCE_ERROR_ERRNO_EOPNOTSUPP);
     }
 
-    if (!fs::remove_all(construct_io_path(io, device, translated_path, pref_path))) {
+    if (!fs::remove_all(construct_io_path(io, device, translated_path, vita_fs_path))) {
         LOG_ERROR("Cannot remove dir: {} ({})", dir, device::construct_normalized_path(device, translated_path));
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }

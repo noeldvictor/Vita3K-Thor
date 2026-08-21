@@ -315,14 +315,16 @@ ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<c
     return create_thread(mem, name, entry_point, SCE_KERNEL_DEFAULT_PRIORITY, SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT, SCE_KERNEL_STACK_SIZE_USER_MAIN, nullptr);
 }
 
-ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option) {
-    ThreadStatePtr thread = std::make_shared<ThreadState>(get_next_uid(), *this, mem);
+static ThreadStatePtr create_thread_with_uid(KernelState &kernel, MemState &mem, const SceUID uid, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option) {
+    ThreadStatePtr thread = std::make_shared<ThreadState>(uid, kernel, mem);
     if (thread->init(name, entry_point, init_priority, affinity_mask, stack_size, option) < 0)
         return nullptr;
 
     {
-        const std::lock_guard<std::mutex> lock(mutex);
-        threads.emplace(thread->id, thread);
+        const std::lock_guard<std::mutex> lock(kernel.mutex);
+        if (kernel.threads.contains(thread->id))
+            return nullptr;
+        kernel.threads.emplace(thread->id, thread);
     }
 
     ThreadParams params;
@@ -381,6 +383,7 @@ void KernelState::exit_delete_all_threads() {
     for (auto &[_, thread] : threads)
         // Skip end callbacks; running guest code can access torn-down state
         thread->exit_delete(false);
+}
 
 void KernelState::request_process_exit(int res, std::optional<AppLaunchRequest> relaunch) {
     if (process_exit_callback)

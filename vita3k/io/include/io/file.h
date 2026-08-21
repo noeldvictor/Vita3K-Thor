@@ -17,16 +17,28 @@
 
 #pragma once
 
-#include <util/fs.h>
+#include <util/types.h>
 
-namespace bgm_player {
+#include <cstddef>
+#include <vector>
 
-void destroy_bgm_player();
-bool init_bgm(const fs::path &pref_path, const bool is_enable);
-void init_bgm_player(const float vol);
-void set_bgm_volume(const float vol);
-void set_current_bgm_path(const std::pair<std::string, std::string> &path);
-void stop_bgm();
-void switch_bgm_state(const bool pause);
+class ReadOnlyInMemFile {
+    std::vector<char> buf;
+    size_t currentPos = 0;
 
-} // namespace bgm_player
+public:
+    ReadOnlyInMemFile();
+    ReadOnlyInMemFile(const char *data, size_t size);
+
+    char *alloc_data(size_t bufsize);
+
+    size_t tell() const { return currentPos; }
+    size_t size() const { return buf.size(); }
+
+    bool valid() const { return true; }
+    operator bool() const { return valid(); }
+
+    size_t read(void *ibuf, size_t size);
+    const char *data();
+    bool seek(SceOff offset, int origin);
+};

@@ -16,6 +16,8 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <config/functions.h>
+
+#include <string_view>
 #include <config/state.h>
 #include <config/version.h>
 #include <yaml-cpp/yaml.h>
@@ -180,10 +182,11 @@ static fs::path check_path(const fs::path &output_path) {
 void reset_keyboard_bindings(Config &cfg) {
     const Config defaults{};
 
-#define RESET_KEYBOARD_BINDING(option_type, option_name, option_default, member_name) \
-    cfg.member_name = defaults.member_name;
+#define RESET_KEYBOARD_BINDING(option_type, option_name, option_default, member_name)   \
+    if (std::string_view(option_name).starts_with("keyboard-"))      \
+        cfg.member_name = defaults.member_name;
 
-    CONFIG_KEYBOARD(RESET_KEYBOARD_BINDING)
+    CONFIG_INDIVIDUAL(RESET_KEYBOARD_BINDING)
 #undef RESET_KEYBOARD_BINDING
 }
 

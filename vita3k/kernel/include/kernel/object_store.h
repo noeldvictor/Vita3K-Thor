@@ -95,6 +95,11 @@ public:
         objs.erase(it);
     }
 
+    void clear() {
+        std::lock_guard<std::mutex> lock(mutex);
+        objs.clear();
+    }
+
 private:
     std::mutex mutex;
     std::map<uint32_t, std::shared_ptr<void>> objs;
