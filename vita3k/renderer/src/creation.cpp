@@ -283,4 +283,23 @@ bool init(FrameHost &frame, std::unique_ptr<State> &state, Backend backend, cons
 
     return true;
 }
+
+// Thor: quickstate restore has to map guest GPU memory synchronously rather
+// than queueing the request, because the restore runs with the render thread
+// parked.
+bool map_memory_now(State &state, MemState &mem, const Ptr<void> address, const uint32_t size) {
+    if (state.current_backend != Backend::Vulkan)
+        return false;
+
+    return dynamic_cast<vulkan::VKState &>(state).map_memory(mem, address, size);
+}
+
+bool unmap_memory_now(State &state, MemState &mem, const Ptr<void> address) {
+    if (state.current_backend != Backend::Vulkan)
+        return false;
+
+    dynamic_cast<vulkan::VKState &>(state).unmap_memory(mem, address);
+    return true;
+}
+
 } // namespace renderer

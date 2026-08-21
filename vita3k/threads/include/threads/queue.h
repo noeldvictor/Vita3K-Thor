@@ -99,6 +99,50 @@ public:
         condempty_.notify_all();
     }
 
+    // Thor: the quickstate path snapshots and restores in-flight queues, and
+    // needs a non-blocking push plus an emptiness check.
+    bool empty() {
+        std::unique_lock<std::mutex> mlock(mutex_);
+        return queue_.empty();
+    }
+
+    bool try_push(const T &item) {
+        {
+            std::unique_lock<std::mutex> mlock(mutex_);
+            if (aborted || queue_.size() == maxPendingCount_) {
+                return false;
+            }
+            queue_.push(item);
+        }
+        condempty_.notify_one();
+        return true;
+    }
+
+    std::vector<T> snapshot() {
+        std::unique_lock<std::mutex> mlock(mutex_);
+        std::vector<T> items;
+        items.reserve(queue_.size());
+        std::queue<T> copy = queue_;
+        while (!copy.empty()) {
+            items.push_back(copy.front());
+            copy.pop();
+        }
+        return items;
+    }
+
+    void replace(const std::vector<T> &items) {
+        {
+            std::unique_lock<std::mutex> mlock(mutex_);
+            std::queue<T> empty;
+            std::swap(queue_, empty);
+            for (const T &item : items)
+                queue_.push(item);
+            aborted = false;
+        }
+        condempty_.notify_all();
+        cond_.notify_all();
+    }
+
     void abort() {
         aborted = true;
         condempty_.notify_all();

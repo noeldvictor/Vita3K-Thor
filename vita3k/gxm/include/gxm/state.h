@@ -119,6 +119,12 @@ struct PendingDisplayCallback {
     }
 };
 
+struct GxmNotificationWait {
+    SceUID thread_id = 0;
+    Address address = 0;
+    uint32_t target_value = 0;
+};
+
 struct GxmState {
     SceGxmInitializeParams params;
 
@@ -141,6 +147,16 @@ struct GxmState {
     Address immediate_context = 0;
     std::unordered_map<SceGxmContext *, Address> deferred_contexts;
     std::unordered_map<SceGxmRenderTarget *, Address> render_targets;
+
+    // Thor: quickstate save/restore needs to see who is parked on the display
+    // queue and on notification waits, and to re-arm them on restore.
+    std::atomic<uint64_t> display_queue_restore_generation{ 1 };
+    std::mutex display_queue_waiters_mutex;
+    std::vector<SceUID> display_queue_waiters;
+    std::deque<PendingDisplayCallback> pending_display_callbacks;
+    std::atomic<uint64_t> notification_wait_restore_generation{ 1 };
+    std::mutex notification_waits_mutex;
+    std::vector<GxmNotificationWait> notification_waits;
 
     void deinit() {
         if (display_host_thread.joinable())

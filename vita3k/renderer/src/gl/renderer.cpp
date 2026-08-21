@@ -861,4 +861,10 @@ void GLState::cleanup() {
     frame = nullptr;
 }
 
+// Thor: see VKState::reset_runtime_cache.
+void GLState::reset_runtime_cache() {
+    surface_cache.cleanup();
+    texture_cache.cleanup();
+}
+
 } // namespace renderer::gl

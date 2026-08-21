@@ -783,4 +783,17 @@ void destroy(EmuEnvState &emuenv) {
         server_close(emuenv);
 }
 
+
+// Thor: used by the quickstate path (and any pause UI) to park guest execution
+// and audio together. The ImGui overlay toggling that used to live here went
+// with Thor's frontend.
+void switch_state(EmuEnvState &emuenv, const bool pause) {
+    if (pause)
+        emuenv.kernel.pause_threads();
+    else
+        emuenv.kernel.resume_threads();
+
+    emuenv.audio.switch_state(pause);
+}
+
 } // namespace app

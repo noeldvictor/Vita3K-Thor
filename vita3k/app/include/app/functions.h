@@ -69,6 +69,8 @@ enum class AppRunType {
 bool init_paths(Root &root_paths);
 bool init(EmuEnvState &state, Config &cfg, const Root &root_paths);
 void shutdown_app_runtime(EmuEnvState &state);
+// Thor: park guest execution and audio together (quickstates, pause).
+void switch_state(EmuEnvState &emuenv, const bool pause);
 void reset_app_state(EmuEnvState &state);
 bool late_init(EmuEnvState &state);
 void apply_renderer_config(EmuEnvState &emuenv);

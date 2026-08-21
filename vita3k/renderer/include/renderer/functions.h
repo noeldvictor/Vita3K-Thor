@@ -72,6 +72,9 @@ void process_batches(State &state, const FeatureState &features, MemState &mem, 
 void start_render_thread(State &state, DisplayState &display, GxmState &gxm, MemState &mem, Config &config);
 void stop_render_thread(State &state);
 bool init(FrameHost &frame, std::unique_ptr<State> &state, Backend backend, const Config &config, const Root &root_paths);
+// Thor: synchronous map/unmap, used when restoring a quickstate's GPU memory.
+bool map_memory_now(State &state, MemState &mem, Ptr<void> address, uint32_t size);
+bool unmap_memory_now(State &state, MemState &mem, Ptr<void> address);
 
 void set_depth_bias(State &state, Context *ctx, bool is_front, int factor, int units);
 void set_depth_func(State &state, Context *ctx, bool is_front, SceGxmDepthFunc depth_func);

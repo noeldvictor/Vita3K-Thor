@@ -1083,6 +1083,15 @@ void VKState::cleanup() {
     render_abort = false;
 }
 
+// Thor: quickstate restore drops the runtime GPU caches without tearing the
+// device down, so nothing points at surfaces the restored state never made.
+void VKState::reset_runtime_cache() {
+    device.waitIdle();
+    pipeline_cache.cleanup();
+    surface_cache.cleanup();
+    texture_cache.cleanup();
+}
+
 void VKState::render_frame(DisplayState &display, const GxmState &gxm, MemState &mem) {
     // we are displaying this frame, wait for a new one
     should_display = false;

@@ -85,6 +85,9 @@ public:
 };
 
 struct AudioState {
+    // Thor: emulation speed hack; the audio backends retime against this.
+    std::atomic<uint32_t> speed_percent{ 100 };
+
     //  the adapter must be before out_ports for the destructors to work correctly
     std::unique_ptr<AudioAdapter> adapter;
     std::mutex mutex;

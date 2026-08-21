@@ -128,6 +128,7 @@ struct VKState : public renderer::State {
     bool create(std::unique_ptr<renderer::State> &state, const Config &config);
     void late_init(const Config &cfg, const std::string_view game_id, MemState &mem) override;
     void cleanup() override;
+    void reset_runtime_cache() override;
 
     TextureCache *get_texture_cache() override {
         return &texture_cache;

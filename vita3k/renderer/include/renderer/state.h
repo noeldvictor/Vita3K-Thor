@@ -161,6 +161,9 @@ struct State {
 
     virtual bool init() = 0;
     virtual void cleanup() {};
+    // Thor: drop runtime GPU caches so a quickstate restore cannot reference
+    // stale surfaces, pipelines or textures.
+    virtual void reset_runtime_cache() = 0;
     virtual void late_init(const Config &cfg, const std::string_view game_id, MemState &mem) = 0;
 
     virtual TextureCache *get_texture_cache() = 0;

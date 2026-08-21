@@ -37,6 +37,9 @@ typedef std::shared_ptr<ThreadState> ThreadStatePtr;
 struct DisplayStateVBlankWaitInfo {
     ThreadStatePtr target_thread;
     uint64_t target_vcount;
+    // Thor: set when the wait came from a deferred HLE import, so quickstate
+    // restore knows to re-arm it rather than treat it as a fresh vblank wait.
+    bool deferred_import_wait = false;
 };
 
 struct DisplayFrameInfo {

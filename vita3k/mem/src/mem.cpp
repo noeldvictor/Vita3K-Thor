@@ -221,6 +221,44 @@ Address alloc_aligned(MemState &state, uint32_t size, const char *name, unsigned
     return align_addr;
 }
 
+// Thor: quickstate restore re-commits guest pages that the saved state
+// expects to be backed before any guest code touches them.
+static bool commit_range_inner(MemState &state, Address addr, uint32_t size) {
+    if (size == 0)
+        return true;
+
+    if (addr > std::numeric_limits<Address>::max() - size)
+        return false;
+
+    const Address commit_start = align_down(addr, state.host_page_size);
+    const Address commit_end = align(addr + size, state.host_page_size);
+    if (commit_end <= commit_start)
+        return false;
+
+    const uint32_t commit_size = commit_end - commit_start;
+    uint8_t *const commit_ptr = &state.memory[commit_start];
+
+#ifdef _WIN32
+    const void *const ret = VirtualAlloc(commit_ptr, commit_size, MEM_COMMIT, PAGE_READWRITE);
+    if (!ret) {
+        LOG_ERROR("VirtualAlloc commit failed at 0x{:X} ({} bytes): {}", commit_start, commit_size, get_error_msg());
+        return false;
+    }
+#else
+    const int ret = mprotect(commit_ptr, commit_size, PROT_READ | PROT_WRITE);
+    if (ret == -1) {
+        LOG_ERROR("mprotect commit failed at 0x{:X} ({} bytes): {}", commit_start, commit_size, get_error_msg());
+        return false;
+    }
+#endif
+
+    return true;
+}
+
+bool commit_range(MemState &state, Address addr, uint32_t size) {
+    return commit_range_inner(state, addr, size);
+}
+
 static void align_to_page(MemState &state, Address &addr, Address &size) {
     const Address end = align(addr + size, STANDARD_PAGE_SIZE);
     addr = align_down(addr, STANDARD_PAGE_SIZE);

@@ -84,3 +84,9 @@ struct NetCtlState {
         deinit();
     }
 };
+
+// Defined in modules/SceNetCtl; declared here so the quickstate path can
+// stop and restart the ad-hoc thread around a save/restore.
+struct EmuEnvState;
+void netctl_start_adhoc_thread(EmuEnvState &emuenv, int thread_id);
+void netctl_stop_adhoc_thread(EmuEnvState &emuenv);
