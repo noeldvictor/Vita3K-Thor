@@ -117,3 +117,5 @@ reports/**/*.sqlite-shm
 # Arm reference PDFs (~72MB): kept locally for optimisation work, not committed.
 # See docs/reference/arm/README.md for how to re-fetch them.
 docs/reference/arm/*.pdf
+docs/reference/snapdragon/*.pdf
+docs/reference/thor/*.pdf

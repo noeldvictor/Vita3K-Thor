@@ -3,7 +3,8 @@
 > **In this repo the PDFs are gitignored** (~72MB; see `.gitignore`). They are
 > present in a working checkout but not committed. Re-fetch them with the IDs
 > below, or copy them from `xenia-thor/docs/reference/arm/`, which carries the
-> same set. Only this README and the AAPCS64 notes are tracked here.
+> same set. Only this README and the AAPCS64 notes are tracked here. Qualcomm's GPU and
+kernel references live in `../snapdragon/`.
 
 Primary-source microarchitecture data for the cores in the Thor's QCS8550, kept
 in-repo so optimisation claims can be checked against the manual instead of

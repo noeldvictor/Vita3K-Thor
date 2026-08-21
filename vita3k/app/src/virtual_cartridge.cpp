@@ -88,6 +88,7 @@ static bool buffer_looks_encrypted_icon(const vfs::FileBuffer &buffer);
 static bool buffer_starts_with(const vfs::FileBuffer &buffer, const std::initializer_list<uint8_t> prefix);
 static bool extract_archive_file_to_buffer(mz_zip_archive &zip, const std::string &path, vfs::FileBuffer &buffer);
 static bool has_cheats_for_title(const EmuEnvState &emuenv, const std::string &title_id);
+static void cache_cartridge_icon(const EmuEnvState &emuenv, AppEntry &app, const vfs::FileBuffer &icon);
 static bool is_game_card_category(const std::string &category);
 static bool is_png_buffer(const vfs::FileBuffer &buffer);
 static bool is_vita_executable_buffer(const vfs::FileBuffer &buffer);
@@ -398,14 +399,72 @@ static void add_virtual_cartridge_candidate(std::map<std::string, AppEntry> &can
 }
 
 
+/**
+ * @brief Publishes a cartridge's icon0.png so the frontends can show it.
+ *
+ * Installed apps get their icon straight from ux0:app, but a cartridge is
+ * never installed, so apps_list's lookup there always misses and the entry
+ * renders as a bare initials tile. The icon lives inside the archive, so pull
+ * it out once per scan into the cache directory and point the entry at that.
+ *
+ * Encrypted cartridges have an encrypted icon0.png too, hence the PNG magic
+ * check - writing those bytes out would just give the frontends a file that
+ * fails to decode.
+ */
+static void cache_cartridge_icon(const EmuEnvState &emuenv, AppEntry &app, const vfs::FileBuffer &icon) {
+    if (app.title_id.empty() || !is_png_buffer(icon))
+        return;
+
+    const fs::path icon_dir = emuenv.cache_path / "cartridge-icons";
+    const fs::path icon_path = icon_dir / (app.title_id + ".png");
+
+    boost::system::error_code error;
+    const auto cached_size = fs::file_size(icon_path, error);
+    if (!error && cached_size == icon.size()) {
+        // Same size is enough: a different build of the same title changes the
+        // source stamp, which reruns the scan and rewrites this anyway.
+        app.icon_path = fs_utils::path_to_utf8(icon_path.generic_path());
+        return;
+    }
+
+    fs::create_directories(icon_dir, error);
+    if (error) {
+        LOG_WARN("Could not create cartridge icon cache at {}: {}", icon_dir, error.message());
+        return;
+    }
+
+    std::ofstream file(icon_path.string(), std::ios::binary | std::ios::trunc);
+    if (!file) {
+        LOG_WARN("Could not write cartridge icon for {} to {}", app.title_id, icon_path);
+        return;
+    }
+
+    file.write(reinterpret_cast<const char *>(icon.data()), static_cast<std::streamsize>(icon.size()));
+    if (!file) {
+        LOG_WARN("Could not write cartridge icon for {} to {}", app.title_id, icon_path);
+        return;
+    }
+
+    file.close();
+    app.icon_path = fs_utils::path_to_utf8(icon_path.generic_path());
+}
+
 static std::optional<AppEntry> app_from_cartridge_directory(EmuEnvState &emuenv, const fs::path &content_path) {
     vfs::FileBuffer param_sfo;
     if (!read_scan_file(content_path / "sce_sys/param.sfo", param_sfo))
         return std::nullopt;
 
     auto app = app_from_param(emuenv, param_sfo, content_path.generic_path(), {});
-    if (app.has_value())
+    if (app.has_value()) {
         app->encrypted_content = virtual_cartridge_directory_appears_encrypted(content_path);
+
+        // An extracted cartridge already has the icon on disk, so there is
+        // nothing to unpack - just make sure it is really a PNG.
+        vfs::FileBuffer icon;
+        const fs::path icon_path = content_path / "sce_sys/icon0.png";
+        if (read_scan_file(icon_path, icon) && is_png_buffer(icon))
+            app->icon_path = fs_utils::path_to_utf8(icon_path.generic_path());
+    }
 
     return app;
 }
@@ -427,6 +486,11 @@ static std::optional<AppEntry> app_from_cartridge_archive(EmuEnvState &emuenv, c
         auto app = app_from_param(emuenv, param_sfo, archive_path.generic_path(), root);
         if (app.has_value()) {
             app->encrypted_content = virtual_cartridge_archive_appears_encrypted(zip, root);
+
+            vfs::FileBuffer icon;
+            if (extract_archive_file_to_buffer(zip, root + "sce_sys/icon0.png", icon))
+                cache_cartridge_icon(emuenv, *app, icon);
+
             if (app->encrypted_content)
                 LOG_WARN("Virtual cartridge {} [{}] appears to contain encrypted app files; pure ZIP launch will not work until the content is Vita3K-readable.", app->title_id, archive_path);
             mz_zip_reader_end(&zip);
