@@ -167,6 +167,18 @@ class EmulationSessionViewModel(application: Application) : AndroidViewModel(app
         }
     }
 
+    // Thor: quickstate and fast-forward controls, mirroring the Select-chord
+    // hotkeys so they are reachable without a controller.
+    fun quickStateStatus(): String = runCatching { NativeLib.quickStateStatus() }.getOrDefault("")
+
+    fun quickStateUndoAvailable(): Boolean =
+        runCatching { NativeLib.quickStateUndoAvailable() }.getOrDefault(false)
+
+    fun runtimeAction(action: String, successMessage: String, failureMessage: String) {
+        val ok = runCatching { NativeLib.runtimeAction(action) }.getOrDefault(false)
+        uiState = uiState.copy(statusMessage = if (ok) successMessage else failureMessage)
+    }
+
     fun requestExit() {
         uiState = uiState.copy(showExitConfirmation = true)
     }

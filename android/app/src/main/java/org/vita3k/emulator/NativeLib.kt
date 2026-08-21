@@ -147,6 +147,19 @@ object NativeLib {
     ): Boolean
     /** Returns true when the currently running app session is paused. */
     external fun isAppPaused(): Boolean
+
+    /**
+     * Thor: runtime controls, the same entry points the Select-chord hotkeys
+     * drive. Actions: save_state, load_state, undo_load_state,
+     * toggle_fast_forward, screenshot.
+     */
+    external fun runtimeAction(action: String): Boolean
+
+    /** Thor: human-readable status of quickstate slot 0 for the running title. */
+    external fun quickStateStatus(): String
+
+    /** Thor: whether a quickstate load can currently be undone. */
+    external fun quickStateUndoAvailable(): Boolean
     /** Returns the title of the currently running app session, or an empty string when unavailable. */
     external fun getRunningAppTitle(): String
     /** Returns true while either SceIme or CommonDialog IME is active. */

@@ -1,6 +1,6 @@
 <resources>
     <!-- App name -->
-    <string name="app_name">Vita3K</string>
+    <string name="app_name">Vita3K Thor</string>
 
     <!-- Common actions -->
     <string name="action_ok">OK</string>
@@ -38,7 +38,7 @@
     <string name="app_action_reset_last_played">Reset Last Played</string>
 
     <!-- Apps list screen -->
-    <string name="apps_list_app_title">Vita3K</string>
+    <string name="apps_list_app_title">Vita3K Thor</string>
     <plurals name="apps_list_n_selected">
         <item quantity="one">%1$d selected</item>
         <item quantity="other">%1$d selected</item>
@@ -64,6 +64,8 @@
     <string name="apps_list_sort_last_played">Last Played</string>
     <string name="apps_list_sort_compatibility">Compatibility</string>
     <string name="apps_list_custom_config_badge">CC</string>
+    <string name="apps_list_encrypted_badge">E</string>
+    <string name="apps_list_cheats_badge">C</string>
     <string name="apps_list_empty_search">No apps match \"%1$s\"</string>
     <string name="apps_list_empty_missing_firmware">Missing firmware components: %1$s</string>
     <string name="apps_list_empty_firmware_title">Firmware Required</string>
@@ -196,6 +198,16 @@
     <string name="emulation_menu_title">Paused</string>
     <string name="emulation_menu_subtitle">In-game session</string>
     <string name="emulation_menu_close">Close pause menu</string>
+    <string name="emulation_quickstate_title">Quickstates</string>
+    <string name="emulation_quickstate_save">Save State</string>
+    <string name="emulation_quickstate_load">Load State</string>
+    <string name="emulation_quickstate_undo">Undo Load</string>
+    <string name="emulation_quickstate_fast_forward">Fast Forward</string>
+    <string name="emulation_quickstate_screenshot">Screenshot</string>
+    <string name="emulation_quickstate_hint">Select + R1 fast forward, Select + right stick down/up save/load.</string>
+    <string name="emulation_quickstate_empty">No quickstate saved for this title yet.</string>
+    <string name="emulation_action_done">Done.</string>
+    <string name="emulation_action_failed">That action is not available right now.</string>
     <string name="emulation_tab_session">Session</string>
     <string name="emulation_tab_controls">Controls</string>
     <string name="emulation_tab_controller">Controller</string>

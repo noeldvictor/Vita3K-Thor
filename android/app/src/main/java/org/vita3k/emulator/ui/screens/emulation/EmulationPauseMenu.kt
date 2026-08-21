@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Card
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -598,6 +599,11 @@ private fun SessionTab(
             }
         }
 
+        QuickStateSection(
+            activity = activity,
+            sessionViewModel = sessionViewModel
+        )
+
         CustomConfigSection(
             settingsLoaded = settingsLoaded,
             hasCustomConfig = settingsViewModel.hasCustomConfig,
@@ -1013,5 +1019,84 @@ private fun ControlsEditorBar(
             onReset = onReset,
             modifier = modifier
         )
+    }
+}
+
+
+/**
+ * Thor: quickstate and fast-forward controls in the pause menu, so the
+ * Select-chord hotkeys are not the only way to reach them.
+ */
+@Composable
+private fun QuickStateSection(
+    activity: Emulator,
+    sessionViewModel: EmulationSessionViewModel
+) {
+    val done = stringResource(R.string.emulation_action_done)
+    val failed = stringResource(R.string.emulation_action_failed)
+    val empty = stringResource(R.string.emulation_quickstate_empty)
+
+    // Re-read on every recomposition of the menu; the menu is only shown while
+    // paused, so this is cheap and always current when it matters.
+    val status = sessionViewModel.quickStateStatus().ifBlank { empty }
+    val undoAvailable = sessionViewModel.quickStateUndoAvailable()
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = stringResource(R.string.emulation_quickstate_title),
+                style = MaterialTheme.typography.titleMedium
+            )
+            Text(
+                text = status,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                FilledTonalButton(
+                    onClick = { sessionViewModel.runtimeAction("save_state", done, failed) },
+                    modifier = Modifier.weight(1f)
+                ) { Text(stringResource(R.string.emulation_quickstate_save)) }
+
+                FilledTonalButton(
+                    onClick = { sessionViewModel.runtimeAction("load_state", done, failed) },
+                    modifier = Modifier.weight(1f)
+                ) { Text(stringResource(R.string.emulation_quickstate_load)) }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                FilledTonalButton(
+                    onClick = { sessionViewModel.runtimeAction("undo_load_state", done, failed) },
+                    enabled = undoAvailable,
+                    modifier = Modifier.weight(1f)
+                ) { Text(stringResource(R.string.emulation_quickstate_undo)) }
+
+                FilledTonalButton(
+                    onClick = { sessionViewModel.runtimeAction("toggle_fast_forward", done, failed) },
+                    modifier = Modifier.weight(1f)
+                ) { Text(stringResource(R.string.emulation_quickstate_fast_forward)) }
+            }
+
+            FilledTonalButton(
+                onClick = { sessionViewModel.runtimeAction("screenshot", done, failed) },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text(stringResource(R.string.emulation_quickstate_screenshot)) }
+
+            Text(
+                text = stringResource(R.string.emulation_quickstate_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }

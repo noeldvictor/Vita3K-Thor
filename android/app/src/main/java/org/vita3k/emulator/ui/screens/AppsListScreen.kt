@@ -1376,6 +1376,22 @@ private fun AppStatusBadges(app: AppInfo) {
         if (app.hasCustomConfig) {
             CustomConfigBadge()
         }
+        // Thor: E marks a cartridge whose app files are encrypted and cannot
+        // boot; C marks a title with VitaCheat files available.
+        if (app.encryptedContent) {
+            ThorBadge(
+                label = stringResource(R.string.apps_list_encrypted_badge),
+                background = Color(0xFF9A2C2C),
+                foreground = Color(0xFFFFF1F1)
+            )
+        }
+        if (app.cheatsAvailable) {
+            ThorBadge(
+                label = stringResource(R.string.apps_list_cheats_badge),
+                background = Color(0xFF2E7D52),
+                foreground = Color(0xFFEFFFF6)
+            )
+        }
     }
 }
 
@@ -1388,6 +1404,22 @@ private fun CustomConfigBadge() {
     ) {
         Text(
             text = stringResource(R.string.apps_list_custom_config_badge),
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+        )
+    }
+}
+
+@Composable
+private fun ThorBadge(label: String, background: Color, foreground: Color) {
+    Surface(
+        color = background,
+        contentColor = foreground,
+        shape = RoundedCornerShape(999.dp)
+    ) {
+        Text(
+            text = label,
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.Bold,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)

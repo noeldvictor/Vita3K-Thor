@@ -7,10 +7,12 @@
 // (at your option) any later version.
 
 #include "android_state.h"
+#include "interface.h"
 
 #include <app/functions.h>
 #include <ime/keyboard.h>
 #include <io/state.h>
+#include <util/log.h>
 #include <motion/functions.h>
 
 #include <SDL3/SDL_events.h>
@@ -181,6 +183,58 @@ Java_org_vita3k_emulator_NativeLib_dismissIme(JNIEnv *, jclass) {
     if (dismissed)
         ime::notify_ime_state_changed();
     return dismissed ? JNI_TRUE : JNI_FALSE;
+}
+
+/**
+ * Thor: runtime controls, exposed to the pause menu.
+ *
+ * Actions: save_state, load_state, undo_load_state, toggle_fast_forward,
+ * screenshot. These are the same entry points the Select-chord hotkeys drive.
+ */
+JNIEXPORT jboolean JNICALL
+Java_org_vita3k_emulator_NativeLib_runtimeAction(JNIEnv *env, jclass, jstring action_str) {
+    auto *emuenv = get_emuenv();
+    if (!emuenv || emuenv->io.title_id.empty())
+        return JNI_FALSE;
+
+    const std::string action = jstring_to_string(env, action_str);
+
+    if (action == "save_state")
+        runtime_request_save_state(*emuenv);
+    else if (action == "load_state")
+        runtime_request_load_state(*emuenv);
+    else if (action == "undo_load_state")
+        runtime_request_undo_load_state(*emuenv);
+    else if (action == "toggle_fast_forward")
+        runtime_toggle_fast_forward(*emuenv);
+    else if (action == "screenshot")
+        runtime_take_screenshot(*emuenv);
+    else {
+        LOG_WARN("Unknown runtime action '{}'", action);
+        return JNI_FALSE;
+    }
+
+    return JNI_TRUE;
+}
+
+/** Thor: human-readable status of quickstate slot 0 for the running title. */
+JNIEXPORT jstring JNICALL
+Java_org_vita3k_emulator_NativeLib_quickStateStatus(JNIEnv *env, jclass) {
+    auto *emuenv = get_emuenv();
+    if (!emuenv || emuenv->io.title_id.empty())
+        return env->NewStringUTF("");
+
+    return env->NewStringUTF(runtime_quick_state_slot_status(*emuenv).c_str());
+}
+
+/** Thor: whether a quickstate load can currently be undone. */
+JNIEXPORT jboolean JNICALL
+Java_org_vita3k_emulator_NativeLib_quickStateUndoAvailable(JNIEnv *env, jclass) {
+    auto *emuenv = get_emuenv();
+    if (!emuenv || emuenv->io.title_id.empty())
+        return JNI_FALSE;
+
+    return runtime_quick_state_load_undo_available(*emuenv) ? JNI_TRUE : JNI_FALSE;
 }
 
 } // extern "C"

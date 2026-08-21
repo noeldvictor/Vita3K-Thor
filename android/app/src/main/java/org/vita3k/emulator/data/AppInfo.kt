@@ -34,7 +34,13 @@ data class AppInfo(
     val hasCustomConfig: Boolean = false,
     val compatibility: CompatibilityState = CompatibilityState.UNKNOWN,
     val lastPlayed: Long = 0,
-    val playtime: Long = 0
+    val playtime: Long = 0,
+    // Thor: listed straight from a scan root rather than installed.
+    val virtualCartridge: Boolean = false,
+    // Thor: app files are PFS-encrypted, so this cannot boot as a cartridge.
+    val encryptedContent: Boolean = false,
+    // Thor: a VitaCheat .psv file was found for this title.
+    val cheatsAvailable: Boolean = false
 ) {
     val iconFile: File?
         get() = iconPath?.takeIf { it.isNotEmpty() }?.let { File(it) }?.takeIf { it.exists() }

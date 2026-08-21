@@ -170,7 +170,10 @@ internal object AppRepository {
         hasCustomConfig = native.hasCustomConfig,
         compatibility = CompatibilityState.fromValue(native.compatibility),
         lastPlayed = native.lastPlayed,
-        playtime = native.playtime
+        playtime = native.playtime,
+        virtualCartridge = native.virtualCartridge,
+        encryptedContent = native.encryptedContent,
+        cheatsAvailable = native.cheatsAvailable
     )
 
     private fun currentDisplayVersion(appVersion: String): String {

@@ -31,7 +31,7 @@ Java_org_vita3k_emulator_NativeLib_getAppListDetailed(JNIEnv *env, jclass) {
     if (!app_info_class)
         return nullptr;
 
-    jmethodID ctor = env->GetMethodID(app_info_class, "<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZIJJ)V");
+    jmethodID ctor = env->GetMethodID(app_info_class, "<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZIJJZZZ)V");
     if (!ctor)
         return env->NewObjectArray(0, app_info_class, nullptr);
 
@@ -76,7 +76,10 @@ Java_org_vita3k_emulator_NativeLib_getAppListDetailed(JNIEnv *env, jclass) {
             static_cast<jboolean>(has_custom_config),
             static_cast<jint>(compat_state),
             static_cast<jlong>(last_played),
-            static_cast<jlong>(playtime));
+            static_cast<jlong>(playtime),
+            static_cast<jboolean>(app.virtual_cartridge),
+            static_cast<jboolean>(app.encrypted_content),
+            static_cast<jboolean>(app.cheats_available));
 
         env->SetObjectArrayElement(result, i, app_info);
         env->DeleteLocalRef(app_info);
