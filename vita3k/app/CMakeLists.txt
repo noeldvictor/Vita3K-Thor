@@ -30,3 +30,7 @@ if (LINUX)
     find_package(X11 REQUIRED)
     target_link_libraries(app PRIVATE ${X11_LIBRARIES})
 endif()
+
+if(ANDROID)
+	target_link_libraries(app PRIVATE host::dialog miniz)
+endif()

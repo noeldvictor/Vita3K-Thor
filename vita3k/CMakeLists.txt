@@ -198,7 +198,7 @@ if(WIN32)
 	target_sources(vita3k PRIVATE util/src/vc_runtime_checker.cpp)
 endif()
 
-target_link_libraries(vita3k PRIVATE app audio bgm_player camera config cppcommon ctrl dialog display gdbstub gxm http io miniz modules motion net ngs np packages patch renderer shader touch util)
+target_link_libraries(vita3k PRIVATE app audio bgm_player camera compat config cppcommon ctrl dialog display gdbstub gxm http ime io lang miniz modules motion net ngs np packages patch psvpfsparser renderer shader touch util)
 if(VITA3K_ENABLE_QT_GUI)
 	target_link_libraries(vita3k PRIVATE gui-qt updater)
 endif()
