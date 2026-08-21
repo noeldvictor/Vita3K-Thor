@@ -549,7 +549,9 @@ void MainWindow::initialize() {
         welcome.exec();
     }
 
-    if (m_update_manager) {
+    // Thor: never check upstream for updates at startup - see
+    // UpdateManager::check_for_updates.
+    if (false) {
         const auto startup_mode = static_cast<UpdateStartupMode>(emuenv.cfg.check_for_updates_mode);
         if (startup_mode != UPDATE_STARTUP_OFF) {
             QTimer::singleShot(0, this, [this, startup_mode]() {

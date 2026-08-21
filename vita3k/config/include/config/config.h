@@ -203,7 +203,7 @@ inline std::vector<std::string> default_virtual_cartridge_dirs() {
     code(std::string, "user-lang", std::string{}, user_lang)                                            \
     code(bool, "show-welcome", true, show_welcome)                                                      \
     code(bool, "warn-missing-firmware", true, warn_missing_firmware)                                    \
-    code(bool, "check-for-updates", true, check_for_updates)                                            \
+    code(bool, "check-for-updates", false, check_for_updates)                                            \
     code(bool, "asia-font-support", false, asia_font_support)                                      \
     code(bool, "cheats-enabled", true, cheats_enabled)                                             \
     code(bool, "cartridge-mode", false, cartridge_mode)                                            \
@@ -221,7 +221,7 @@ inline std::vector<std::string> default_virtual_cartridge_dirs() {
     code(bool, "show-gui", false, show_gui)                                                        \
     code(bool, "show-info-bar", false, show_info_bar)                                              \
     code(bool, "show-touchpad-cursor", true, show_touchpad_cursor)                                 \
-    code(int, "check-for-updates-mode", static_cast<int>(UPDATE_STARTUP_PROMPT), check_for_updates_mode)\
+    code(int, "check-for-updates-mode", static_cast<int>(UPDATE_STARTUP_OFF), check_for_updates_mode)\
     code(int, "file-loading-delay", 0, file_loading_delay)                                              \
     code(bool, "shader-cache", true, shader_cache)                                                      \
     code(bool, "spirv-shader", false, spirv_shader)                                                     \

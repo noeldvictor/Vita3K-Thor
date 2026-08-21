@@ -21,6 +21,7 @@
 #include <config/state.h>
 #include <emuenv/state.h>
 #include <io/state.h>
+#include <io/vfs.h>
 #include <packages/sfo.h>
 #include <util/fs.h>
 #include <util/log.h>
@@ -597,6 +598,22 @@ bool set_app_info(EmuEnvState &emuenv, const std::string &app_path) {
     emuenv.app_info.app_version = it->app_ver;
     emuenv.app_info.app_category = it->category;
     emuenv.app_info.app_short_title = it->stitle;
+
+    // Thor: a virtual cartridge lives outside VitaFS, and the game session
+    // re-initialises IO after the mount that created this entry. Re-mount from
+    // the recorded source so app0: resolves to the archive rather than to an
+    // ux0:app directory that was never written.
+    if (it->virtual_cartridge && !it->source_path.empty()) {
+        // Unconditional: io_deinit drops the mount when a game session starts,
+        // so a mount taken earlier (from the app grid or an intent) is already
+        // gone by the time the session boots.
+        const fs::path source{ it->source_path };
+        vfs::unmount_current_app_archive(emuenv.io);
+        if (vfs::mount_current_app_archive(emuenv.io, source, "app/" + it->title_id + "/", it->title_id))
+            LOG_INFO("Re-mounted virtual cartridge {} from {}", it->title_id, it->source_path);
+        else
+            LOG_ERROR("Failed to re-mount virtual cartridge {} from {}", it->title_id, it->source_path);
+    }
 
     return true;
 }

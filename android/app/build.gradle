@@ -86,7 +86,7 @@ android {
 		main {
 			jniLibs.srcDirs = ['../prebuilt']
 			assets {
-				srcDirs 'assets'
+				srcDirs '../assets'
 			}
 			java {
 				srcDirs += ['../../external/sdl/android-project/app/src/main/java']

@@ -84,6 +84,15 @@ internal object AppRepository {
         officialBuild: Boolean
     ): UpdateCheckResult = withContext(Dispatchers.IO) {
         val currentDisplayVersion = currentDisplayVersion(appVersion)
+
+        // Thor: update checking is disabled. This fork has diverged far enough
+        // from upstream that its releases are not an upgrade path, and the
+        // check would only ever offer to replace Thor with upstream Vita3K.
+        return@withContext UpdateCheckResult(
+            status = UpdateCheckStatus.UpToDate,
+            message = "Vita3K Thor is a fork and does not check upstream for updates.",
+            currentDisplayVersion = currentDisplayVersion
+        )
         val response = httpGetString(UPDATE_RELEASE_URL)
             ?: return@withContext UpdateCheckResult(
                 status = UpdateCheckStatus.Failed,

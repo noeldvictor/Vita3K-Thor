@@ -61,6 +61,7 @@
 
 // Thor: headers for the quickstate implementation below.
 #include <app/functions.h>
+#include <app/state.h>
 #include <audio/state.h>
 #include <bgm_player/functions.h>
 #include <camera/state.h>
@@ -680,6 +681,32 @@ ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv) {
 }
 
 ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv, const AppLaunchRequest &launch_request) {
+    // Thor: a virtual cartridge is mounted before the session starts, and
+    // session setup re-initialises IO, so re-mount here - the last point before
+    // any module is read - if the title we are booting is a cartridge.
+    {
+        auto &apps_state = emuenv.app.apps_list;
+        std::string cartridge_source;
+        std::string cartridge_title_id;
+        {
+            std::lock_guard<std::mutex> lock(apps_state.mutex);
+            const auto it = std::find_if(apps_state.apps.begin(), apps_state.apps.end(),
+                [&](const app::AppEntry &app) { return app.path == launch_request.app_path; });
+            if (it != apps_state.apps.end() && it->virtual_cartridge && !it->source_path.empty()) {
+                cartridge_source = it->source_path;
+                cartridge_title_id = it->title_id;
+            }
+        }
+
+        if (!cartridge_source.empty() && !vfs::current_app_archive_mounted(emuenv.io)) {
+            const fs::path source{ cartridge_source };
+            if (vfs::mount_current_app_archive(emuenv.io, source, "app/" + cartridge_title_id + "/", cartridge_title_id))
+                LOG_INFO("Re-mounted virtual cartridge {} from {} for boot", cartridge_title_id, cartridge_source);
+            else
+                LOG_ERROR("Failed to re-mount virtual cartridge {} from {}", cartridge_title_id, cartridge_source);
+        }
+    }
+
     if (load_app_impl(main_module_id, emuenv, launch_request) != Success) {
         std::string message = fmt::format(fmt::runtime(lang::get(lang::str::load_app_failed_msg)), emuenv.vita_fs_path / "ux0/app" / emuenv.io.app_path / emuenv.self_path);
         LOG_ERROR(message);

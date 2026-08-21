@@ -242,10 +242,25 @@ SceUID load_module(EmuEnvState &emuenv, const std::string &module_path) {
         return module_id;
     };
 
-    VitaIoDevice device = device::get_device(module_path);
+    // Thor: app0: may be backed by a mounted virtual cartridge or by a plain
+    // directory, neither of which lives under ux0:app.
+    const VitaIoDevice requested_device = device::get_device(module_path);
+    VitaIoDevice device = requested_device;
     auto device_for_icase = device;
     fs::path translated_module_path = translate_path(module_path.c_str(), device, emuenv.io.device_paths);
-    auto system_path = device::construct_emulated_path(device, translated_module_path, emuenv.vita_fs_path, emuenv.io.redirect_stdio);
+    const auto current_app_relative_path = [&]() -> fs::path {
+        const auto app0 = fs::path(emuenv.io.device_paths.app0).generic_path().string();
+        const auto translated = translated_module_path.generic_path().string();
+        if (translated == app0)
+            return {};
+        if (translated.starts_with(app0 + "/"))
+            return translated.substr(app0.size() + 1);
+        return translated_module_path;
+    };
+    const bool archive_app_module = requested_device == VitaIoDevice::app0 && vfs::current_app_archive_mounted(emuenv.io);
+    auto system_path = (requested_device == VitaIoDevice::app0 && !emuenv.io.app0_host_path.empty())
+        ? (emuenv.io.app0_host_path / current_app_relative_path()).generic_path()
+        : device::construct_emulated_path(device, translated_module_path, emuenv.vita_fs_path, emuenv.io.redirect_stdio);
 
     if (module_path.starts_with("os0:kd/")) {
         if (!fs::exists(system_path)) {
@@ -264,7 +279,7 @@ SceUID load_module(EmuEnvState &emuenv, const std::string &module_path) {
         }
     }
 
-    if (emuenv.io.case_isens_find_enabled && !fs::exists(system_path)) {
+    if (!archive_app_module && emuenv.io.case_isens_find_enabled && !fs::exists(system_path)) {
         // Attempt a case-insensitive file search.
         const auto original_translated_module_path = translated_module_path;
         const auto cached_path = find_in_cache(emuenv.io, string_utils::tolower(translated_module_path.string()));
@@ -287,8 +302,8 @@ SceUID load_module(EmuEnvState &emuenv, const std::string &module_path) {
 
     vfs::FileBuffer module_buffer;
     bool res;
-    if (device == VitaIoDevice::app0)
-        res = vfs::read_app_file(module_buffer, emuenv.vita_fs_path, emuenv.io.app_path, translated_module_path);
+    if (requested_device == VitaIoDevice::app0)
+        res = vfs::read_current_app_file(module_buffer, emuenv.io, emuenv.vita_fs_path, current_app_relative_path());
     else
         res = vfs::read_file(device, module_buffer, emuenv.vita_fs_path, translated_module_path);
     if (!res) {

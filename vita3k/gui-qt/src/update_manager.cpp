@@ -270,6 +270,15 @@ void UpdateManager::close_progress_dialog() {
 }
 
 void UpdateManager::check_for_updates(const updater::UpdateCheckMode mode, QWidget *parent) {
+    // Thor: update checking is disabled. This fork has diverged far enough from
+    // upstream that "the latest official build" is not an upgrade path for it,
+    // and the check would only ever offer to replace Thor with upstream Vita3K.
+    if (mode == updater::UpdateCheckMode::ManualInteractive) {
+        QMessageBox::information(parent, tr_update("Check for Updates"),
+            tr_update("Vita3K Thor is a fork and does not check upstream for updates."));
+    }
+    return;
+
     if (m_worker_thread) {
         if (mode == updater::UpdateCheckMode::ManualInteractive)
             QMessageBox::information(parent, tr_update("Check for Updates"), tr_update("An update check is already running."));

@@ -695,9 +695,10 @@ void io_deinit(IOState &io) {
         io.next_overlay_id = 1;
     }
 
-    // Thor: a virtual cartridge stays mounted across the session; drop it too
-    // so a path switch or relaunch does not read from the previous archive.
-    vfs::unmount_current_app_archive(io);
+    // Thor: deliberately does NOT unmount the current app archive. A virtual
+    // cartridge is mounted before the game session starts, and io_deinit runs
+    // during session setup - dropping it here left app0: pointing at an
+    // ux0:app directory that was never written. Switching titles re-mounts.
 }
 
 void init_device_paths(IOState &io) {
