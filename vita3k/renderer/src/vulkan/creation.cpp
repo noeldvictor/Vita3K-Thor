@@ -53,11 +53,6 @@ VKContext::VKContext(VKState &state, MemState &mem)
     vertex_info_uniform_buffer.alignment = uniform_alignment;
     fragment_info_uniform_buffer.alignment = uniform_alignment;
 
-    // Keep the vertex ring buffer available even with memory mapping so targeted
-    // debug/fallback paths can stage odd vertex streams without rebuilding the
-    // renderer context.
-    vertex_stream_ring_buffer.create();
-
     if (state.features.enable_memory_mapping) {
         // use the default buffer
         std::fill_n(vertex_stream_buffers, SCE_GXM_MAX_VERTEX_STREAMS, state.default_buffer.buffer);
@@ -66,6 +61,7 @@ VKContext::VKContext(VKState &state, MemState &mem)
         gpu_request_wait_thread = std::thread(&VKContext::wait_thread_function, this, std::ref(mem));
     } else {
         // these are not needed when using memory mapping
+        vertex_stream_ring_buffer.create();
         index_stream_ring_buffer.create();
         vertex_uniform_stream_ring_buffer.create();
         fragment_uniform_stream_ring_buffer.create();
@@ -156,10 +152,18 @@ VKContext::VKContext(VKState &state, MemState &mem)
 VKContext::~VKContext() {
     if (gpu_request_wait_thread.joinable())
         gpu_request_wait_thread.join();
+
+    for (auto &[addr, vb] : visibility_buffers)
+        state.device.destroy(vb.query_pool);
+    visibility_buffers.clear();
+
+    state.device.destroy(global_descriptor_pool);
+    global_descriptor_pool = nullptr;
 }
 
 VKRenderTarget::VKRenderTarget(VKState &state, const SceGxmRenderTargetParams &params)
-    : color(static_cast<uint32_t>(params.width * state.res_multiplier), static_cast<uint32_t>(params.height * state.res_multiplier), vk::Format::eR8G8B8A8Unorm)
+    : device(state.device)
+    , color(static_cast<uint32_t>(params.width * state.res_multiplier), static_cast<uint32_t>(params.height * state.res_multiplier), vk::Format::eR8G8B8A8Unorm)
     , depthstencil(static_cast<uint32_t>(params.width * state.res_multiplier), static_cast<uint32_t>(params.height * state.res_multiplier), state.deep_stencil_use) {
     width = static_cast<uint32_t>(params.width * state.res_multiplier);
     height = static_cast<uint32_t>(params.height * state.res_multiplier);
@@ -208,9 +212,14 @@ VKRenderTarget::VKRenderTarget(VKState &state, const SceGxmRenderTargetParams &p
     }
 }
 
+VKRenderTarget::~VKRenderTarget() {
+    for (auto &fence : fences)
+        device.destroy(fence);
+    fences.clear();
+}
+
 bool create(VKState &state, std::unique_ptr<Context> &context, MemState &mem) {
     context = std::make_unique<VKContext>(state, mem);
-
     return true;
 }
 
@@ -220,8 +229,10 @@ bool create(VKState &state, std::unique_ptr<RenderTarget> &rt, const SceGxmRende
 }
 
 void destroy(VKState &state, std::unique_ptr<RenderTarget> &rt) {
-    VKRenderTarget &render_target = *reinterpret_cast<VKRenderTarget *>(rt.get());
+    if (!rt)
+        return;
 
+    VKRenderTarget &render_target = *reinterpret_cast<VKRenderTarget *>(rt.get());
     // don't forget to destroy the framebuffers
     state.surface_cache.destroy_associated_framebuffers(&render_target);
 
@@ -230,7 +241,7 @@ void destroy(VKState &state, std::unique_ptr<RenderTarget> &rt) {
     frame.destroy_queue.add_image(render_target.color);
     frame.destroy_queue.add_image(render_target.depthstencil);
 
-    for (auto fence : render_target.fences)
+    for (auto &fence : render_target.fences)
         frame.destroy_queue.add(fence);
     for (int i = 0; i < MAX_FRAMES_RENDERING; i++) {
         for (auto cmd_buffer : render_target.cmd_buffers[i])
@@ -254,11 +265,6 @@ bool create(std::unique_ptr<FragmentProgram> &fp, VKState &state, const SceGxmPr
     fp = std::make_unique<VKFragmentProgram>();
 
     VKFragmentProgram *fp_vk = reinterpret_cast<VKFragmentProgram *>(fp.get());
-    fp_vk->program_flags = program.program_flags;
-    if (blend != nullptr) {
-        fp_vk->has_blend_info = true;
-        fp_vk->blend_info = *blend;
-    }
 
     // Translate blending.
     // programs using native color can't use traditional blending
@@ -273,17 +279,14 @@ bool create(std::unique_ptr<FragmentProgram> &fp, VKState &state, const SceGxmPr
         if (blend->colorMask & SCE_GXM_COLOR_MASK_A)
             color_mask |= vk::ColorComponentFlagBits::eA;
 
-        const bool color_blend_enabled = blend->colorFunc != SCE_GXM_BLEND_FUNC_NONE;
-        const bool alpha_blend_enabled = blend->alphaFunc != SCE_GXM_BLEND_FUNC_NONE;
-
         fp_vk->blending = vk::PipelineColorBlendAttachmentState{
-            .blendEnable = color_blend_enabled || alpha_blend_enabled,
-            .srcColorBlendFactor = color_blend_enabled ? translate_blend_factor(blend->colorSrc) : vk::BlendFactor::eOne,
-            .dstColorBlendFactor = color_blend_enabled ? translate_blend_factor(blend->colorDst) : vk::BlendFactor::eZero,
-            .colorBlendOp = color_blend_enabled ? translate_blend_func(blend->colorFunc) : vk::BlendOp::eAdd,
-            .srcAlphaBlendFactor = alpha_blend_enabled ? translate_blend_factor(blend->alphaSrc) : vk::BlendFactor::eOne,
-            .dstAlphaBlendFactor = alpha_blend_enabled ? translate_blend_factor(blend->alphaDst) : vk::BlendFactor::eZero,
-            .alphaBlendOp = alpha_blend_enabled ? translate_blend_func(blend->alphaFunc) : vk::BlendOp::eAdd,
+            .blendEnable = (blend->colorFunc != SCE_GXM_BLEND_FUNC_NONE) || (blend->alphaFunc != SCE_GXM_BLEND_FUNC_NONE),
+            .srcColorBlendFactor = translate_blend_factor(blend->colorSrc),
+            .dstColorBlendFactor = translate_blend_factor(blend->colorDst),
+            .colorBlendOp = translate_blend_func(blend->colorFunc),
+            .srcAlphaBlendFactor = translate_blend_factor(blend->alphaSrc),
+            .dstAlphaBlendFactor = translate_blend_factor(blend->alphaDst),
+            .alphaBlendOp = translate_blend_func(blend->alphaFunc),
             .colorWriteMask = color_mask
         };
     } else {

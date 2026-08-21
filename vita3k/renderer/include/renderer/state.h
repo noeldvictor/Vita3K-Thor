@@ -28,14 +28,12 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
-struct SDL_Window;
 struct DialogState;
 struct DisplayState;
 struct GxmState;
@@ -92,9 +90,6 @@ struct State {
     FrameHost *frame = nullptr;
 
     Backend current_backend;
-#ifdef __ANDROID__
-    std::string current_custom_driver;
-#endif
     FeatureState features;
     float res_multiplier;
     bool disable_surface_sync;
@@ -143,7 +138,6 @@ struct State {
     // used for driver bug workaround
     bool is_adreno_stock = false;
     bool is_adreno_turnip = false;
-    bool renderer_trace_gxm_state = false;
 
     // Non-owning pointer to the overlay display manager
     overlay::display_manager *overlay_manager = nullptr;
@@ -166,15 +160,15 @@ struct State {
     void init_overlay_font_dirs();
 
     virtual bool init() = 0;
+    virtual void cleanup() {};
     virtual void late_init(const Config &cfg, const std::string_view game_id, MemState &mem) = 0;
 
     virtual TextureCache *get_texture_cache() = 0;
-    virtual void reset_runtime_cache() = 0;
 
-    virtual void render_frame(const SceFVector2 &viewport_pos, const SceFVector2 &viewport_size, DisplayState &display,
-        const GxmState &gxm, MemState &mem)
-        = 0;
-    virtual void swap_window(SDL_Window *window) = 0;
+    virtual void render_frame(DisplayState &display, const GxmState &gxm, MemState &mem) = 0;
+    virtual void swap_window() = 0;
+    virtual bool set_current() { return true; }
+    virtual void done_current() {}
     // perform a screenshot of the (upscaled) frame to be rendered and return it in a vector in its rgba8 format
     virtual std::vector<uint32_t> dump_frame(DisplayState &display, uint32_t &width, uint32_t &height) = 0;
     // return a mask of the features which can influence the compiled shaders
@@ -191,6 +185,9 @@ struct State {
     void set_surface_sync_state(bool disable) {
         disable_surface_sync = disable;
     }
+    void set_vsync_state(bool enable) {
+        pending_vsync.store(enable ? 1 : 0, std::memory_order_relaxed);
+    }
     void set_stretch_display(bool enable) {
         stretch_the_display_area = enable;
     }
@@ -204,9 +201,6 @@ struct State {
         return true;
     }
     virtual void unmap_memory(MemState &mem, Ptr<void> address) {}
-    virtual std::vector<std::string> get_gpu_list() {
-        return { "Automatic" };
-    }
 #ifdef __ANDROID__
     virtual bool support_custom_drivers() {
         return false;

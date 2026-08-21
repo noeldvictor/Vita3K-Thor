@@ -52,6 +52,8 @@ struct PredictedDisplayFrame {
 };
 
 struct DisplayState {
+    // Thor: emulation speed hack, read by the kernel timing helpers
+    std::atomic<uint32_t> speed_percent{ 100 };
     int viewport_drawable_w = 0;
     int viewport_drawable_h = 0;
     float viewport_x = 0;

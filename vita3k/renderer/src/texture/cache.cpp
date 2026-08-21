@@ -289,7 +289,6 @@ using namespace texture;
 
 bool TextureCache::init(const bool hashless_texture_cache, const fs::path &texture_folder, std::string_view game_id, const size_t sampler_cache_size) {
     use_protect = hashless_texture_cache;
-    LOG_INFO("Texture cache dirty tracking: {}", use_protect ? "write-protect" : "hash");
 
     // initialize the texture queue
     texture_queue.init(TextureCacheSize);
@@ -316,30 +315,6 @@ bool TextureCache::init(const bool hashless_texture_cache, const fs::path &textu
     refresh_available_textures();
 
     return true;
-}
-
-void TextureCache::reset_runtime_cache() {
-    texture_lookup.clear();
-    const size_t texture_cache_size = texture_queue.items.size();
-    if (texture_cache_size > 0) {
-        texture_queue.init(texture_cache_size);
-        for (size_t i = 0; i < texture_cache_size; i++)
-            texture_queue.items[i].content.index = static_cast<int>(i);
-    }
-
-    sampler_lookup.clear();
-    const size_t sampler_cache_size = sampler_queue.items.size();
-    if (sampler_cache_size > 0) {
-        sampler_queue.init(sampler_cache_size);
-        for (size_t i = 0; i < sampler_cache_size; i++)
-            sampler_queue.items[i].content.index = static_cast<int>(i);
-    }
-
-    current_info = nullptr;
-    importing_texture = false;
-    exporting_texture = false;
-    imported_texture_raw_data.clear();
-    imported_texture_decoded = nullptr;
 }
 
 void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &mem) {
@@ -553,7 +528,7 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
         case SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P2:
         case SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P3:
             texture_data_decompressed.resize(pixels_per_stride * memory_height * 4);
-            yuv420_texture_to_rgb(texture_data_decompressed.data(),
+            yuv420_texture_to_rgb(yuv_conversion_cache, texture_data_decompressed.data(),
                 static_cast<const uint8_t *>(pixels), pixels_per_stride, memory_height, layout_width, layout_height,
                 base_format == SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P3);
             pixels = texture_data_decompressed.data();
@@ -795,7 +770,7 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
                 }
 
                 return true;
-            }, "texture-cache");
+            });
         }
 
         upload_done();

@@ -2,8 +2,10 @@ add_library(
 	app
 	STATIC
 	include/app/functions.h
+	include/app/sdl_frame_host.h
 	include/app/discord.h
 	src/app_init.cpp
+	src/sdl_frame_host.cpp
 	src/app.cpp
 	src/discord.cpp
 )

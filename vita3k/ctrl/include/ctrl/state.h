@@ -22,6 +22,8 @@
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_haptic.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -51,6 +53,12 @@ struct SDL_GUIDComparator {
 };
 
 typedef std::map<SDL_GUID, Controller, SDL_GUIDComparator> ControllerList;
+
+struct VirtualKeyboardState {
+    uint32_t buttons = 0;
+    uint32_t buttons_ext = 0;
+    float axes[4] = {};
+};
 
 struct CtrlState {
     std::mutex mutex;

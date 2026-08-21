@@ -35,6 +35,13 @@ struct MemState;
 enum SceGxmTextureBaseFormat : uint32_t;
 
 namespace renderer {
+struct YUVConversionCache {
+    void *sws_context = nullptr;
+    size_t width = 0;
+    size_t height = 0;
+    bool is_p3 = false;
+};
+
 enum class Backend : uint32_t;
 static constexpr size_t TextureCacheSize = 1024;
 
@@ -98,6 +105,7 @@ protected:
 public:
     Backend backend;
     bool use_protect = false;
+    YUVConversionCache yuv_conversion_cache;
     // use a separate sampler cache
     bool use_sampler_cache = false;
     int anisotropic_filtering = 1;
@@ -136,7 +144,6 @@ public:
 
     bool init(const bool hashless_texture_cache, const fs::path &texture_folder, const std::string_view game_id, const size_t sampler_cache_size = 0);
     void set_replacement_state(bool import_textures, bool export_textures, bool export_as_png);
-    void reset_runtime_cache();
 
     virtual void select(size_t index, const SceGxmTexture &texture) = 0;
     virtual void configure_texture(const SceGxmTexture &texture) = 0;
@@ -164,5 +171,7 @@ public:
     virtual void import_configure_impl(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height, bool is_srgb, uint16_t nb_components, uint16_t mipcount, bool swap_rb) = 0;
     void import_upload_texture();
     void import_done();
+
+    virtual ~TextureCache();
 };
 } // namespace renderer

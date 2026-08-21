@@ -60,8 +60,6 @@ struct Framebuffer {
     vk::Framebuffer shader_interlock;
     // base color image used by the framebuffer
     vkutil::Image *base_image;
-    // base depth/stencil image used by the framebuffer
-    vkutil::Image *ds_base_image;
 };
 
 struct CastedTexture {
@@ -86,8 +84,6 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
 
     SceGxmColorBaseFormat format;
     vk::ComponentMapping swizzle;
-    SceGxmMultisampleMode multisample_mode = SCE_GXM_MULTISAMPLE_NONE;
-    bool downscale = false;
 
     Ptr<void> data;
     std::vector<CastedTexture> casted_textures;
@@ -147,46 +143,11 @@ struct DepthStencilSurfaceCacheInfo : public SurfaceCacheInfo {
     std::vector<DepthSurfaceView> read_surfaces;
 };
 
-enum class TextureLookupDebugSource : uint8_t {
-    Unknown,
-    GuestTexture,
-    ColorSurface,
-    DepthStencil
-};
-
-enum class TextureLookupDebugMode : uint8_t {
-    Unknown,
-    TextureCache,
-    ViewportDirect,
-    ViewportAlt,
-    CastedReuse,
-    CastedCopy,
-    Direct,
-    DirectAlt,
-    DepthDirect,
-    DepthCopyReuse,
-    DepthCopy
-};
-
-struct TextureLookupDebugInfo {
-    TextureLookupDebugSource source = TextureLookupDebugSource::Unknown;
-    TextureLookupDebugMode mode = TextureLookupDebugMode::Unknown;
-    uint32_t texture_addr = 0;
-    uint32_t surface_addr = 0;
-    uint32_t texture_width = 0;
-    uint32_t texture_height = 0;
-    uint32_t source_width = 0;
-    uint32_t source_height = 0;
-    uint32_t requested_format = 0;
-    uint32_t image_format = 0;
-};
-
 // result when looking in the surface cache for a texture
 struct TextureLookupResult {
     vk::ImageView view;
     vkutil::ImageLayout layout;
     vk::Format format;
-    TextureLookupDebugInfo debug;
 };
 
 // result when trying to retrieve a surface from the surface cache
@@ -239,6 +200,7 @@ public:
     bool can_mprotect_mapped_memory = true;
 
     explicit VKSurfaceCache(VKState &state);
+    void cleanup();
 
     SurfaceRetrieveResult retrieve_color_surface_for_framebuffer(MemState &mem, SceGxmColorSurface *color);
     std::optional<TextureLookupResult> retrieve_color_surface_as_texture(const SceGxmTexture &texture, const SceGxmColorBaseFormat base_format, TextureViewport *texture_viewport);
@@ -265,7 +227,6 @@ public:
     // destroy all framebuffers associated with render_target
     // (meaning their color or depth-stencil surface is not backed by memory)
     void destroy_associated_framebuffers(const VKRenderTarget *render_target);
-    void reset_runtime_cache();
 
     // Return the image along with the viewport to be displayed on the screen
     // Viewport should already have its fields width and height filled

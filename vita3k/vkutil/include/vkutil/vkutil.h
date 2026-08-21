@@ -92,8 +92,6 @@
 #undef CursorShape
 #endif
 
-// Newer Vulkan-Headers dropped ValidationFailedEXTError, but VMA-Hpp still throws
-// it; upstream carries this shim for exactly that reason.
 namespace VULKAN_HPP_NAMESPACE {
 class ValidationFailedEXTError : public SystemError {
 public:

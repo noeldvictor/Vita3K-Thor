@@ -28,16 +28,8 @@
 
 #include <util/fs.h>
 #include <util/log.h>
-#include <util/spin_wait.h>
 
 #include <SDL3/SDL_cpuinfo.h>
-
-#include <cstdlib>
-#include <string>
-
-#ifdef __ANDROID__
-#include <sys/system_properties.h>
-#endif
 
 // don't use the dispatch version, because we always hash a small amount
 // with a known size
@@ -48,51 +40,6 @@ namespace renderer::vulkan {
 
 // Size of the record containing what is needed for the pipeline construction (what is after is dynamic state)
 constexpr size_t record_pipeline_len = offsetof(GxmRecordState, vertex_streams);
-
-static bool thor_debug_hash_prefix_matches(const Sha256Hash &hash, const std::string &prefix);
-
-static bool fragment_program_fully_disabled(const GxmRecordState &record) {
-    const bool front_disabled = record.front_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED;
-    const bool back_disabled = record.back_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED;
-
-    return front_disabled && (back_disabled || record.two_sided == SCE_GXM_TWO_SIDED_DISABLED);
-}
-
-static bool prefer_back_depth_compare_for_culled_discard_pass(const GxmRecordState &record, const SceGxmProgram &fragment_shader, const VKFragmentProgram &fragment_program) {
-    // DOA Venus uses culled blended/discard character passes with front depth writes
-    // disabled, back depth writes enabled, and opposing front/back compare funcs. The
-    // historical Vulkan front-only compare lets background depth reject character
-    // pixels, making room frames draw over the character. Limit the back compare to
-    // that alpha/discard shape so opaque scenery keeps the older front-depth path.
-    return record.cull_mode == SCE_GXM_CULL_CCW
-        && fragment_shader.is_discard_used()
-        && static_cast<bool>(fragment_program.blending.blendEnable)
-        && record.front_depth_func != record.back_depth_func
-        && record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_DISABLED
-        && record.back_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED;
-}
-
-static bool keep_front_depth_compare_for_alpha_ordering(const GxmRecordState &record, const SceGxmProgram &fragment_shader, const VKFragmentProgram &fragment_program) {
-    if (record.cull_mode != SCE_GXM_CULL_CCW
-        || !fragment_shader.is_discard_used()
-        || !static_cast<bool>(fragment_program.blending.blendEnable)) {
-        return false;
-    }
-
-    // DOA Venus hair shader: the broader back-depth compare compatibility path makes
-    // thin alpha hair cards win over the face/body at some angles.
-    if (thor_debug_hash_prefix_matches(fragment_program.hash, "1c4c944"))
-        return true;
-
-    constexpr vk::ColorComponentFlags rgb_write_mask = vk::ColorComponentFlagBits::eR
-        | vk::ColorComponentFlagBits::eG
-        | vk::ColorComponentFlagBits::eB;
-    const bool writes_rgb_only = fragment_program.blending.colorWriteMask == rgb_write_mask;
-
-    // DOA Venus title statue/cloud passes. These RGB-only translucent shaders need
-    // the older front compare or sky/cloud material leaks onto the gold statue.
-    return writes_rgb_only && thor_debug_hash_prefix_matches(fragment_program.hash, "09d84287,92212945");
-}
 
 // structure containing everything needed to compile a pipeline
 struct CompileRequest {
@@ -309,18 +256,22 @@ void PipelineCache::set_async_compilation(bool enable) {
 
     if (enable) {
         LOG_INFO("Enabling asynchronous pipeline compilation with {} threads", nb_worker_threads);
-        // launch all the threads
+        worker_threads.reserve(nb_worker_threads);
         for (int i = 0; i < nb_worker_threads; i++) {
-            std::thread thread(&PipelineCache::compiler_thread, this, std::ref(*state.mem));
-            thread.detach();
+            worker_threads.emplace_back(&PipelineCache::compiler_thread, this, std::ref(*state.mem));
         }
     } else {
         LOG_INFO("Asynchronous pipeline compilation is now disabled");
 
-        // we assume that by the time set_async_compilation is called again with enable=true, all previous worker threads have already exited
-        for (int i = 0; i < nb_worker_threads; i++)
+        for (size_t i = 0; i < worker_threads.size(); i++)
             // if a thread receives nullptr, it exits
             pipeline_compile_queue.enqueue(nullptr);
+
+        for (auto &thread : worker_threads) {
+            if (thread.joinable())
+                thread.join();
+        }
+        worker_threads.clear();
     }
 }
 
@@ -422,6 +373,63 @@ void PipelineCache::save_pipeline_cache() {
     LOG_INFO("Pipeline cache saved");
 }
 
+void PipelineCache::cleanup() {
+    // stop threads
+    if (use_async_compilation)
+        set_async_compilation(false);
+
+    for (auto &[hash, pipeline] : pipelines)
+        state.device.destroy(pipeline);
+    pipelines.clear();
+
+    {
+        std::lock_guard<std::mutex> guard(shaders_mutex);
+        for (auto &[hash, shader] : shaders)
+            state.device.destroy(shader);
+        shaders.clear();
+    }
+
+    for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 2; j++)
+            for (int k = 0; k < 2; k++) {
+                for (auto &[fmt, pass] : render_passes[i][j][k])
+                    state.device.destroy(pass);
+                render_passes[i][j][k].clear();
+            }
+
+    for (auto &[fmt, pass] : shader_interlock_pass)
+        state.device.destroy(pass);
+    shader_interlock_pass.clear();
+
+    for (int i = 0; i < 17; i++)
+        for (int j = 0; j < 17; j++) {
+            state.device.destroy(pipeline_layouts[i][j]);
+            pipeline_layouts[i][j] = nullptr;
+        }
+
+    state.device.destroy(uniforms_layout);
+    uniforms_layout = nullptr;
+    state.device.destroy(attachments_layout);
+    attachments_layout = nullptr;
+
+    state.device.destroy(vertex_textures_layout[0]);
+    vertex_textures_layout[0] = nullptr;
+    fragment_textures_layout[0] = nullptr;
+
+    for (int i = 1; i <= 16; i++) {
+        state.device.destroy(vertex_textures_layout[i]);
+        vertex_textures_layout[i] = nullptr;
+        state.device.destroy(fragment_textures_layout[i]);
+        fragment_textures_layout[i] = nullptr;
+    }
+
+    state.device.destroy(pipeline_cache);
+    pipeline_cache = nullptr;
+
+    next_pipeline_cache_save = std::numeric_limits<uint64_t>::max();
+    nb_worker_threads = 0;
+}
+
 // Vulkan structs used to specify a specialization constant
 // Also, booleans in SPIRV are 32bit wide
 static const vk::SpecializationMapEntry srgb_entry = {
@@ -447,81 +455,6 @@ static const vk::SpecializationInfo srgb_info_false = {
     .pData = &srgb_entry_false
 };
 
-static std::string thor_debug_setting(const char *env_name, const char *android_prop_name) {
-    const char *env_value = std::getenv(env_name);
-    if (env_value != nullptr && env_value[0] != '\0')
-        return env_value;
-
-#ifdef __ANDROID__
-    char prop_value[PROP_VALUE_MAX] = {};
-    if (__system_property_get(android_prop_name, prop_value) > 0)
-        return prop_value;
-#else
-    (void)android_prop_name;
-#endif
-
-    return {};
-}
-
-static bool thor_debug_setting_disabled(std::string_view value) {
-    return value.empty() || value == "0" || value == "false" || value == "FALSE" || value == "off" || value == "OFF";
-}
-
-static bool thor_debug_hash_prefix_matches(const Sha256Hash &hash, const std::string &prefix) {
-    if (thor_debug_setting_disabled(prefix))
-        return false;
-
-    const std::string hash_text = hex_string(hash);
-    size_t token_begin = 0;
-    while (token_begin < prefix.size()) {
-        const size_t token_end = prefix.find_first_of(",; \t\r\n", token_begin);
-        std::string token = prefix.substr(token_begin, token_end == std::string::npos ? std::string::npos : token_end - token_begin);
-        if (token.rfind("0x", 0) == 0 || token.rfind("0X", 0) == 0)
-            token.erase(0, 2);
-
-        if (token == "1" || token == "all" || token == "ALL")
-            return true;
-        if (!token.empty() && hash_text.rfind(token, 0) == 0)
-            return true;
-
-        if (token_end == std::string::npos)
-            break;
-        token_begin = token_end + 1;
-    }
-    return false;
-}
-
-static bool thor_debug_hash_prefix_or_all_matches(const Sha256Hash &hash, const std::string &value) {
-    if (thor_debug_setting_disabled(value))
-        return false;
-
-    if (value == "1" || value == "all" || value == "ALL")
-        return true;
-
-    return thor_debug_hash_prefix_matches(hash, value);
-}
-
-static vk::CullModeFlags thor_gl_style_cull_mode(SceGxmCullMode cull_mode) {
-    switch (cull_mode) {
-    case SCE_GXM_CULL_NONE:
-        return vk::CullModeFlagBits::eNone;
-    case SCE_GXM_CULL_CW:
-        return vk::CullModeFlagBits::eFront;
-    case SCE_GXM_CULL_CCW:
-        return vk::CullModeFlagBits::eBack;
-    default:
-        return vk::CullModeFlagBits::eNone;
-    }
-}
-
-static vk::CullModeFlags thor_flipped_cull_mode(vk::CullModeFlags cull_mode) {
-    if (cull_mode == vk::CullModeFlagBits::eFront)
-        return vk::CullModeFlagBits::eBack;
-    if (cull_mode == vk::CullModeFlagBits::eBack)
-        return vk::CullModeFlagBits::eFront;
-    return cull_mode;
-}
-
 vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmProgram *program, const Sha256Hash &hash, bool is_vertex, bool maskupdate, MemState &mem, const shader::Hints &hints, bool is_srgb) {
     if (maskupdate)
         LOG_WARN_ONCE("Mask not implemented in the vulkan renderer!");
@@ -545,11 +478,8 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
             lock.unlock();
 
             // we shouldn't need atomics and the compiler shouldn't be able to optimize this
-            {
-                spin::Backoff backoff;
-                while (*shader_module == shader_compiling)
-                    backoff();
-            }
+            while (*shader_module == shader_compiling)
+                std::this_thread::yield();
         }
 
         if (*shader_module == nullptr)
@@ -662,17 +592,14 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force
     std::array<vk::SubpassDependency, 4> dependencies;
 
     // external dependency
-    // We want previous render-pass attachment writes to be visible before this
-    // pass either renders to attachments or samples a previously-rendered
-    // surface as a texture. Depth writes may happen in early or late fragment
-    // tests, so both stages must be included for depth-as-texture passes.
+    // we want the previous render pass to be done when we reach the fragment stage / stencil*depth testing
     dependencies[0] = {
         .srcSubpass = VK_SUBPASS_EXTERNAL,
         .dstSubpass = 0,
-        .srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eEarlyFragmentTests | vk::PipelineStageFlagBits::eLateFragmentTests,
-        .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eEarlyFragmentTests | vk::PipelineStageFlagBits::eFragmentShader,
+        .srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eLateFragmentTests,
+        .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eEarlyFragmentTests,
         .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eDepthStencilAttachmentWrite,
-        .dstAccessMask = vk::AccessFlagBits::eColorAttachmentRead | vk::AccessFlagBits::eDepthStencilAttachmentRead | vk::AccessFlagBits::eShaderRead
+        .dstAccessMask = vk::AccessFlagBits::eColorAttachmentRead | vk::AccessFlagBits::eDepthStencilAttachmentRead
     };
 
     if (state.features.support_shader_interlock && no_color) {
@@ -834,12 +761,11 @@ vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(con
         const SceGxmVertexStream &stream = vertex_program.streams[stream_index];
 
         const bool is_instanced = gxm::is_stream_instancing(static_cast<SceGxmIndexSource>(stream.indexSource));
-        const bool thor_align_stride4 = thor_debug_hash_prefix_or_all_matches(vkvert->hash, thor_debug_setting("VITA3K_RENDER_ALIGN_VERTEX_STRIDE4_VHASH", "debug.vita3k.render_align_vertex_stride4_vhash"));
 
 #ifdef __APPLE__
         const uint32_t stride = align(stream.stride, 4);
 #else
-        const uint32_t stride = thor_align_stride4 ? align(stream.stride, 4) : stream.stride;
+        const uint32_t stride = stream.stride;
 #endif
         binding_descr.push_back(vk::VertexInputBindingDescription{
             .binding = stream_index,
@@ -901,10 +827,8 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     const vk::PipelineShaderStageCreateInfo vertex_shader = retrieve_shader(vertex_program_gxm.program.get(mem), vertex_program.hash, true, fragment_program_gxm.is_maskupdate, mem, hints);
     const vk::PipelineShaderStageCreateInfo fragment_shader = retrieve_shader(gxm_fragment_shader, fragment_program.hash, false, fragment_program_gxm.is_maskupdate, mem, hints, record.is_gamma_corrected);
     const vk::PipelineShaderStageCreateInfo shader_stages[] = { vertex_shader, fragment_shader };
-    // Drop the fragment stage only when both renderable sides are disabled. Mixed
-    // front/back disable state is handled in the fragment shader from the uniform
-    // block, matching the GL backend and avoiding cull-side guesses here.
-    const bool is_fragment_disabled = fragment_program_fully_disabled(record) || gxm_fragment_shader->has_no_effect();
+    // disable the fragment shader if gxm asks us to
+    const bool is_fragment_disabled = record.front_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED || gxm_fragment_shader->has_no_effect();
     const uint32_t shader_stage_count = is_fragment_disabled ? 1U : 2U;
 
     const vk::PipelineInputAssemblyStateCreateInfo input_assembly{
@@ -913,38 +837,14 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
 
     const bool two_sided = (record.two_sided == SCE_GXM_TWO_SIDED_ENABLED);
 
-    const bool has_color_surface = static_cast<bool>(record.color_surface.data);
-    const bool use_shader_interlock = has_color_surface && state.features.support_shader_interlock && gxm_fragment_shader->is_frag_color_used();
-
-    const std::string thor_disable_depth_bias_prefix = thor_debug_setting("VITA3K_RENDER_DISABLE_DEPTH_BIAS_FHASH", "debug.vita3k.render_disable_depth_bias_fhash");
-    const bool thor_disable_depth_bias = thor_debug_hash_prefix_matches(fragment_program.hash, thor_disable_depth_bias_prefix);
-    const std::string thor_force_cull_none_value = thor_debug_setting("VITA3K_RENDER_FORCE_CULL_NONE_FHASH", "debug.vita3k.render_force_cull_none_fhash");
-    const bool thor_force_cull_none = thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_force_cull_none_value);
-    const bool thor_use_gl_cull = thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_USE_GL_CULL_FHASH", "debug.vita3k.render_use_gl_cull_fhash"));
-    const bool thor_flip_cull = thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FLIP_CULL_FHASH", "debug.vita3k.render_flip_cull_fhash"));
-    const bool thor_force_cull_front = thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FORCE_CULL_FRONT_FHASH", "debug.vita3k.render_force_cull_front_fhash"));
-    const bool thor_force_cull_back = thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FORCE_CULL_BACK_FHASH", "debug.vita3k.render_force_cull_back_fhash"));
-    const bool thor_front_face_cw = thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FRONT_FACE_CW_FHASH", "debug.vita3k.render_front_face_cw_fhash"));
-
-    vk::CullModeFlags cull_mode = thor_use_gl_cull ? thor_gl_style_cull_mode(record.cull_mode) : translate_cull_mode(record.cull_mode);
-    if (thor_flip_cull)
-        cull_mode = thor_flipped_cull_mode(cull_mode);
-    if (thor_force_cull_front)
-        cull_mode = vk::CullModeFlagBits::eFront;
-    if (thor_force_cull_back)
-        cull_mode = vk::CullModeFlagBits::eBack;
-    if (thor_force_cull_none)
-        cull_mode = vk::CullModeFlagBits::eNone;
+    const bool use_shader_interlock = state.features.support_shader_interlock && gxm_fragment_shader->is_frag_color_used();
 
     const vk::PipelineRasterizationStateCreateInfo rasterizer{
-        // GXM clips primitives outside the depth range; enabling Vulkan depth clamp globally
-        // can turn clipped scene geometry into large foreground slabs.
-        .depthClampEnable = VK_FALSE,
         .polygonMode = translate_polygon_mode(record.front_polygon_mode),
-        .cullMode = cull_mode,
+        .cullMode = translate_cull_mode(record.cull_mode),
         // front face is always counter clockwise
-        .frontFace = thor_front_face_cw ? vk::FrontFace::eClockwise : vk::FrontFace::eCounterClockwise,
-        .depthBiasEnable = thor_disable_depth_bias ? VK_FALSE : VK_TRUE,
+        .frontFace = vk::FrontFace::eCounterClockwise,
+        .depthBiasEnable = VK_TRUE,
         .lineWidth = 1.0f
     };
     const vk::PipelineMultisampleStateCreateInfo multisampling{
@@ -952,22 +852,10 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     };
     // depth and stencil tests are always enabled on the ps vita as there is almost no cost in doing so
     // on a tiled renderer
-    const std::string thor_depth_always_prefix = thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_ALWAYS_FHASH", "debug.vita3k.render_force_depth_always_fhash");
-    const std::string thor_depth_lequal_prefix = thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_LEQUAL_FHASH", "debug.vita3k.render_force_depth_lequal_fhash");
-    const bool thor_force_depth_always = thor_debug_hash_prefix_matches(fragment_program.hash, thor_depth_always_prefix);
-    const bool thor_force_depth_lequal = thor_debug_hash_prefix_matches(fragment_program.hash, thor_depth_lequal_prefix);
-    const bool thor_use_back_depth_write = thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_USE_BACK_DEPTH_WRITE_FHASH", "debug.vita3k.render_use_back_depth_write_fhash"));
-    const bool thor_disable_culled_discard_back_depth = thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_DISABLE_CULLED_DISCARD_BACK_DEPTH_FHASH", "debug.vita3k.render_disable_culled_discard_back_depth_fhash"));
-    const bool thor_prefer_back_depth_compare_for_culled_discard = !thor_disable_culled_discard_back_depth
-        && !keep_front_depth_compare_for_alpha_ordering(record, *gxm_fragment_shader, fragment_program)
-        && prefer_back_depth_compare_for_culled_discard_pass(record, *gxm_fragment_shader, fragment_program);
-    const bool thor_prefer_back_depth_compare = thor_prefer_back_depth_compare_for_culled_discard;
-    const SceGxmDepthFunc depth_func = thor_prefer_back_depth_compare ? record.back_depth_func : record.front_depth_func;
-    const SceGxmDepthWriteMode depth_write_mode = thor_use_back_depth_write ? record.back_depth_write_mode : record.front_depth_write_mode;
     const vk::PipelineDepthStencilStateCreateInfo ds_info{
         .depthTestEnable = VK_TRUE,
-        .depthWriteEnable = (depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED),
-        .depthCompareOp = thor_force_depth_always ? vk::CompareOp::eAlways : (thor_force_depth_lequal ? vk::CompareOp::eLessOrEqual : translate_depth_func(depth_func)),
+        .depthWriteEnable = (record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED),
+        .depthCompareOp = translate_depth_func(record.front_depth_func),
         .depthBoundsTestEnable = VK_FALSE,
         .stencilTestEnable = VK_TRUE,
         .front = convert_op_state(record.front_stencil_state_op),
@@ -979,7 +867,7 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         color_blending.flags = vk::PipelineColorBlendStateCreateFlagBits::eRasterizationOrderAttachmentAccessEXT;
 
     const bool frag_has_no_output = static_cast<bool>(gxm_fragment_shader->program_flags & SCE_GXM_PROGRAM_FLAG_OUTPUT_UNDEFINED);
-    if (!has_color_surface || is_fragment_disabled || frag_has_no_output || use_shader_interlock) {
+    if (is_fragment_disabled || frag_has_no_output || use_shader_interlock) {
         // The write mask must be empty as the lack of a fragment shader results in undefined values
         static const vk::PipelineColorBlendAttachmentState blending = {
             .blendEnable = VK_FALSE,
@@ -1050,50 +938,10 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     const VKFragmentProgram &fragment_program = *reinterpret_cast<VKFragmentProgram *>(
         fragment_program_gxm.renderer_data.get());
     key ^= fragment_program.blending_hash;
-    if (thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_ALWAYS_FHASH", "debug.vita3k.render_force_depth_always_fhash"))) {
-        key ^= 0x54A14151D0B16A1DULL;
-    }
-    if (thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_LEQUAL_FHASH", "debug.vita3k.render_force_depth_lequal_fhash"))) {
-        key ^= 0xD75CEB1DCE9F4C2BULL;
-    }
-    if (thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_USE_BACK_DEPTH_WRITE_FHASH", "debug.vita3k.render_use_back_depth_write_fhash"))) {
-        key ^= 0xBACCDEF1D7E12345ULL;
-    }
-    if (thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_DISABLE_CULLED_DISCARD_BACK_DEPTH_FHASH", "debug.vita3k.render_disable_culled_discard_back_depth_fhash"))) {
-        key ^= 0xD15AB1EDBACCD311ULL;
-    }
-    if (thor_debug_hash_prefix_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_DISABLE_DEPTH_BIAS_FHASH", "debug.vita3k.render_disable_depth_bias_fhash"))) {
-        key ^= 0xD1A5B1A5D15AB1E5ULL;
-    }
-    if (thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FORCE_CULL_NONE_FHASH", "debug.vita3k.render_force_cull_none_fhash"))) {
-        key ^= 0xC011F0CE113A11C5ULL;
-    }
-    if (thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_USE_GL_CULL_FHASH", "debug.vita3k.render_use_gl_cull_fhash"))) {
-        key ^= 0x61CC0115A11E0713ULL;
-    }
-    if (thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FLIP_CULL_FHASH", "debug.vita3k.render_flip_cull_fhash"))) {
-        key ^= 0xF11FC011D1A6500DULL;
-    }
-    if (thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FORCE_CULL_FRONT_FHASH", "debug.vita3k.render_force_cull_front_fhash"))) {
-        key ^= 0xF20A17FACE51D3A1ULL;
-    }
-    if (thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FORCE_CULL_BACK_FHASH", "debug.vita3k.render_force_cull_back_fhash"))) {
-        key ^= 0xBACCFACE51D3A11CULL;
-    }
-    if (thor_debug_hash_prefix_or_all_matches(fragment_program.hash, thor_debug_setting("VITA3K_RENDER_FRONT_FACE_CW_FHASH", "debug.vita3k.render_front_face_cw_fhash"))) {
-        key ^= 0xF20F1FACEC10C5E1ULL;
-    }
 
     // add the hash of the attribute and stream layout
     SceGxmVertexProgram &vertex_program_gxm = *record.vertex_program.get(mem);
     key ^= vertex_program_gxm.key_hash;
-    if (thor_debug_hash_prefix_or_all_matches(vertex_program_gxm.renderer_data->hash, thor_debug_setting("VITA3K_RENDER_ALIGN_VERTEX_STRIDE4_VHASH", "debug.vita3k.render_align_vertex_stride4_vhash"))) {
-        key ^= 0xA116ED5721DE0004ULL;
-    }
-
-    if (!record.color_surface.data) {
-        key ^= 0x9E3779B97F4A7C15ULL;
-    }
 
     // and also add the primitive type
     key ^= static_cast<uint64_t>(type);
@@ -1120,7 +968,7 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
 
     // get the correct renderpass here
     const SceGxmProgram *gxm_fragment_shader = fragment_program_gxm.program.get(mem);
-    const bool use_shader_interlock = record.color_surface.data && state.features.support_shader_interlock && gxm_fragment_shader->is_frag_color_used();
+    const bool use_shader_interlock = state.features.support_shader_interlock && gxm_fragment_shader->is_frag_color_used();
     const vk::RenderPass render_pass = use_shader_interlock ? context.current_shader_interlock_pass : context.current_render_pass;
     // update the shader hints
     context.shader_hints.color_format = record.color_surface.colorFormat;

@@ -19,7 +19,19 @@
 #include <renderer/state.h>
 #include <renderer/types.h>
 
+#include <dialog/state.h>
+#include <overlay/common_dialog.h>
+#include <overlay/display_manager.h>
+#include <overlay/font.h>
+#include <overlay/pause_overlay.h>
+#include <overlay/perf_overlay.h>
+#include <overlay/shader_compile_notice.h>
+#include <renderer/gl/state.h>
+#include <renderer/gl/types.h>
+#include <renderer/vulkan/functions.h>
+
 #include <gxm/functions.h>
+#include <util/log.h>
 
 namespace renderer {
 
@@ -220,19 +232,51 @@ void sync_surface_data(State &state, Context *ctx, const SceGxmNotification vert
 }
 
 bool create_context(State &state, std::unique_ptr<Context> &context) {
-    return renderer::send_single_command(state, nullptr, renderer::CommandOpcode::CreateContext, true, &context);
+    return renderer::send_single_command(state, nullptr, renderer::CommandOpcode::CreateContext, true, &context) > CommandErrorCodeNone;
 }
 
 void destroy_context(State &state, std::unique_ptr<Context> &context) {
     renderer::send_single_command(state, nullptr, renderer::CommandOpcode::DestroyContext, true, &context);
 }
 
+void destroy_context_during_shutdown(State &state, std::unique_ptr<Context> &context) {
+    assert(!state.render_thread);
+
+    if (state.current_backend == Backend::OpenGL) {
+        state.set_current();
+    }
+
+    if (state.context == context.get()) {
+        state.context = nullptr;
+    }
+
+    context.reset();
+}
+
 bool create_render_target(State &state, std::unique_ptr<RenderTarget> &rt, const SceGxmRenderTargetParams *params) {
-    return renderer::send_single_command(state, nullptr, renderer::CommandOpcode::CreateRenderTarget, true, &rt, params);
+    return renderer::send_single_command(state, nullptr, renderer::CommandOpcode::CreateRenderTarget, true, &rt, params) > CommandErrorCodeNone;
 }
 
 void destroy_render_target(State &state, std::unique_ptr<RenderTarget> &rt) {
     renderer::send_single_command(state, nullptr, renderer::CommandOpcode::DestroyRenderTarget, true, &rt);
+}
+
+void destroy_render_target_during_shutdown(State &state, std::unique_ptr<RenderTarget> &rt) {
+    assert(!state.render_thread);
+    if (!rt)
+        return;
+
+    switch (state.current_backend) {
+    case Backend::OpenGL:
+        state.set_current();
+        break;
+
+    case Backend::Vulkan:
+        vulkan::destroy(dynamic_cast<vulkan::VKState &>(state), rt);
+        break;
+    }
+
+    rt.reset();
 }
 
 void set_uniform_buffer(State &state, Context *ctx, const bool is_vertex_uniform, const int block_number, const std::uint16_t block_size, const Ptr<const void> buffer) {

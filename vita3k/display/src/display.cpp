@@ -27,14 +27,10 @@
 #include <motion/functions.h>
 #include <touch/functions.h>
 
-#include <algorithm>
-
 // Code heavily influenced by PPSSSPP's SceDisplay.cpp
 
 static constexpr int TARGET_FPS = 60;
 static constexpr int64_t TARGET_MICRO_PER_FRAME = 1000000LL / TARGET_FPS;
-static constexpr uint32_t DISPLAY_WAIT_OK = 0;
-static constexpr uint32_t DISPLAY_WAIT_NO_PIXEL_DATA = 0x80290008;
 // how many cycles do we need to see before we start predicting the next frame
 static constexpr int predict_threshold = 3;
 static constexpr int max_expected_swapchain_size = 6;
@@ -72,18 +68,15 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
                 if (vblank_wait_info.target_vcount <= display.vblank_count) {
                     ThreadStatePtr target_wait = vblank_wait_info.target_thread;
 
-                    if (!target_wait->complete_deferred_import_wait(display.abort.load() ? DISPLAY_WAIT_NO_PIXEL_DATA : DISPLAY_WAIT_OK))
-                        target_wait->update_status(ThreadStatus::run);
+                    target_wait->update_status(ThreadStatus::run);
                     display.vblank_wait_infos.erase(display.vblank_wait_infos.begin() + i);
                 } else {
                     i++;
                 }
             }
         }
-        const auto speed_percent = std::max<uint32_t>(display.speed_percent.load(), 1);
-        const auto target_micro_per_frame = std::max<int64_t>(1, (TARGET_MICRO_PER_FRAME * 100LL) / speed_percent);
         const auto time_ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-        const auto time_left = target_micro_per_frame - (time_ms % target_micro_per_frame);
+        const auto time_left = TARGET_MICRO_PER_FRAME - (time_ms % TARGET_MICRO_PER_FRAME);
         std::this_thread::sleep_for(std::chrono::microseconds(time_left));
     }
 }
@@ -92,20 +85,9 @@ void start_sync_thread(EmuEnvState &emuenv) {
     emuenv.display.vblank_thread = std::make_unique<std::thread>(vblank_sync_thread, std::ref(emuenv));
 }
 
-bool wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePtr &wait_thread, const uint64_t target_vcount, const bool is_cb) {
-    if (!wait_thread)
-        return false;
-
-    {
-        const std::lock_guard<std::mutex> guard(display.mutex);
-        if (!is_cb || display.vblank_callbacks.empty()) {
-            if (target_vcount <= display.vblank_count)
-                return false;
-            if (wait_thread->begin_deferred_import_wait()) {
-                display.vblank_wait_infos.push_back({ wait_thread, target_vcount, true });
-                return true;
-            }
-        }
+void wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePtr &wait_thread, const uint64_t target_vcount, const bool is_cb) {
+    if (!wait_thread) {
+        return;
     }
 
     {
@@ -115,10 +97,10 @@ bool wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePt
             const std::lock_guard<std::mutex> guard(display.mutex);
 
             if (target_vcount <= display.vblank_count)
-                return false;
+                return;
 
             wait_thread->update_status(ThreadStatus::wait);
-            display.vblank_wait_infos.push_back({ wait_thread, target_vcount, false });
+            display.vblank_wait_infos.push_back({ wait_thread, target_vcount });
         }
 
         wait_thread->status_cond.wait(thread_lock, [&]() {
@@ -135,8 +117,6 @@ bool wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePt
             }
         }
     }
-
-    return false;
 }
 
 static void reset_swapchain_cycle(DisplayState &display, Address sync_object) {
@@ -236,4 +216,38 @@ void update_prediction(EmuEnvState &emuenv, DisplayFrameInfo &frame) {
 
     // let predict_next_image reset the cycle if necessary
     display.predicted_cycles_seen = std::min(display.predicted_cycles_seen, 1U);
+}
+
+void DisplayState::deinit() {
+    abort = true;
+    if (vblank_thread && vblank_thread->joinable())
+        vblank_thread->join();
+
+    vblank_thread.reset();
+    abort = false;
+
+    {
+        const std::lock_guard<std::mutex> guard(mutex);
+        vblank_wait_infos.clear();
+        vblank_callbacks.clear();
+    }
+
+    {
+        const std::lock_guard<std::mutex> guard(display_info_mutex);
+        sce_frame = {};
+        next_rendered_frame = {};
+    }
+
+    predicted_frames.clear();
+    predicted_frame_position = static_cast<uint32_t>(-1);
+    predicted_cycles_seen = 0;
+    predicting = false;
+    current_sync_object = 0;
+
+    vblank_count = 0;
+    last_setframe_vblank_count = 0;
+
+    fps_hack = false;
+    // pretty sure we set this on game boot
+    fullscreen = false;
 }

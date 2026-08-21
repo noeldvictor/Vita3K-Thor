@@ -25,7 +25,6 @@
 struct MemState;
 struct FeatureState;
 struct Config;
-struct SDL_Window;
 struct DisplayState;
 struct GxmState;
 
@@ -73,8 +72,6 @@ void process_batches(State &state, const FeatureState &features, MemState &mem, 
 void start_render_thread(State &state, DisplayState &display, GxmState &gxm, MemState &mem, Config &config);
 void stop_render_thread(State &state);
 bool init(FrameHost &frame, std::unique_ptr<State> &state, Backend backend, const Config &config, const Root &root_paths);
-bool map_memory_now(State &state, MemState &mem, Ptr<void> address, uint32_t size);
-bool unmap_memory_now(State &state, MemState &mem, Ptr<void> address);
 
 void set_depth_bias(State &state, Context *ctx, bool is_front, int factor, int units);
 void set_depth_func(State &state, Context *ctx, bool is_front, SceGxmDepthFunc depth_func);
@@ -105,11 +102,14 @@ void sync_surface_data(State &state, Context *ctx, const SceGxmNotification vert
 
 bool create_context(State &state, std::unique_ptr<Context> &context);
 void destroy_context(State &state, std::unique_ptr<Context> &context);
+void destroy_context_during_shutdown(State &state, std::unique_ptr<Context> &context);
 bool create_render_target(State &state, std::unique_ptr<RenderTarget> &rt, const SceGxmRenderTargetParams *params);
 void destroy_render_target(State &state, std::unique_ptr<RenderTarget> &rt);
+void destroy_render_target_during_shutdown(State &state, std::unique_ptr<RenderTarget> &rt);
 
 Command *generic_command_allocate();
 void generic_command_free(Command *cmd);
+void destroy_command_payload(Command &cmd);
 
 template <typename... Args>
 bool add_command(Context *ctx, const CommandOpcode opcode, int *status, Args... arguments) {
@@ -161,12 +161,21 @@ int send_single_command(State &state, Context *ctx, const CommandOpcode opcode, 
         return 0;
 }
 
+struct VulkanDeviceInfo {
+    std::vector<std::string> gpu_names;
+    std::vector<int> mapping_method_masks;
+    bool custom_driver_requested = false;
+    bool custom_driver_loaded = false;
+};
+
+VulkanDeviceInfo enumerate_vulkan_devices(const std::string &custom_driver_name = {});
+
 namespace texture {
 
 // Paletted textures.
 void palette_texture_to_rgba_4(uint32_t *dst, const uint8_t *src, uint32_t width, uint32_t height, const uint32_t *palette);
 void palette_texture_to_rgba_8(uint32_t *dst, const uint8_t *src, uint32_t width, uint32_t height, const uint32_t *palette);
-void yuv420_texture_to_rgb(uint8_t *dst, const uint8_t *src, uint32_t width, uint32_t height, uint32_t layout_width, uint32_t layout_height, bool is_p3);
+void yuv420_texture_to_rgb(YUVConversionCache &cache, uint8_t *dst, const uint8_t *src, uint32_t width, uint32_t height, uint32_t layout_width, uint32_t layout_height, bool is_p3);
 const uint32_t *get_texture_palette(const SceGxmTexture &texture, const MemState &mem);
 
 // Assume fmt is a bcn format

@@ -420,19 +420,16 @@ EXPORT(SceInt32, _sceAppMgrLoadExec, const char *appPath, Ptr<char> const argv[]
 
     // Load exec executable
     vfs::FileBuffer exec_buffer;
-    if (vfs::read_current_app_file(exec_buffer, emuenv.io, emuenv.vita_fs_path, exec_path)) {
+    if (vfs::read_app_file(exec_buffer, emuenv.vita_fs_path, emuenv.io.app_path, exec_path)) {
         std::vector<std::string> exec_argv;
         if (argv && argv->get(emuenv.mem)) {
             size_t args = 0;
-            emuenv.load_exec_argv = "\"";
             for (auto i = 0; argv[i]; i++) {
-                LOG_INFO("sceAppMgrLoadExec run with argument at {}: {}", i, argv[i].get(emuenv.mem));
-                if (i)
-                    emuenv.load_exec_argv += ", ";
-                args += strlen(argv[i].get(emuenv.mem));
-                emuenv.load_exec_argv += argv[i].get(emuenv.mem);
+                const char *arg = argv[i].get(emuenv.mem);
+                LOG_INFO("sceAppMgrLoadExec run with argument at {}: {}", i, arg);
+                args += strlen(arg);
+                exec_argv.emplace_back(arg);
             }
-            emuenv.load_exec_argv += "\"";
 
             if (args > 1024)
                 return RET_ERROR(SCE_APPMGR_ERROR_TOO_LONG_ARGV);

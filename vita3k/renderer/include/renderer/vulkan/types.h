@@ -19,7 +19,6 @@
 
 #include <renderer/texture_cache.h>
 #include <renderer/types.h>
-#include <renderer/vulkan/surface_cache.h>
 #include <shader/uniform_block.h>
 #include <vkutil/objects.h>
 
@@ -81,6 +80,8 @@ struct VKTextureCache : public TextureCache {
     vk::Sampler get_retrieved_sampler() const {
         return samplers[last_bound_sampler_index];
     }
+
+    void cleanup();
 };
 
 struct FrameDescriptor {
@@ -239,18 +240,6 @@ struct VKContext : public renderer::Context {
 
     vk::DescriptorImageInfo vertex_textures[SCE_GXM_MAX_TEXTURE_UNITS] = {};
     vk::DescriptorImageInfo fragment_textures[SCE_GXM_MAX_TEXTURE_UNITS] = {};
-    SceGxmTexture vertex_gxm_textures[SCE_GXM_MAX_TEXTURE_UNITS] = {};
-    SceGxmTexture fragment_gxm_textures[SCE_GXM_MAX_TEXTURE_UNITS] = {};
-    bool vertex_gxm_texture_valid[SCE_GXM_MAX_TEXTURE_UNITS] = {};
-    bool fragment_gxm_texture_valid[SCE_GXM_MAX_TEXTURE_UNITS] = {};
-    TextureLookupDebugInfo vertex_texture_debug[SCE_GXM_MAX_TEXTURE_UNITS] = {};
-    TextureLookupDebugInfo fragment_texture_debug[SCE_GXM_MAX_TEXTURE_UNITS] = {};
-    uint32_t vertex_uniform_addresses[SCE_GXM_REAL_MAX_UNIFORM_BUFFER] = {};
-    uint32_t fragment_uniform_addresses[SCE_GXM_REAL_MAX_UNIFORM_BUFFER] = {};
-    uint32_t vertex_uniform_sizes[SCE_GXM_REAL_MAX_UNIFORM_BUFFER] = {};
-    uint32_t fragment_uniform_sizes[SCE_GXM_REAL_MAX_UNIFORM_BUFFER] = {};
-    bool vertex_uniform_valid[SCE_GXM_REAL_MAX_UNIFORM_BUFFER] = {};
-    bool fragment_uniform_valid[SCE_GXM_REAL_MAX_UNIFORM_BUFFER] = {};
 
     bool vertex_uniform_storage_allocated = false;
     bool fragment_uniform_storage_allocated = false;
@@ -303,7 +292,6 @@ struct VKContext : public renderer::Context {
     vk::Framebuffer current_shader_interlock_framebuffer = nullptr;
     // we need the format or image for some cases
     vkutil::Image *current_color_base_image;
-    vkutil::Image *current_ds_base_image;
     vk::Format current_color_format;
     vk::ImageView current_color_view;
     vk::ImageView current_ds_view;
@@ -312,8 +300,6 @@ struct VKContext : public renderer::Context {
     bool in_renderpass = false;
     bool refresh_pipeline = false;
     bool is_first_scene_draw = false;
-    uint32_t debug_scene_draw_count = 0;
-    bool debug_scene_stop_after_active = false;
     // command buffer used to record the current scene
     vk::CommandBuffer render_cmd{};
     // command buffer used for commands that need to be executed before render_cmd (mostly because they can't be done during a render pass)
@@ -356,6 +342,7 @@ private:
 };
 
 struct VKRenderTarget : public renderer::RenderTarget {
+    vk::Device device;
     uint16_t width;
     uint16_t height;
     vkutil::Image color;
@@ -375,14 +362,11 @@ struct VKRenderTarget : public renderer::RenderTarget {
     int cmd_buffer_idx = 0;
 
     VKRenderTarget(VKState &state, const SceGxmRenderTargetParams &params);
-    ~VKRenderTarget() override = default;
+    ~VKRenderTarget() override;
 };
 
 struct VKFragmentProgram : public renderer::FragmentProgram {
     vk::PipelineColorBlendAttachmentState blending;
     uint64_t blending_hash;
-    bool has_blend_info = false;
-    SceGxmBlendInfo blend_info{};
-    uint32_t program_flags = 0;
 };
 } // namespace renderer::vulkan

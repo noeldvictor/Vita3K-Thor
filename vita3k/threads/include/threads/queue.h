@@ -24,7 +24,6 @@
 #include <memory>
 #include <mutex>
 #include <queue>
-#include <vector>
 
 template <typename T>
 class Queue {
@@ -92,26 +91,12 @@ public:
         condempty_.notify_one();
     }
 
-    bool try_push(const T &item) {
-        {
-            std::unique_lock<std::mutex> mlock(mutex_);
-            if (aborted || queue_.size() == maxPendingCount_) {
-                return false;
-            }
-            queue_.push(item);
-        }
-        condempty_.notify_one();
-        return true;
-    }
-
     size_t size() {
-        std::unique_lock<std::mutex> mlock(mutex_);
         return queue_.size();
     }
 
-    bool empty() {
-        std::unique_lock<std::mutex> mlock(mutex_);
-        return queue_.empty();
+    void wake() {
+        condempty_.notify_all();
     }
 
     void abort() {
@@ -120,40 +105,14 @@ public:
         cond_.notify_all();
     }
 
+    bool is_aborted() const {
+        return aborted.load(std::memory_order_relaxed);
+    }
+
     void reset() {
-        {
-            std::unique_lock<std::mutex> mlock(mutex_);
-            std::queue<T> empty;
-            std::swap(queue_, empty);
-            aborted = false;
-        }
-        condempty_.notify_all();
-        cond_.notify_all();
-    }
-
-    std::vector<T> snapshot() {
-        std::unique_lock<std::mutex> mlock(mutex_);
-        std::vector<T> items;
-        items.reserve(queue_.size());
-        std::queue<T> copy = queue_;
-        while (!copy.empty()) {
-            items.push_back(copy.front());
-            copy.pop();
-        }
-        return items;
-    }
-
-    void replace(const std::vector<T> &items) {
-        {
-            std::unique_lock<std::mutex> mlock(mutex_);
-            std::queue<T> empty;
-            std::swap(queue_, empty);
-            for (const T &item : items)
-                queue_.push(item);
-            aborted = false;
-        }
-        condempty_.notify_all();
-        cond_.notify_all();
+        std::queue<T> empty;
+        std::swap(queue_, empty);
+        aborted = false;
     }
 
     void wait_empty() {

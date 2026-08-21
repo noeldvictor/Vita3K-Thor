@@ -113,6 +113,8 @@ private:
 public:
     explicit GLSurfaceCache();
 
+    void cleanup();
+
     GLuint retrieve_color_surface_texture_handle(const State &state, std::uint16_t width, std::uint16_t height, const std::uint16_t pixel_stride,
         const SceGxmColorBaseFormat color_format, Ptr<void> address, SurfaceTextureRetrievePurpose purpose, std::uint32_t &swizzle,
         std::uint16_t *stored_height = nullptr, std::uint16_t *stored_width = nullptr);
@@ -128,8 +130,6 @@ public:
     void set_render_target(const GLRenderTarget *new_target) {
         target = new_target;
     }
-
-    void reset_runtime_cache();
 
     GLuint sourcing_color_surface_for_presentation(Ptr<const void> address, uint32_t width, uint32_t height, const std::uint32_t pitch, float *uvs, const float res_multiplier, SceFVector2 &texture_size);
     std::vector<uint32_t> dump_frame(Ptr<const void> address, uint32_t width, uint32_t height, uint32_t pitch, float res_multiplier, bool support_get_texture_sub_image);

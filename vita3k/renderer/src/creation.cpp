@@ -22,6 +22,7 @@
 #include <renderer/types.h>
 
 #include <renderer/gl/functions.h>
+#include <renderer/gl/state.h>
 #include <renderer/vulkan/functions.h>
 #include <renderer/vulkan/state.h>
 
@@ -87,7 +88,9 @@ COMMAND(handle_create_context) {
 COMMAND(handle_destroy_context) {
     TRACY_FUNC_COMMANDS(handle_destroy_context);
     std::unique_ptr<Context> *ctx = helper.pop<std::unique_ptr<Context> *>();
+
     ctx->reset();
+    renderer.context = nullptr;
 
     complete_command(renderer, helper, 0);
 }
@@ -114,8 +117,6 @@ COMMAND(handle_create_render_target) {
     }
     (*render_target)->multisample_mode = params->multisampleMode;
     (*render_target)->has_macroblock_sync = (params->flags & SCE_GXM_RENDER_TARGET_MACROTILE_SYNC);
-    (*render_target)->macroblock_width = 0;
-    (*render_target)->macroblock_height = 0;
     if ((*render_target)->has_macroblock_sync) {
         // there are between 1 and 4 macroblocks in the x and y direction
         uint16_t nb_macroblocks_x = (params->flags >> 8) & 0b111;
@@ -135,7 +136,6 @@ COMMAND(handle_destroy_render_target) {
 
     switch (renderer.current_backend) {
     case Backend::OpenGL:
-        // nothing to do
         break;
 
     case Backend::Vulkan:
@@ -174,21 +174,6 @@ COMMAND(handle_memory_unmap) {
     }
 
     complete_command(renderer, helper, 0);
-}
-
-bool map_memory_now(State &state, MemState &mem, const Ptr<void> address, const uint32_t size) {
-    if (state.current_backend != Backend::Vulkan)
-        return false;
-
-    return dynamic_cast<vulkan::VKState &>(state).map_memory(mem, address, size);
-}
-
-bool unmap_memory_now(State &state, MemState &mem, const Ptr<void> address) {
-    if (state.current_backend != Backend::Vulkan)
-        return false;
-
-    dynamic_cast<vulkan::VKState &>(state).unmap_memory(mem, address);
-    return true;
 }
 
 // Client
@@ -274,7 +259,7 @@ bool init(FrameHost &frame, std::unique_ptr<State> &state, Backend backend, cons
         state = std::make_unique<gl::GLState>();
         state->frame = &frame;
         state->init_paths(root_paths);
-        if (!gl::create(window, state, config))
+        if (!gl::create(state, config))
             return false;
         break;
 
@@ -282,7 +267,7 @@ bool init(FrameHost &frame, std::unique_ptr<State> &state, Backend backend, cons
         state = std::make_unique<vulkan::VKState>(config.current_config.gpu_idx);
         state->frame = &frame;
         state->init_paths(root_paths);
-        if (!vulkan::create(window, state, config))
+        if (!vulkan::create(state, config))
             return false;
         break;
 

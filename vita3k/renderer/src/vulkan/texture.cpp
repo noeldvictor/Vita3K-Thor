@@ -27,33 +27,7 @@
 #include <util/align.h>
 #include <vkutil/vkutil.h>
 
-#include <cstdlib>
-
-#ifdef __ANDROID__
-#include <sys/system_properties.h>
-#endif
-
 namespace renderer::vulkan {
-
-static bool vulkan_texture_debug_flag(const char *env_name, const char *android_prop_name) {
-    const char *env_value = std::getenv(env_name);
-    if (env_value != nullptr && env_value[0] != '\0') {
-        const std::string_view value(env_value);
-        return value != "0" && value != "false" && value != "False" && value != "FALSE" && value != "off" && value != "OFF" && value != "no" && value != "NO";
-    }
-
-#ifdef __ANDROID__
-    char prop_value[PROP_VALUE_MAX] = {};
-    if (__system_property_get(android_prop_name, prop_value) > 0) {
-        const std::string_view value(prop_value);
-        return value != "0" && value != "false" && value != "False" && value != "FALSE" && value != "off" && value != "OFF" && value != "no" && value != "NO";
-    }
-#else
-    (void)android_prop_name;
-#endif
-
-    return false;
-}
 
 // return if this format can be used to read a depth stencil buffer
 // Only return the formats we support and make sense for now
@@ -83,6 +57,31 @@ static bool is_depth_stencil_compatible_format(SceGxmTextureBaseFormat format, b
 VKTextureCache::VKTextureCache(VKState &state)
     : state(state) {}
 
+void VKTextureCache::cleanup() {
+    for (auto &entry : textures) {
+        if (entry.texture.image)
+            entry.texture.destroy();
+    }
+
+    for (auto &sampler : samplers)
+        state.device.destroy(sampler);
+    samplers.clear();
+
+    for (auto &staging : staging_buffers) {
+        staging.buffer.destroy();
+        staging.waiting_fence = nullptr;
+        staging.scene_timestamp = ~0;
+        staging.frame_timestamp = ~0;
+    }
+
+    staging_idx = 0;
+    last_waited_scene = 0;
+    current_texture = nullptr;
+    gxm_texture = nullptr;
+    cmd_buffer = nullptr;
+    is_texture_transfer_ready = false;
+}
+
 void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTexture texture, const Config &config) {
     // why are we doing this here?
     // well textures are synced right before the draw
@@ -103,12 +102,8 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
     if (index >= SCE_GXM_MAX_TEXTURE_UNITS) {
         // Vertex textures
         context.shader_hints.vertex_textures[index - SCE_GXM_MAX_TEXTURE_UNITS] = format;
-        context.vertex_gxm_textures[index - SCE_GXM_MAX_TEXTURE_UNITS] = texture;
-        context.vertex_gxm_texture_valid[index - SCE_GXM_MAX_TEXTURE_UNITS] = true;
     } else {
         context.shader_hints.fragment_textures[index] = format;
-        context.fragment_gxm_textures[index] = texture;
-        context.fragment_gxm_texture_valid[index] = true;
     }
 
     std::optional<TextureLookupResult> lookup_result = std::nullopt;
@@ -137,34 +132,17 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
         lookup_result = TextureLookupResult{
             image.view,
             image.layout,
-            image.format,
-            TextureLookupDebugInfo{
-                .source = TextureLookupDebugSource::GuestTexture,
-                .mode = TextureLookupDebugMode::TextureCache,
-                .texture_addr = static_cast<uint32_t>(texture.data_addr << 2),
-                .surface_addr = static_cast<uint32_t>(texture.data_addr << 2),
-                .texture_width = gxm::get_width(texture),
-                .texture_height = gxm::get_height(texture),
-                .source_width = image.width,
-                .source_height = image.height,
-                .requested_format = static_cast<uint32_t>(base_format),
-                .image_format = static_cast<uint32_t>(image.format)
-            }
+            image.format
         };
     }
 
     const vk::ImageLayout layout = vkutil::get_underlying_layout(lookup_result->layout);
     const vk::Sampler sampler = context.state.texture_cache.get_retrieved_sampler();
 
-    TextureLookupDebugInfo &debug_info = is_vertex
-        ? context.vertex_texture_debug[index - SCE_GXM_MAX_TEXTURE_UNITS]
-        : context.fragment_texture_debug[index];
-    debug_info = lookup_result->debug;
-
     vk::DescriptorImageInfo &image_info = is_vertex
         ? context.vertex_textures[index - SCE_GXM_MAX_TEXTURE_UNITS]
         : context.fragment_textures[index];
-    if (image_info.sampler != sampler || image_info.imageView != lookup_result->view || image_info.imageLayout != layout) {
+    if (image_info.sampler != sampler || image_info.imageView != lookup_result->view) {
         image_info = vk::DescriptorImageInfo{
             .sampler = sampler,
             .imageView = lookup_result->view,
@@ -321,26 +299,6 @@ bool VKTextureCache::init(const bool hashless_texture_cache, const fs::path &tex
     // support_dxt might have already been set by the bcn patch on android
     support_dxt |= static_cast<bool>(dxt_support.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage);
 
-    const bool force_bcn_decompress = vulkan_texture_debug_flag("VITA3K_FORCE_BCN_DECOMPRESS", "debug.vita3k.force_bcn_decompress");
-    const bool allow_native_bcn = vulkan_texture_debug_flag("VITA3K_ALLOW_NATIVE_BCN", "debug.vita3k.allow_native_bcn");
-#ifdef __ANDROID__
-    const bool turnip_bcn_decompress = state.is_adreno_turnip
-        && !allow_native_bcn;
-#else
-    constexpr bool turnip_bcn_decompress = false;
-#endif
-    // Native Vulkan BCn sampling is opt-in for now. Several GXM block-swizzled
-    // textures render correctly through the existing CPU path but corrupt when
-    // uploaded as native compressed images on Windows and Adreno/Turnip.
-    const bool default_bcn_decompress = !allow_native_bcn;
-    if (force_bcn_decompress || turnip_bcn_decompress || default_bcn_decompress) {
-        const char *reason = force_bcn_decompress ? "by debug override"
-            : (turnip_bcn_decompress ? "for Adreno/Turnip" : "by default");
-        support_dxt = false;
-        LOG_INFO("BCn/DXT native texture sampling disabled {}; BCn textures will be CPU-decompressed",
-            reason);
-    }
-
     // check for astc support
     const vk::FormatProperties astc_support = state.physical_device.getFormatProperties(vk::Format::eAstc4x4SrgbBlock);
     support_astc = static_cast<bool>(astc_support.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage);
@@ -350,7 +308,6 @@ bool VKTextureCache::init(const bool hashless_texture_cache, const fs::path &tex
 
 void VKTextureCache::select(size_t index, const SceGxmTexture &texture) {
     current_texture = &textures[index];
-    gxm_texture = &texture;
     is_texture_transfer_ready = false;
 }
 
@@ -440,27 +397,6 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
     if (is_cube)
         memory_needed *= 6;
     current_texture->memory_needed = align(memory_needed, 16);
-
-    if (state.renderer_trace_gxm_state) {
-        LOG_INFO("ThorRenderTrace texture configure scene={} cache={} addr=0x{:08X} type={} fmt=0x{:08X} base=0x{:08X} size={}x{} mips={}/{} vk_format={} cube={} bytes={} hash=0x{:016X} use_hash={} imported={}",
-            current_scene_timestamp,
-            current_info ? current_info->index : -1,
-            static_cast<uint32_t>(gxm_texture.data_addr << 2),
-            static_cast<uint32_t>(gxm_texture.texture_type()),
-            static_cast<uint32_t>(format),
-            static_cast<uint32_t>(base_format),
-            width,
-            height,
-            mip_count,
-            gxm_texture.true_mip_count(),
-            vk::to_string(vk_format),
-            is_cube,
-            current_texture->memory_needed,
-            current_info ? current_info->hash : 0,
-            current_info ? current_info->use_hash : false,
-            current_info ? current_info->is_imported : false);
-    }
-
     vkutil::Image &image = current_texture->texture;
 
     // In case the cache is full, no need to put the previous image in the destroy queue
@@ -578,38 +514,8 @@ void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, ui
     }
 
     if (staging_buffer.used_so_far + upload_size > staging_buffer.buffer.size) {
-        LOG_ERROR("Staging buffer size left ({}) is too small for texture size {}! scene={} cache={} addr=0x{:08X} mip={} face={} size={}x{} stride={} buffer_height={} base=0x{:08X}",
-            staging_buffer.buffer.size - staging_buffer.used_so_far,
-            upload_size,
-            current_scene_timestamp,
-            current_info ? current_info->index : -1,
-            current_info ? static_cast<uint32_t>(current_info->texture.data_addr << 2) : 0,
-            mip_index,
-            face,
-            width,
-            height,
-            pixels_per_stride,
-            buffer_height,
-            static_cast<uint32_t>(base_format));
+        LOG_ERROR("Staging buffer size left ({}) is too small for texture size {}!", staging_buffer.buffer.size - staging_buffer.used_so_far, upload_size);
         return;
-    }
-
-    if (state.renderer_trace_gxm_state) {
-        LOG_INFO("ThorRenderTrace texture upload scene={} cache={} addr=0x{:08X} mip={} face={} size={}x{} stride={} buffer_height={} base=0x{:08X} bytes={} staging_used={}/{} hash=0x{:016X}",
-            current_scene_timestamp,
-            current_info ? current_info->index : -1,
-            current_info ? static_cast<uint32_t>(current_info->texture.data_addr << 2) : 0,
-            mip_index,
-            face,
-            width,
-            height,
-            pixels_per_stride,
-            buffer_height,
-            static_cast<uint32_t>(base_format),
-            static_cast<uint64_t>(upload_size),
-            static_cast<uint64_t>(staging_buffer.used_so_far),
-            static_cast<uint64_t>(staging_buffer.buffer.size),
-            current_info ? current_info->hash : 0);
     }
 
     memcpy(static_cast<uint8_t *>(staging_buffer.buffer.mapped_data) + staging_buffer.used_so_far, text_data, upload_size);

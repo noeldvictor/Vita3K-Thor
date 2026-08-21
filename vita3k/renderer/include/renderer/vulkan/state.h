@@ -17,8 +17,6 @@
 
 #pragma once
 
-#include <string>
-
 #include <renderer/state.h>
 #include <renderer/types.h>
 
@@ -118,10 +116,6 @@ struct VKState : public renderer::State {
     bool support_standard_layout = false;
     bool support_rasterized_order_access = false;
     LinuxSurfaceType linux_surface_type = LinuxSurfaceType::Unknown;
-
-    // Thor: renderer debug labels and the current title, used by scene.cpp tracing
-    bool support_debug_utils_labels = false;
-    std::string game_id;
 
 #ifdef __ANDROID__
     bool support_android_buffer_import = false;

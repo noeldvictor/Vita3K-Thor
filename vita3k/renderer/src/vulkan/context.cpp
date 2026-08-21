@@ -27,98 +27,32 @@
 #include <util/log.h>
 #include <util/overloaded.h>
 
-#include <array>
-#include <cstdlib>
-#include <string>
-
-#ifdef __ANDROID__
-#include <sys/system_properties.h>
-#endif
-
 namespace renderer::vulkan {
-
-static std::string thor_debug_setting(const char *env_name, const char *android_prop_name) {
-    const char *env_value = std::getenv(env_name);
-    if (env_value != nullptr && env_value[0] != '\0')
-        return env_value;
-
-#ifdef __ANDROID__
-    char prop_value[PROP_VALUE_MAX] = {};
-    if (__system_property_get(android_prop_name, prop_value) > 0)
-        return prop_value;
-#else
-    (void)android_prop_name;
-#endif
-
-    return {};
-}
-
-static bool thor_debug_setting_disabled(std::string_view value) {
-    return value.empty() || value == "0" || value == "false" || value == "FALSE" || value == "off" || value == "OFF";
-}
-
-static bool thor_debug_force_depth_clear(const SceGxmDepthStencilSurface *surface) {
-    const std::string prefix = thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_CLEAR_DS", "debug.vita3k.render_force_depth_clear_ds");
-    if (thor_debug_setting_disabled(prefix) || surface == nullptr)
-        return false;
-
-    return fmt::format("{:08X}", surface->depth_data.address()).rfind(prefix, 0) == 0;
-}
-
-static bool thor_debug_force_color_clear(const SceGxmColorSurface *surface) {
-    const std::string prefix = thor_debug_setting("VITA3K_RENDER_FORCE_COLOR_CLEAR_ADDR", "debug.vita3k.render_force_color_clear_addr");
-    if (thor_debug_setting_disabled(prefix) || surface == nullptr || surface->data.address() == 0)
-        return false;
-
-    return fmt::format("{:08X}", surface->data.address()).rfind(prefix, 0) == 0;
-}
-
-static float thor_debug_depth_clear_value(float default_value) {
-    const std::string value_text = thor_debug_setting("VITA3K_RENDER_FORCE_DEPTH_CLEAR_VALUE", "debug.vita3k.render_force_depth_clear_value");
-    if (value_text.empty())
-        return default_value;
-
-    char *end = nullptr;
-    const float value = std::strtof(value_text.c_str(), &end);
-    if (end == value_text.c_str())
-        return default_value;
-
-    return value;
-}
-
-static vk::ClearColorValue thor_debug_color_clear_value() {
-    std::array<float, 4> values{ 0.0f, 0.0f, 0.0f, 0.0f };
-    const std::string value_text = thor_debug_setting("VITA3K_RENDER_FORCE_COLOR_CLEAR_VALUE", "debug.vita3k.render_force_color_clear_value");
-    if (value_text.empty())
-        return vk::ClearColorValue{ values };
-
-    const char *cursor = value_text.c_str();
-    for (float &component : values) {
-        char *end = nullptr;
-        const float parsed = std::strtof(cursor, &end);
-        if (end == cursor)
-            break;
-        component = parsed;
-        cursor = (*end == ',' || *end == ' ') ? end + 1 : end;
-    }
-
-    return vk::ClearColorValue{ values };
-}
 
 void VKContext::wait_thread_function(const MemState &mem) {
     // try to wait for multiple fences at the same time if possible
     std::vector<vk::Fence> fences;
 
     auto wait_for_fences = [&]() {
-        if (!fences.empty()) {
-            auto result = state.device.waitForFences(fences, VK_TRUE, std::numeric_limits<uint64_t>::max());
-            if (result != vk::Result::eSuccess) {
-                LOG_ERROR("Could not wait for fences.");
-                assert(false);
+        while (!fences.empty()) {
+            // timeout so we can check for shutdown
+            auto result = state.device.waitForFences(fences, VK_TRUE, 100'000'000ULL);
+            if (result == vk::Result::eSuccess) {
+                // don't reset them
+                fences.clear();
                 return;
             }
-            // don't reset them
+            if (result == vk::Result::eTimeout) {
+                if (state.request_queue.is_aborted()) {
+                    fences.clear();
+                    return;
+                }
+                continue;
+            }
+            LOG_ERROR("Could not wait for fences.");
+            assert(false);
             fences.clear();
+            return;
         }
     };
 
@@ -242,17 +176,6 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
         force_load = false;
         force_store = false;
     }
-    if (thor_debug_force_depth_clear(ds_surface_fin)) {
-        force_load = false;
-    }
-    const bool force_full_macroblock = rt->has_macroblock_sync
-        && rt->multisample_mode
-        && context.record.color_surface.downscale
-        && state.is_adreno_turnip;
-    if (force_full_macroblock && ds_surface_fin != nullptr) {
-        force_load = true;
-        force_store = true;
-    }
     if (context.state.features.support_shader_interlock)
         // we must always store the depth stencil
         force_store = true;
@@ -265,57 +188,6 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.current_framebuffer = framebuffer.standard;
     context.current_shader_interlock_framebuffer = framebuffer.shader_interlock;
     context.current_color_base_image = framebuffer.base_image;
-    context.current_ds_base_image = framebuffer.ds_base_image;
-
-    context.debug_scene_draw_count = 0;
-    context.debug_scene_stop_after_active = false;
-    if (state.renderer_trace_gxm_state) {
-        const uint32_t color_addr = color_surface_fin ? color_surface_fin->data.address() : 0;
-        const uint32_t color_format = color_surface_fin ? static_cast<uint32_t>(color_surface_fin->colorFormat) : 0;
-        const uint32_t color_type = color_surface_fin ? static_cast<uint32_t>(color_surface_fin->surfaceType) : 0;
-        const uint32_t color_stride = color_surface_fin ? color_surface_fin->strideInPixels : 0;
-        const uint32_t color_width = color_surface_fin ? color_surface_fin->width : 0;
-        const uint32_t color_height = color_surface_fin ? color_surface_fin->height : 0;
-        const uint32_t ds_depth_addr = ds_surface_fin ? ds_surface_fin->depth_data.address() : 0;
-        const uint32_t ds_stencil_addr = ds_surface_fin ? ds_surface_fin->stencil_data.address() : 0;
-        const uint32_t ds_format = ds_surface_fin ? static_cast<uint32_t>(ds_surface_fin->get_format()) : 0;
-        const uint32_t ds_type = ds_surface_fin ? static_cast<uint32_t>(ds_surface_fin->get_type()) : 0;
-        const uint32_t ds_stride = ds_surface_fin ? ds_surface_fin->get_stride() : 0;
-
-        LOG_INFO("ThorRenderTrace scene frame={} scene={} rt={}x{} msaa={} macroblock={}x{} macroblock_sync={} force_full_macroblock={} sync={} mapping={} shader_interlock={} texture_viewport={} adreno_stock={} adreno_turnip={} color_addr=0x{:08X} color={}x{} stride={} fmt=0x{:08X} type=0x{:08X} downscale={} ds_depth=0x{:08X} ds_stencil=0x{:08X} ds_stride={} ds_fmt=0x{:08X} ds_type=0x{:08X} ds_load={} ds_store={} ds_effective_load={} ds_effective_store={} ds_clear_depth={}",
-            context.frame_timestamp,
-            context.scene_timestamp,
-            rt->width,
-            rt->height,
-            static_cast<uint32_t>(rt->multisample_mode),
-            rt->macroblock_width,
-            rt->macroblock_height,
-            rt->has_macroblock_sync,
-            force_full_macroblock,
-            state.disable_surface_sync ? "off" : "on",
-            static_cast<int>(state.mapping_method),
-            state.features.support_shader_interlock,
-            state.features.use_texture_viewport,
-            state.is_adreno_stock,
-            state.is_adreno_turnip,
-            color_addr,
-            color_width,
-            color_height,
-            color_stride,
-            color_format,
-            color_type,
-            color_surface_fin ? static_cast<bool>(color_surface_fin->downscale) : false,
-            ds_depth_addr,
-            ds_stencil_addr,
-            ds_stride,
-            ds_format,
-            ds_type,
-            ds_surface_fin ? static_cast<bool>(ds_surface_fin->force_load) : false,
-            ds_surface_fin ? static_cast<bool>(ds_surface_fin->force_store) : false,
-            force_load,
-            force_store,
-            ds_surface_fin ? thor_debug_depth_clear_value(ds_surface_fin->background_depth) : 0.0f);
-    }
 
     // make sure we are not keeping any texture from the previous pass
     // (textures can be still bound even though they are not used)
@@ -324,16 +196,12 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     for (int i = 0; i < 16; i++) {
         context.vertex_textures[i].sampler = nullptr;
         context.fragment_textures[i].sampler = nullptr;
-        context.vertex_gxm_texture_valid[i] = false;
-        context.fragment_gxm_texture_valid[i] = false;
-        context.vertex_texture_debug[i] = {};
-        context.fragment_texture_debug[i] = {};
     }
 
     context.is_first_scene_draw = true;
     context.last_macroblock_x = ~0;
     context.last_macroblock_y = ~0;
-    context.ignore_macroblock = force_full_macroblock;
+    context.ignore_macroblock = false;
 }
 
 void VKContext::start_recording(bool first_in_scene) {
@@ -478,31 +346,13 @@ void VKContext::start_render_pass(bool create_descriptor_set) {
     }
 
     // only the depth-stencil attachment may be clear if not force loaded
-    float clear_depth = record.depth_stencil_surface.background_depth;
-    if (thor_debug_force_depth_clear(&record.depth_stencil_surface))
-        clear_depth = thor_debug_depth_clear_value(clear_depth);
-
     std::array<vk::ClearValue, 2> curr_clear_values{};
     curr_clear_values[1].depthStencil = vk::ClearDepthStencilValue{
-        .depth = clear_depth,
+        .depth = record.depth_stencil_surface.background_depth,
         .stencil = record.depth_stencil_surface.stencil
     };
     curr_renderpass_info.setClearValues(curr_clear_values);
     render_cmd.beginRenderPass(curr_renderpass_info, vk::SubpassContents::eInline);
-
-    if (thor_debug_force_color_clear(&record.color_surface)) {
-        vk::ClearAttachment clear_attachment{
-            .aspectMask = vk::ImageAspectFlagBits::eColor,
-            .colorAttachment = 0,
-            .clearValue = { .color = thor_debug_color_clear_value() }
-        };
-        vk::ClearRect clear_rect{
-            .rect = curr_renderpass_info.renderArea,
-            .baseArrayLayer = 0,
-            .layerCount = 1
-        };
-        render_cmd.clearAttachments(clear_attachment, clear_rect);
-    }
 
     // set the renderpass info ready in case we need to switch between classic and framebuffer fetch usage
     curr_renderpass_info.setClearValues(nullptr);
