@@ -39,6 +39,28 @@ if(ANDROID)
 	string(APPEND CMAKE_CXX_FLAGS " -Wl,-Bsymbolic -Wno-unused-command-line-argument")
 	string(APPEND CMAKE_C_FLAGS " -Wl,-Bsymbolic -Wno-unused-command-line-argument")
 
+	# Thor: raise the AArch64 baseline off Armv8.0.
+	#
+	# The NDK's arm64-v8a ABI is Armv8.0-A, which has no LSE atomics, so clang
+	# routes every atomic RMW through an outline helper - a call into a stub that
+	# loads a global "does this CPU have LSE" byte, branches on it, and only then
+	# runs the one instruction that was wanted. A RelWithDebInfo libVita3K.so has
+	# 25,276 such call sites; the two hottest are the once-only log guards and
+	# shared_ptr refcounting. Naming a baseline that includes LSE makes clang
+	# inline the LDADD/CAS/SWP instead, so those all collapse to one instruction
+	# with no call, no flag load and no branch.
+	#
+	# Armv8.2-A is deliberately conservative - every arm64 Android device from
+	# 2017 on satisfies it, and the Thor's cores (X3/A715/A710/A510) are Armv9.
+	# Set to armv8-a to restore the stock NDK baseline.
+	if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+		set(VITA3K_ARM64_BASELINE "armv8.2-a+lse+fp16+dotprod" CACHE STRING
+			"-march value for arm64-v8a builds")
+		string(APPEND CMAKE_CXX_FLAGS " -march=${VITA3K_ARM64_BASELINE}")
+		string(APPEND CMAKE_C_FLAGS " -march=${VITA3K_ARM64_BASELINE}")
+		message(STATUS "AArch64 baseline: ${VITA3K_ARM64_BASELINE}")
+	endif()
+
 	if(CMAKE_BUILD_TYPE STREQUAL "Release")
 		set(CMAKE_C_VISIBILITY_PRESET hidden)
 		set(CMAKE_CXX_VISIBILITY_PRESET hidden)

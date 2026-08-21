@@ -37,7 +37,7 @@ path directly.
 **Android** needs vcpkg and the NDK gradle pins:
 
 ```
-export VCPKG_ROOT=.../SteamPortableTools/toolchains/vcpkg
+export VCPKG_ROOT=~/Documents/SteamPortableTools/toolchains/vcpkg
 export ANDROID_NDK_HOME=.../Android/Sdk/ndk/29.0.14206865
 cd android && ./gradlew assembleReldebug -Pandroid.injected.build.abi=arm64-v8a
 ```

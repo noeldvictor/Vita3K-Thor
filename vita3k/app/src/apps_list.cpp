@@ -582,7 +582,19 @@ bool set_app_info(EmuEnvState &emuenv, const std::string &app_path) {
     const auto &state = emuenv.app.apps_list;
     std::lock_guard<std::mutex> lock(state.mutex);
 
-    const auto it = std::find_if(state.apps.begin(), state.apps.end(), [&](const AppEntry &app) { return app.path == app_path; });
+    auto it = std::find_if(state.apps.begin(), state.apps.end(), [&](const AppEntry &app) { return app.path == app_path; });
+
+    // Thor: an installed app has path == title id, so the lookup above is the
+    // whole story for those. A virtual cartridge does not - its path is where
+    // the archive lives on the card. Both frontends identify an app by title id
+    // (it is the only identifier the Android bridge even exposes), so fall back
+    // to that. Cartridge candidates are deduplicated by title id during the scan,
+    // so this cannot be ambiguous.
+    if (it == state.apps.end()) {
+        it = std::find_if(state.apps.begin(), state.apps.end(), [&](const AppEntry &app) {
+            return app.virtual_cartridge && app.title_id == app_path;
+        });
+    }
 
     if (it == state.apps.end()) {
         LOG_ERROR("{} not found in apps list.", app_path);

@@ -46,11 +46,18 @@
 #define LOG_ERROR_IF(flag, ...) LOG_IF(LOG_ERROR, flag, __VA_ARGS__)
 #define LOG_CRITICAL_IF(flag, ...) LOG_IF(LOG_CRITICAL, flag, __VA_ARGS__)
 
-#define LOG_ONCE(log_function, ...)         \
-    do {                                    \
-        static std::atomic_flag has_logged; \
-        if (!has_logged.test_and_set())     \
-            log_function(__VA_ARGS__);      \
+// The relaxed test is what makes this cheap. test_and_set() alone is an atomic
+// read-modify-write on every pass, and these guards sit on hot paths - RET_ERROR
+// expands to one, so every HLE stub that returns an error pays it, and the
+// texture cache has several per upload. Once the message has been logged the
+// exchange can never succeed again, so a plain relaxed load answers the question
+// and the RMW only runs the first time through each site.
+#define LOG_ONCE(log_function, ...)                     \
+    do {                                                \
+        static std::atomic_flag has_logged;             \
+        if (!has_logged.test(std::memory_order_relaxed) \
+            && !has_logged.test_and_set())              \
+            log_function(__VA_ARGS__);                  \
     } while (0)
 
 #define LOG_TRACE_ONCE(...) LOG_ONCE(LOG_TRACE, __VA_ARGS__)
