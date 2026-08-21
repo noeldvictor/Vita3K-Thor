@@ -31,18 +31,19 @@
 #include <util/containers.h>
 #include <util/types.h>
 
+#include <emuenv/app_launch_request.h>
+
 #include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
 struct ThreadState;
-
-struct SDL_Thread;
 
 struct CodecEngineBlock;
 
@@ -57,8 +58,6 @@ typedef std::shared_ptr<ThreadState> ThreadStatePtr;
 typedef std::map<SceUID, CodecEngineBlock> CodecEngineBlocks;
 typedef std::map<SceUID, Ptr<Ptr<void>>> SlotToAddress;
 typedef std::map<SceUID, ThreadStatePtr> ThreadStatePtrs;
-typedef std::shared_ptr<SDL_Thread> ThreadPtr;
-typedef std::map<SceUID, ThreadPtr> ThreadPtrs;
 typedef std::map<SceUID, SceKernelModulePtr> SceKernelModuleInfoPtrs;
 typedef std::map<SceUID, CallbackPtr> CallbackPtrs;
 typedef unordered_map_fast<uint32_t, Address> ExportNids;
@@ -161,6 +160,7 @@ struct KernelState {
     // kubridge exception handlers (DABT=0, PABT=1, UNDEF=2)
     static constexpr int EXCEPTION_HANDLER_MAX = 3;
     std::atomic<Address> exception_handlers[EXCEPTION_HANDLER_MAX]{};
+    std::condition_variable thread_deleted_cond;
 
     SceUID get_next_uid() {
         return next_uid++;
@@ -185,10 +185,23 @@ struct KernelState {
     ThreadStatus snapshot_thread_status_unlocked(SceUID thread_id, ThreadStatus current_status) const;
     void set_paused_thread_status_for_restore(SceUID thread_id, ThreadStatus status);
 
+    Ptr<void> client_vtable = Ptr<void>(0);
+    Ptr<Address> shellsvc_client = Ptr<Address>(0);
+    Ptr<void> libc_dso_handle_main = Ptr<void>(0);
+
+    void deinit(MemState &mem);
+    // Thor: quickstate teardown path, kept alongside upstream's process_exit()
     void exit_delete_all_threads();
     bool is_threads_paused() const { return threads_pause_active.load(); }
     void pause_threads();
     void resume_threads();
+
+    // Kill all guest threads and block until they have exited. Must only be called from a host thread.
+    void process_exit();
+    std::function<void(int, std::optional<AppLaunchRequest>)> process_exit_callback;
+    // Request process exit. Safe to call from a guest thread. Returns immediately.
+    // The registered process_exit_callback is invoked to notify the host layer.
+    void request_process_exit(int res, std::optional<AppLaunchRequest> relaunch = std::nullopt);
 
     void set_memory_watch(bool enabled);
     void invalidate_jit_cache(Address start, size_t length);

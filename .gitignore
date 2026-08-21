@@ -16,8 +16,11 @@ build
 CMakeUserPresets.json
 compile_commands.json
 # AppImage builder
-appimage/linuxdeploy.AppImage
+appimage/linuxdeploy*.AppImage
 /.gdbinit
+
+# generated linux metainfo.xml
+dist/linux/*.metainfo.xml
 
 # Built application files
 *.apk

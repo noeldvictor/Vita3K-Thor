@@ -64,4 +64,30 @@ struct CtrlState {
 
     // last vsync the data was read
     uint64_t last_vcount[5] = {}; // sceCtrl ports.
+
+    VirtualKeyboardState keyboard_state;
+
+    std::atomic<bool> overlay_input_intercepted{ false };
+
+    struct OverlayMouseState {
+        std::atomic<float> x{ 0.f };
+        std::atomic<float> y{ 0.f };
+        std::atomic<bool> pressed{ false };
+    };
+    OverlayMouseState overlay_mouse;
+
+    void reset_runtime() {
+        controllers.clear();
+        controllers_num = 0;
+        has_motion_support = false;
+        std::fill_n(free_ports, SCE_CTRL_MAX_WIRELESS_NUM, true);
+        input_mode = SCE_CTRL_MODE_DIGITAL;
+        input_mode_ext = SCE_CTRL_MODE_DIGITAL;
+        std::fill_n(last_vcount, 5, 0);
+        keyboard_state = {};
+        overlay_input_intercepted.store(false, std::memory_order_relaxed);
+        overlay_mouse.x.store(0.f, std::memory_order_relaxed);
+        overlay_mouse.y.store(0.f, std::memory_order_relaxed);
+        overlay_mouse.pressed.store(false, std::memory_order_relaxed);
+    }
 };

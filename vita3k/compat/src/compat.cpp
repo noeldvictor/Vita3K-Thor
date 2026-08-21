@@ -19,12 +19,9 @@
 
 #include <compat/functions.h>
 #include <compat/state.h>
-
-#include <dialog/state.h>
-#include <emuenv/state.h>
-#include <gui/state.h>
-
-#include <util/net_utils.h>
+#include <config/state.h>
+#include <fmt/std.h>
+#include <util/log.h>
 
 #include <miniz.h>
 #include <pugixml.hpp>
@@ -64,22 +61,116 @@ static bool extract_zip_file(const char *zip_filename, const fs::path &output_pa
         return false;
     }
 
-    // Get the number of files in the ZIP archive
-    mz_uint num_files = mz_zip_reader_get_num_files(&zip_archive);
-    for (mz_uint i = 0; i < num_files; i++) {
-        // Get information about the current file in the ZIP archive
-        mz_zip_archive_file_stat file_stat;
-        if (!mz_zip_reader_file_stat(&zip_archive, i, &file_stat)) {
-            LOG_ERROR("Failed to get file information from ZIP archive");
-            mz_zip_reader_end(&zip_archive);
+    const auto compatibility = doc.child("compatibility");
+    const uint32_t ver = compatibility.attribute("version").as_uint();
+    if (ver != db_version) {
+        LOG_WARN("DB version {} does not match expected {}", ver, db_version);
+    }
+
+    state.db_issue_count = compatibility.attribute("issue_count").as_uint();
+    state.db_updated_at = compatibility.attribute("iso_db_updated_at").as_string();
+    state.compat_db_loaded = false;
+    state.app_compat_db.clear();
+
+    for (const auto &app : compatibility) {
+        const std::string title_id = app.attribute("title_id").as_string();
+        const uint32_t issue_id = app.child("issue_id").text().as_uint();
+
+        if (!title_id.contains("PCS") && (title_id != "NPXS10007")) {
+            LOG_WARN_IF(state.log_compat_warn, "Title ID {} is invalid. Please check GitHub issue {} and verify it!", title_id, issue_id);
+            continue;
+        }
+
+        if (state.app_compat_db.contains(title_id)) {
+            LOG_WARN_IF(state.log_compat_warn, "Duplicate title ID {} (issue {})", title_id, issue_id);
+            continue;
+        }
+
+        auto compat_state = UNKNOWN;
+        for (const auto &label : app.child("labels")) {
+            const auto s = label_to_state(label.text().as_uint());
+            if (s != UNKNOWN)
+                compat_state = s;
+        }
+
+        if (compat_state == UNKNOWN)
+            LOG_WARN_IF(state.log_compat_warn, "App with Title ID {} has an issue but no status label. Please check GitHub issue {} and request a status label be added.", title_id, issue_id);
+
+        state.app_compat_db[title_id] = {
+            .issue_id = issue_id,
+            .state = compat_state,
+            .updated_at = app.child("updated_at").text().as_llong(),
+        };
+    }
+
+    state.compat_db_loaded = !state.app_compat_db.empty();
+    return state.compat_db_loaded;
+}
+
+std::optional<UpdateInfo> parse_ver_resp(const CompatState &state, const std::string &body) {
+    static const std::regex re(
+        R"(Last updated: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}Z))");
+
+    std::smatch match;
+    if (!std::regex_search(body, match, re)) {
+        spdlog::error("Compat: Could not find version string in response");
+        return std::nullopt;
+    }
+
+    const std::string latest = match[1].str();
+    return UpdateInfo{
+        .latest_ver = latest,
+        .needs_update = latest != state.db_updated_at,
+    };
+}
+
+bool load_from_disk(CompatState &state, const std::filesystem::path &cache_path) {
+    const auto db_path = cache_path / "app_compat_db.xml";
+
+    if (!std::filesystem::exists(db_path)) {
+        LOG_WARN("DB not found at {}", db_path);
+        return false;
+    }
+
+    std::ifstream file(db_path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        LOG_ERROR("Could not open {}", db_path);
+        return false;
+    }
+
+    const auto size = static_cast<size_t>(file.tellg());
+    file.seekg(0);
+
+    std::vector<uint8_t> buffer(size);
+    if (!file.read(reinterpret_cast<char *>(buffer.data()), size)) {
+        LOG_ERROR("Failed to read {}", db_path);
+        return false;
+    }
+
+    return parse_xml(state, buffer.data(), buffer.size());
+}
+
+bool install_db(CompatState &state, const std::filesystem::path &cache_path,
+    std::span<const uint8_t> zip_data, const std::string &new_version) {
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_mem(&zip, zip_data.data(), zip_data.size(), 0)) {
+        LOG_ERROR("Failed to open zip from memory");
+        return false;
+    }
+
+    const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < num_files; ++i) {
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &stat)) {
+            LOG_ERROR("Failed to stat file {} in zip", i);
+            mz_zip_reader_end(&zip);
             return false;
         }
 
-        // Extract the file from the ZIP archive
-        fs::path output_file_path = output_path / file_stat.m_filename;
-        if (!mz_zip_reader_extract_to_file(&zip_archive, i, fs_utils::path_to_utf8(output_file_path).c_str(), 0)) {
-            LOG_ERROR("Failed to extract file from ZIP archive to path: {}", output_file_path);
-            mz_zip_reader_end(&zip_archive);
+        const auto out_path = cache_path / stat.m_filename;
+        if (!mz_zip_reader_extract_to_file(&zip, i, reinterpret_cast<const char *>(out_path.u8string().c_str()), 0)) {
+            LOG_ERROR("Failed to extract {} from zip", stat.m_filename);
+            mz_zip_reader_end(&zip);
             return false;
         }
     }

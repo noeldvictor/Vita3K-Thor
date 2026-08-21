@@ -1004,9 +1004,14 @@ static void display_entry_thread(EmuEnvState &emuenv) {
         SceGxmSyncObject *new_sync = display_callback->new_sync.get(emuenv.mem);
 
         // sceGxmDisplayQueueAddEntry waits for both buffers to complete
-        renderer::wishlist(old_sync, display_callback->old_sync_timestamp);
-        if (old_sync != new_sync)
-            renderer::wishlist(new_sync, display_callback->new_sync_timestamp);
+        if (renderer::wishlist(old_sync, display_callback->old_sync_timestamp) == renderer::SyncWaitResult::Shutdown) {
+            return;
+        }
+        if (old_sync != new_sync) {
+            if (renderer::wishlist(new_sync, display_callback->new_sync_timestamp) == renderer::SyncWaitResult::Shutdown) {
+                return;
+            }
+        }
 
         // now we can remove the thread from the display queue
         display_queue.pop();
@@ -1336,6 +1341,59 @@ static bool gxmEnsureContextHostState(EmuEnvState &emuenv, SceGxmContext *ctx, c
         reinterpret_cast<uintptr_t>(ctx));
     return true;
 }
+
+static int destroy_gxm_context(EmuEnvState &emuenv, Ptr<SceGxmContext> context_ptr, const bool force_backend_destroy) {
+    if (!context_ptr) {
+        return static_cast<int>(SCE_GXM_ERROR_INVALID_POINTER);
+    }
+
+    return destroy_gxm_context(emuenv, context_ptr.get(emuenv.mem), context_ptr.address(), force_backend_destroy);
+}
+
+namespace gxm {
+
+void destroy_all_contexts(EmuEnvState &emuenv, const bool force_backend_destroy) {
+    if (emuenv.gxm.immediate_context != 0) {
+        const int result = destroy_gxm_context(emuenv, Ptr<SceGxmContext>(emuenv.gxm.immediate_context), force_backend_destroy);
+        if (result < 0) {
+            LOG_WARN("Failed to destroy immediate GXM context during cleanup: {}", log_hex(result));
+        }
+    }
+
+    while (!emuenv.gxm.deferred_contexts.empty()) {
+        const auto [context, context_addr] = *emuenv.gxm.deferred_contexts.begin();
+        const int result = destroy_gxm_context(emuenv, context, context_addr, force_backend_destroy);
+        if (result < 0) {
+            LOG_WARN("Failed to destroy deferred GXM context during cleanup: {}", log_hex(result));
+            emuenv.gxm.deferred_contexts.erase(context);
+        }
+    }
+}
+
+void invalidate_sync_objects(GxmState &gxm) {
+    std::lock_guard<std::mutex> lock(gxm.sync_objects_mutex);
+    for (SceGxmSyncObject *sync_object : gxm.sync_objects) {
+        {
+            std::lock_guard<std::mutex> sync_lock(sync_object->lock);
+            sync_object->being_deleted = true;
+        }
+        sync_object->cond.notify_all();
+    }
+}
+
+void shutdown(EmuEnvState &emuenv) {
+    emuenv.display.abort = true;
+    emuenv.renderer->notification_ready.notify_all();
+    emuenv.gxm.display_queue.abort();
+    emuenv.renderer->render_abort = true;
+    invalidate_sync_objects(emuenv.gxm);
+    emuenv.renderer->command_finish_one.notify_all();
+
+    // wait for any deferred GXM callback to finish before continuing shutdown
+    const std::lock_guard<std::mutex> callback_guard(emuenv.gxm.callback_lock);
+}
+
+} // namespace gxm
 
 struct SceGxmRenderTarget {
     std::unique_ptr<renderer::RenderTarget> renderer;
@@ -5257,6 +5315,10 @@ EXPORT(int, sceGxmSyncObjectCreate, Ptr<SceGxmSyncObject> *syncObject) {
     }
 
     renderer::create(syncObject->get(emuenv.mem), *emuenv.renderer);
+    {
+        std::lock_guard<std::mutex> lock(emuenv.gxm.sync_objects_mutex);
+        emuenv.gxm.sync_objects.emplace(syncObject->get(emuenv.mem));
+    }
 
     return 0;
 }
@@ -5266,6 +5328,10 @@ EXPORT(int, sceGxmSyncObjectDestroy, Ptr<SceGxmSyncObject> syncObject) {
     if (!syncObject)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 
+    {
+        std::lock_guard<std::mutex> lock(emuenv.gxm.sync_objects_mutex);
+        emuenv.gxm.sync_objects.erase(syncObject.get(emuenv.mem));
+    }
     renderer::destroy(syncObject.get(emuenv.mem), *emuenv.renderer);
     free(emuenv.mem, syncObject);
 

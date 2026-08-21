@@ -83,7 +83,7 @@ static void init_reg_template(RegMgrState &regmgr, const std::string &reg) {
             continue;
 
         // Found the base register
-        if (line.find("[BASE") != std::string::npos) {
+        if (line.contains("[BASE")) {
             // Register the names with their numbers
             while (std::getline(iss, line) && (line != "[REG-BAS")) {
                 if (line.empty())
@@ -396,9 +396,9 @@ void set_str_value(RegMgrState &regmgr, const std::string &category, const std::
     save_system_dreg(regmgr);
 }
 
-void init_regmgr(RegMgrState &regmgr, const fs::path &pref_path) {
+void init_regmgr(RegMgrState &regmgr, const fs::path &vita_fs_path) {
     // Load the registry template
-    const auto reg = decryptRegistryFile(pref_path / "os0/kd/registry.db0");
+    const auto reg = decryptRegistryFile(vita_fs_path / "os0/kd/registry.db0");
     if (reg.empty()) {
         return;
     }
@@ -407,7 +407,7 @@ void init_regmgr(RegMgrState &regmgr, const fs::path &pref_path) {
     init_reg_template(regmgr, reg);
 
     // Initialize the system.dreg
-    regmgr.system_dreg_path = pref_path / "vd0/registry/system.dreg";
+    regmgr.system_dreg_path = vita_fs_path / "vd0/registry/system.dreg";
     regmgr.system_dreg.clear();
     if (!load_system_dreg(regmgr)) {
         LOG_WARN("Failed to load system.dreg, attempting to create it");

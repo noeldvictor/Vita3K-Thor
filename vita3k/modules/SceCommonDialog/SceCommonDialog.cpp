@@ -36,6 +36,20 @@
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceCommonDialog);
 
+namespace {
+void complete_trophy_setup_dialog(DialogState &dialog) {
+    std::lock_guard<std::recursive_mutex> lock(dialog.mutex);
+    if (dialog.type != TROPHY_SETUP_DIALOG || dialog.status != SCE_COMMON_DIALOG_STATUS_RUNNING)
+        return;
+
+    if (SDL_GetTicks() < dialog.trophy.tick)
+        return;
+
+    dialog.status = SCE_COMMON_DIALOG_STATUS_FINISHED;
+    dialog.result = SCE_COMMON_DIALOG_RESULT_OK;
+}
+} // namespace
+
 template <>
 std::string to_debug_str<SceMsgDialogProgressBarTarget>(const MemState &mem, SceMsgDialogProgressBarTarget type) {
     switch (type) {
@@ -703,6 +717,7 @@ EXPORT(int, sceNpTrophySetupDialogAbort) {
 
 EXPORT(int, sceNpTrophySetupDialogGetResult, Ptr<SceNpTrophySetupDialogResult> result) {
     TRACY_FUNC(sceNpTrophySetupDialogGetResult, result);
+    complete_trophy_setup_dialog(emuenv.common_dialog);
     if (emuenv.common_dialog.type != TROPHY_SETUP_DIALOG || emuenv.common_dialog.status != SCE_COMMON_DIALOG_STATUS_FINISHED)
         return RET_ERROR(SCE_COMMON_DIALOG_ERROR_NOT_FINISHED);
 
@@ -712,6 +727,7 @@ EXPORT(int, sceNpTrophySetupDialogGetResult, Ptr<SceNpTrophySetupDialogResult> r
 
 EXPORT(int, sceNpTrophySetupDialogGetStatus) {
     TRACY_FUNC(sceNpTrophySetupDialogGetStatus);
+    complete_trophy_setup_dialog(emuenv.common_dialog);
     return emuenv.common_dialog.status;
 }
 
@@ -728,6 +744,7 @@ EXPORT(int, sceNpTrophySetupDialogInit, const Ptr<SceNpTrophySetupDialogParam> p
 
 EXPORT(int, sceNpTrophySetupDialogTerm) {
     TRACY_FUNC(sceNpTrophySetupDialogTerm);
+    complete_trophy_setup_dialog(emuenv.common_dialog);
     if (emuenv.common_dialog.type != TROPHY_SETUP_DIALOG)
         return RET_ERROR(SCE_COMMON_DIALOG_ERROR_NOT_IN_USE);
 
@@ -857,7 +874,7 @@ static void check_save_file(const uint32_t index, EmuEnvState &emuenv, const cha
     auto &icon_buf_tmp = emuenv.common_dialog.savedata.icon_buffer[index];
     icon_buf_tmp.clear();
 
-    SceUID fd = open_file(emuenv.io, construct_slotparam_path(emuenv.common_dialog.savedata.slot_id[index]).c_str(), SCE_O_RDONLY, emuenv.pref_path, export_name);
+    SceUID fd = open_file(emuenv.io, construct_slotparam_path(emuenv.common_dialog.savedata.slot_id[index]).c_str(), SCE_O_RDONLY, emuenv.vita_fs_path, export_name);
     if (fd < 0) {
         auto empty_param = emuenv.common_dialog.savedata.list_empty_param[index];
         if (empty_param) {
@@ -868,7 +885,7 @@ static void check_save_file(const uint32_t index, EmuEnvState &emuenv, const cha
             if (iconPath && (std::strlen(iconPath) > 0)) {
                 auto device = device::get_device(iconPath);
                 const auto thumbnail_path = translate_path(empty_param->iconPath.get(emuenv.mem), device, emuenv.io.device_paths);
-                vfs::read_file(VitaIoDevice::ux0, icon_buf_tmp, emuenv.pref_path, thumbnail_path);
+                vfs::read_file(VitaIoDevice::ux0, icon_buf_tmp, emuenv.vita_fs_path, thumbnail_path);
             } else if (iconBuf && (iconBufSize > 0)) {
                 icon_buf_tmp.insert(icon_buf_tmp.end(), iconBuf, iconBuf + iconBufSize);
             }
@@ -886,7 +903,7 @@ static void check_save_file(const uint32_t index, EmuEnvState &emuenv, const cha
         emuenv.common_dialog.savedata.has_date[index] = true;
         auto device = device::get_device(slot_param.iconPath);
         auto thumbnail_path = translate_path(slot_param.iconPath, device, emuenv.io.device_paths);
-        vfs::read_file(device, thumbnail_buffer, emuenv.pref_path, thumbnail_path);
+        vfs::read_file(device, thumbnail_buffer, emuenv.vita_fs_path, thumbnail_path);
         icon_buf_tmp = thumbnail_buffer;
     }
 }
@@ -991,10 +1008,10 @@ static void handle_sys_message(SceSaveDataDialogSystemMessageParam *sys_message,
     case SCE_SAVEDATA_DIALOG_SYSMSG_TYPE_CONFIRM_CANCEL:
         switch (emuenv.common_dialog.savedata.display_type) {
         case SCE_SAVEDATA_DIALOG_TYPE_SAVE:
-            emuenv.common_dialog.savedata.msg = load["cancel_loading"];
+            emuenv.common_dialog.savedata.msg = lang::get(lang::str::cancel_saving);
             break;
         case SCE_SAVEDATA_DIALOG_TYPE_LOAD:
-            emuenv.common_dialog.savedata.msg = save["cancel_saving"];
+            emuenv.common_dialog.savedata.msg = lang::get(lang::str::cancel_loading);
             break;
         case SCE_SAVEDATA_DIALOG_TYPE_DELETE:
             emuenv.common_dialog.savedata.msg = deleting["cancel_deleting"];

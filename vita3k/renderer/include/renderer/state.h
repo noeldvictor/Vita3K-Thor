@@ -19,6 +19,7 @@
 
 #include <features/state.h>
 #include <renderer/commands.h>
+#include <renderer/frame_host.h>
 #include <renderer/types.h>
 #include <threads/queue.h>
 
@@ -36,10 +37,25 @@ enum struct MappingMethod : int {
     DoubleBuffer,
     ExernalHost,
     PageTable,
-    NativeBuffer
+    NativeBuffer // Only available in android
 };
 
 namespace renderer {
+
+struct PerformanceOverlayState {
+    bool enabled = false;
+    int position = 0;
+    int detail = 0;
+
+    uint32_t fps = 0;
+    uint32_t avg_fps = 0;
+    uint32_t min_fps = 0;
+    uint32_t max_fps = 0;
+    uint32_t ms_per_frame = 0;
+    std::array<float, 20> fps_values = {};
+    uint32_t fps_values_count = 0;
+    uint32_t current_fps_offset = 0;
+};
 
 class TextureCache;
 
@@ -56,8 +72,11 @@ struct State {
     fs::path log_path;
     fs::path shared_path;
     fs::path static_assets;
+    fs::path vita_fs_path;
     fs::path shaders_path;
     fs::path shaders_log_path;
+
+    FrameHost *frame = nullptr;
 
     Backend current_backend;
 #ifdef __ANDROID__
@@ -99,6 +118,26 @@ struct State {
     bool is_adreno_stock = false;
     bool is_adreno_turnip = false;
     bool renderer_trace_gxm_state = false;
+
+    // Non-owning pointer to the overlay display manager
+    overlay::display_manager *overlay_manager = nullptr;
+    bool show_compile_shaders = true;
+
+    uint32_t m_shaders_compiled_count = 0;
+    std::chrono::steady_clock::time_point m_shaders_compiled_time{};
+
+    std::atomic<bool> paused{ false };
+
+    // Non-owning pointer to dialog state for native common dialog overlays.
+    DialogState *common_dialog = nullptr;
+    int sys_date_format = 0;
+    int sys_lang = 0;
+    int sys_button = 0;
+
+    PerformanceOverlayState perf_overlay;
+
+    void update_overlays();
+    void init_overlay_font_dirs();
 
     virtual bool init() = 0;
     virtual void late_init(const Config &cfg, const std::string_view game_id, MemState &mem) = 0;
@@ -168,6 +207,7 @@ struct State {
         log_path = root_paths.get_log_path();
         shared_path = root_paths.get_shared_path();
         static_assets = root_paths.get_static_assets_path();
+        vita_fs_path = root_paths.get_vita_fs_path();
     }
 
     void set_app(const char *title_id, const char *self_name) {

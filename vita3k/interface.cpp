@@ -34,6 +34,7 @@
 #include <gui/functions.h>
 #include <gxm/state.h>
 #include <http/state.h>
+#include <emuenv/state.h>
 #include <io/functions.h>
 #include <io/vfs.h>
 #include <kernel/state.h>
@@ -48,6 +49,7 @@
 #include <packages/pkg.h>
 #include <packages/sfo.h>
 #include <renderer/functions.h>
+#include <packages/vci.h>
 #include <renderer/state.h>
 #include <renderer/texture_cache.h>
 
@@ -68,6 +70,7 @@
 #include <util/log.h>
 #include <util/string_utils.h>
 #include <util/vector_utils.h>
+#include <util/vita_theme_utils.h>
 
 #include <gui/imgui_impl_sdl.h>
 
@@ -112,6 +115,18 @@
 #if USE_DISCORD
 #include <app/discord.h>
 #endif
+
+#include "patch/patch.h"
+
+#include <memory>
+#include <regex>
+
+typedef std::shared_ptr<mz_zip_archive> ZipPtr;
+
+inline void delete_zip(mz_zip_archive *zip) {
+    mz_zip_reader_end(zip);
+    delete zip;
+}
 
 static size_t write_to_buffer(void *pOpaque, mz_uint64 file_ofs, const void *pBuf, size_t n) {
     vfs::FileBuffer *const buffer = static_cast<vfs::FileBuffer *>(pOpaque);
@@ -214,7 +229,7 @@ static void set_theme_name(EmuEnvState &emuenv, vfs::FileBuffer &buf) {
 }
 
 static bool is_nonpdrm(EmuEnvState &emuenv, const fs::path &output_path) {
-    const auto app_license_path{ emuenv.pref_path / "ux0/license" / emuenv.app_info.app_title_id / fmt::format("{}.rif", emuenv.app_info.app_content_id) };
+    const auto app_license_path{ emuenv.vita_fs_path / "ux0/license" / emuenv.app_info.app_title_id / fmt::format("{}.rif", emuenv.app_info.app_content_id) };
     const auto is_patch_found_app_license = (emuenv.app_info.app_category == "gp") && fs::exists(app_license_path);
     if (fs::exists(output_path / "sce_sys/package/work.bin") || is_patch_found_app_license) {
         fs::path licpath = is_patch_found_app_license ? app_license_path : output_path / "sce_sys/package/work.bin";
@@ -242,7 +257,7 @@ static bool set_content_path(EmuEnvState &emuenv, const bool is_theme, fs::path 
             dest_path /= fs::path("addcont") / emuenv.app_info.app_title_id / emuenv.app_info.app_content_id;
             emuenv.app_info.app_title += " (DLC)";
         }
-    } else if (emuenv.app_info.app_category.find("gp") != std::string::npos) {
+    } else if (emuenv.app_info.app_category.contains("gp")) {
         if (!fs::exists(app_path) || fs::is_empty(app_path)) {
             LOG_ERROR("Install app before patch");
             return false;
@@ -270,7 +285,7 @@ static bool install_archive_content(EmuEnvState &emuenv, GuiState *gui, const Zi
         if (!set_content_path(emuenv, is_theme, output_path))
             return false;
     } else if (is_theme) {
-        set_theme_name(emuenv, theme);
+        set_theme_name(emuenv, theme, theme_root_name);
         output_path /= fs::path("theme") / emuenv.app_info.app_content_id;
     } else {
         LOG_CRITICAL("miniz error: {} extracting file: {}", miniz_get_error(zip), sfo_path);
@@ -347,7 +362,7 @@ static bool install_archive_content(EmuEnvState &emuenv, GuiState *gui, const Zi
         else
             return false;
     }
-    if (!copy_path(output_path, emuenv.pref_path, emuenv.app_info.app_title_id, emuenv.app_info.app_category))
+    if (!copy_path(output_path, emuenv.vita_fs_path, emuenv.app_info.app_title_id, emuenv.app_info.app_category))
         return false;
 
     update_progress();
@@ -684,7 +699,7 @@ static bool install_content(EmuEnvState &emuenv, GuiState *gui, const fs::path &
     vfs::FileBuffer buffer;
 
     const auto is_theme = fs::exists(theme_path);
-    auto dst_path{ emuenv.pref_path / "ux0" };
+    auto dst_path{ emuenv.vita_fs_path / "ux0" };
     if (fs_utils::read_data(sfo_path, buffer)) {
         sfo::get_param_info(emuenv.app_info, buffer, emuenv.cfg.sys_lang);
         if (!set_content_path(emuenv, is_theme, dst_path))
@@ -694,14 +709,14 @@ static bool install_content(EmuEnvState &emuenv, GuiState *gui, const fs::path &
             fs::remove_all(dst_path);
 
     } else if (fs_utils::read_data(theme_path, buffer)) {
-        set_theme_name(emuenv, buffer);
-        dst_path /= fs::path("theme") / fs_utils::utf8_to_path(emuenv.app_info.app_title_id);
+        set_theme_name(emuenv, buffer, fs_utils::path_to_utf8(content_path.filename()));
+        dst_path /= fs::path("theme") / emuenv.app_info.app_title_id;
     } else {
         LOG_ERROR("Param.sfo file is missing in path", sfo_path);
         return false;
     }
 
-    if (!copy_directories(content_path, dst_path)) {
+    if (!fs_utils::copy_directory_contents(content_path, dst_path)) {
         LOG_ERROR("Failed to copy directory to: {}", dst_path);
         return false;
     }
@@ -709,7 +724,7 @@ static bool install_content(EmuEnvState &emuenv, GuiState *gui, const fs::path &
     if (fs::exists(dst_path / "sce_sys/package/") && !is_nonpdrm(emuenv, dst_path))
         return false;
 
-    if (!copy_path(dst_path, emuenv.pref_path, emuenv.app_info.app_title_id, emuenv.app_info.app_category))
+    if (!copy_path(dst_path, emuenv.vita_fs_path, emuenv.app_info.app_title_id, emuenv.app_info.app_category))
         return false;
 
     LOG_INFO("{} [{}] installed successfully!", emuenv.app_info.app_title, emuenv.app_info.app_title_id);
@@ -797,7 +812,7 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv) {
     LOG_INFO("Category: {}", emuenv.app_info.app_category);
 
     init_device_paths(emuenv.io);
-    init_savedata_app_path(emuenv.io, emuenv.pref_path);
+    init_savedata_app_path(emuenv.io, emuenv.vita_fs_path);
 
     // Load param.sfo
     vfs::FileBuffer param_sfo;
@@ -809,13 +824,17 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv) {
     // Load main executable
     emuenv.self_path = !emuenv.cfg.self_path.empty() ? emuenv.cfg.self_path : EBOOT_PATH;
     main_module_id = load_module(emuenv, "app0:" + emuenv.self_path);
+
     if (main_module_id >= 0) {
         const auto module = emuenv.kernel.loaded_modules[main_module_id];
         LOG_INFO("Main executable {} ({}) loaded", module->info.module_name, emuenv.self_path);
+        const Patches patches = get_patches(emuenv.patch_path, emuenv.io.title_id, "app0:" + emuenv.self_path);
+        if (!patches.empty())
+            do_patches(emuenv.mem, patches, module->info);
     } else
         return FileNotFound;
     // Set self name from self path, can contain folder, get file name only
-    emuenv.self_name = fs::path(emuenv.self_path).filename().string();
+    emuenv.self_name = fs_utils::path_to_utf8(fs::path(emuenv.self_path).filename());
 
     // get list of preload modules
     SceUInt32 process_preload_disabled = 0;
@@ -826,6 +845,7 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv) {
             process_preload_disabled = *preload_disabled_ptr.get(emuenv.mem);
         }
     }
+
     std::vector<std::string> lib_load_list = {};
     // todo: check if module is imported
     auto add_preload_module = [&](uint32_t code, SceSysmoduleModuleId module_id, const std::string &name, bool load_from_app) {
@@ -836,7 +856,7 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv) {
                 const auto module_app_path = (emuenv.io.app0_host_path.empty() ? emuenv.pref_path / "ux0/app" / emuenv.io.app_path : emuenv.io.app0_host_path) / module_relative_path;
                 if (load_from_app && (vfs::current_app_file_exists(emuenv.io, module_relative_path) || fs::exists(module_app_path)))
                     lib_load_list.emplace_back(fmt::format("app0:sce_module/{}", module_name_file));
-                else if (fs::exists(emuenv.pref_path / "vs0/sys/external" / module_name_file))
+                else if (fs::exists(emuenv.vita_fs_path / "vs0/sys/external" / module_name_file))
                     lib_load_list.emplace_back(fmt::format("vs0:sys/external/{}", module_name_file));
             }
 
@@ -844,6 +864,8 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv) {
                 emuenv.kernel.loaded_sysmodules[module_id] = {};
         }
     };
+    lib_load_list.emplace_back("os0:kd/bootimage.skprx");
+    lib_load_list.emplace_back("os0:kd/sysmodule.skprx");
     add_preload_module(0x00010000, SCE_SYSMODULE_INVALID, "libc", true);
     add_preload_module(0x00020000, SCE_SYSMODULE_DBG, "libdbg", false);
     add_preload_module(0x00080000, SCE_SYSMODULE_INVALID, "libshellsvc", false);
@@ -856,8 +878,7 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv) {
 
     for (const auto &module_path : lib_load_list) {
         auto res = load_module(emuenv, module_path);
-        if (res < 0)
-            return FileNotFound;
+        LOG_ERROR_IF(res < 0, "Failed to load preloaded module: {}. Ignoring this error.", module_path);
     }
 
     // Load taiHEN plugins configured for this title

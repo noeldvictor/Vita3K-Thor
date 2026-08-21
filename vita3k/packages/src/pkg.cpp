@@ -50,13 +50,13 @@ static void ctr_init(uint8_t *counter, uint8_t *iv, uint64_t n) {
     }
 }
 
-static int execute(std::string &zrif, fs::path &title_src, fs::path &title_dst, F00DEncryptorTypes type, std::string &f00d_arg) {
+static int execute(std::string &zrif, fs::path &title_src, fs::path &title_dst, F00DEncryptorTypes type, std::string &f00d_arg, PfsProgressCallback progress = nullptr) {
     std::string title_src_str = title_src.string();
     std::string title_dst_str = title_dst.string();
-    return execute(zrif, title_src_str, title_dst_str, type, f00d_arg);
+    return execute(zrif, title_src_str, title_dst_str, type, f00d_arg, progress);
 }
 
-bool decrypt_install_nonpdrm(EmuEnvState &emuenv, const fs::path &drmlicpath, const fs::path &title_path) {
+bool decrypt_install_nonpdrm(EmuEnvState &emuenv, const fs::path &drmlicpath, const fs::path &title_path, const std::function<void(float)> &progress_callback) {
     fs::path title_id_src = title_path;
     fs::path title_id_dst = fs_utils::path_concat(title_path, "_dec");
     fs::ifstream binfile(drmlicpath, std::ios::in | std::ios::binary | std::ios::ate);
@@ -64,10 +64,17 @@ bool decrypt_install_nonpdrm(EmuEnvState &emuenv, const fs::path &drmlicpath, co
     F00DEncryptorTypes f00d_enc_type = F00DEncryptorTypes::native;
     std::string f00d_arg = std::string();
 
-    if ((execute(zRIF, title_id_src, title_id_dst, f00d_enc_type, f00d_arg) < 0) && (title_path.string().find("theme") == std::string::npos))
+    PfsProgressCallback pfs_progress = nullptr;
+    if (progress_callback) {
+        pfs_progress = [&progress_callback](std::uint64_t processed, std::uint64_t total, const std::string &) {
+            progress_callback(total ? static_cast<float>(processed) / static_cast<float>(total) : 1.f);
+        };
+    }
+
+    if ((execute(zRIF, title_id_src, title_id_dst, f00d_enc_type, f00d_arg, pfs_progress) < 0) && (title_path.string().find("theme") == std::string::npos))
         return false;
 
-    if (emuenv.app_info.app_category.find("gp") == std::string::npos)
+    if (!emuenv.app_info.app_category.contains("gp"))
         copy_license(emuenv, drmlicpath);
 
     fs::remove_all(title_id_src);
@@ -211,7 +218,7 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         type = PkgType::PKG_TYPE_VITA_PATCH;
     }
 
-    auto path{ emuenv.pref_path / "ux0" };
+    auto path{ emuenv.vita_fs_path / "ux0" };
 
     switch (type) {
     case PkgType::PKG_TYPE_VITA_APP:
@@ -344,11 +351,38 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         break;
     }
 
-    if (!copy_path(title_id_src, emuenv.pref_path, emuenv.app_info.app_title_id, emuenv.app_info.app_category))
+    if (!copy_path(title_id_src, emuenv.vita_fs_path, emuenv.app_info.app_title_id, emuenv.app_info.app_category))
         return false;
 
     create_license(emuenv, zRIF);
 
     progress_callback(100);
     return true;
+}
+
+std::string find_pkg_zrif(const fs::path &pkg_path, const fs::path &vita_fs_path) {
+    FILE *infile = FOPEN(pkg_path.c_str(), "rb");
+    if (!infile)
+        return {};
+
+    PkgHeader pkg_header{};
+    fread(&pkg_header, sizeof(PkgHeader), 1, infile);
+    fclose(infile);
+
+    const std::string content_id(pkg_header.content_id);
+    if (content_id.size() < 16)
+        return {};
+
+    const std::string title_id = content_id.substr(7, 9);
+    const auto rif_path = vita_fs_path / "ux0/license" / title_id / (content_id + ".rif");
+
+    if (!fs::exists(rif_path))
+        return {};
+
+    LOG_INFO("Found license file: {}", rif_path);
+    fs::ifstream binfile(rif_path, std::ios::in | std::ios::binary | std::ios::ate);
+    if (!binfile)
+        return {};
+
+    return rif2zrif(binfile);
 }

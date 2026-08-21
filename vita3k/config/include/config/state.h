@@ -47,12 +47,12 @@ struct Config {
     bool cartridge_mode = false;
     bool thor_renderer_trace = false;
 
-    fs::path get_pref_path() const {
-        return fs_utils::utf8_to_path(pref_path);
+    fs::path get_vita_fs_path() const {
+        return fs_utils::utf8_to_path(vita_fs_path);
     }
 
-    void set_pref_path(const fs::path &new_pref_path) {
-        pref_path = fs_utils::path_to_utf8(new_pref_path);
+    void set_vita_fs_path(const fs::path &new_vita_fs_path) {
+        vita_fs_path = fs_utils::path_to_utf8(new_vita_fs_path);
     }
 
     /**
@@ -90,6 +90,17 @@ struct Config {
         bool show_touchpad_cursor = true;
         int file_loading_delay = 0;
         bool psn_signed_in = true;
+        int sys_button = static_cast<int>(SCE_SYSTEM_PARAM_ENTER_BUTTON_CROSS);
+        int sys_lang = static_cast<int>(SCE_SYSTEM_PARAM_LANG_ENGLISH_US);
+        int sys_date_format = static_cast<int>(SCE_SYSTEM_PARAM_DATE_FORMAT_MMDDYYYY);
+        int sys_time_format = static_cast<int>(SCE_SYSTEM_PARAM_TIME_FORMAT_12HOUR);
+        std::vector<uint64_t> ime_langs = { 4 };
+        bool log_active_shaders = false;
+        bool log_uniforms = false;
+        bool color_surface_debug = false;
+        bool validation_layer = true;
+        bool tracy_primitive_impl = false;
+        std::vector<std::string> tracy_advanced_profiling_modules;
     };
 
     /**

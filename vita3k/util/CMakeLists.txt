@@ -1,8 +1,8 @@
 add_library(
 	util
 	STATIC
+	src/android_driver.cpp
 	src/arm.cpp
-	src/byte.cpp
 	src/cheat_paths.cpp
 	src/float_to_half.cpp
 	src/fs_utils.cpp
@@ -12,6 +12,7 @@ add_library(
 	src/net_utils.cpp
 	src/string_utils.cpp
 	src/tracy.cpp
+	src/vita_theme_utils.cpp
 )
 
 # vc_runtime_checker.cpp is directly added from the main CMakeList (for some reason adding it here doesn't work)

@@ -29,6 +29,13 @@
 #include <optional>
 #include <utility>
 #include <vector>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
+
+struct EmuEnvState;
+struct SceGxmContext;
+struct SceGxmRenderTarget;
 
 struct SceGxmInitializeParams {
     uint32_t flags = 0;
@@ -137,6 +144,33 @@ struct GxmState {
 
     Ptr<uint32_t> notification_region;
 
+    std::mutex sync_objects_mutex;
+    std::unordered_set<SceGxmSyncObject *> sync_objects;
+
     std::map<Address, MemoryMapInfo> memory_mapped_regions;
     std::mutex callback_lock;
+    Address immediate_context = 0;
+    std::unordered_map<SceGxmContext *, Address> deferred_contexts;
+    std::unordered_map<SceGxmRenderTarget *, Address> render_targets;
+
+    void deinit() {
+        if (display_host_thread.joinable())
+            display_host_thread.join();
+
+        {
+            const std::lock_guard<std::mutex> lock(sync_objects_mutex);
+            sync_objects.clear();
+        }
+
+        memory_mapped_regions.clear();
+        display_queue.reset();
+        params = {};
+        display_queue_thread = 0;
+        global_timestamp = 1;
+        last_display_global = 0;
+        notification_region = Ptr<uint32_t>(0);
+        immediate_context = 0;
+        deferred_contexts.clear();
+        render_targets.clear();
+    }
 };
