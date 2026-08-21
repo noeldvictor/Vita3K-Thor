@@ -52,6 +52,16 @@ Upstream Vita3K is the main emulator project. This fork is a personal Android bu
 
 ## Features For Normal Users
 
+> [!NOTE]
+> **Post-merge status (2026-08-21).** The fork has just absorbed a large upstream
+> batch that replaced the ImGui frontend with Qt on desktop and Compose on
+> Android, and rewrote the renderer. Virtual cartridges, cheats config, the
+> quickstate engine, the runtime hotkeys and the driver manager are back and
+> building; the in-game OSD menu, the library badges and Thor's own Android
+> overlay are not yet re-ported onto the new frontends. `CLAUDE.md` tracks what
+> is outstanding.
+
+
 These are the practical differences you should notice first compared with upstream Vita3K Android.
 
 - Easier graphics driver setup: download Turnip driver ZIPs from GitHub, see the suggested Thor/Adreno 740 choice, install a driver, select it, and delete old downloaded ZIPs from inside the app.
@@ -113,21 +123,66 @@ This fork is currently aimed at Android/AYN Thor APK experiments:
 
 ```powershell
 git submodule update --init --recursive
-$env:ANDROID_NDK_HOME = Join-Path $env:LOCALAPPDATA 'Android\Sdk\ndk\27.3.13750724'
+$env:ANDROID_NDK_HOME = Join-Path $env:LOCALAPPDATA 'Android\Sdk\ndk\29.0.14206865'
 $env:VCPKG_ROOT = 'C:\Users\leanerdesigner\Documents\SteamPortableTools\toolchains\vcpkg'
-Copy-Item -Recurse -Force data android/assets
-Copy-Item -Recurse -Force lang android/assets
-Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
-.\gradlew.bat assembleReldebug
+cd android
+.\gradlew.bat assembleReldebug -Pandroid.injected.build.abi=arm64-v8a
 ```
 
 APK output:
 
 ```text
-android/build/outputs/apk/reldebug/android-reldebug.apk
+android/app/build/intermediates/apk/reldebug/app-reldebug.apk
 ```
 
-Desktop builds still follow the upstream-style instructions in [`building.md`](./building.md).
+Install it with `adb install -r -t` - the APK is marked `testOnly`, so a plain
+`install -r` fails with `INSTALL_FAILED_TEST_ONLY`.
+
+Notes:
+
+- Assets no longer need copying by hand. The app module reads `android/assets`
+  directly.
+- The project uses vcpkg in manifest mode, so the first Android build compiles
+  its dependencies from source. Later builds reuse them.
+
+Desktop builds need Qt 6.11+ for the frontend:
+
+```powershell
+cmake --preset windows-vs2022 -DVITA3K_ENABLE_QT_GUI=ON
+cmake --build build/windows-vs2022 --config RelWithDebInfo -- -m
+```
+
+## Automating The Dev Loop
+
+`tools/mcp_server.py` exposes the build/install/launch/observe loop over MCP, so
+an agent can drive Thor testing directly instead of a human relaying commands.
+
+Turn it on:
+
+```text
+claude mcp add vita3k-thor -- python tools/mcp_server.py
+```
+
+Turn it off:
+
+```text
+claude mcp remove vita3k-thor
+```
+
+It provides `devices`, `connect`, `build_windows`, `build_android`, `install`,
+`launch`, `launch_cartridge`, `stop`, `is_running`, `screenshot`, `logcat`,
+`runtime_action`, `knowledge_search` and `knowledge_add`.
+
+`runtime_action` drives a running emulator (save state, load state, undo load,
+fast-forward, screenshot) through the runtime control file. Enable it in
+`config.yml`:
+
+```yaml
+enable-runtime-control: true
+runtime-control-file: C:/path/to/vita3k-control.txt
+```
+
+Agent-facing build and debugging notes live in [`CLAUDE.md`](./CLAUDE.md).
 
 ## Content And Firmware
 

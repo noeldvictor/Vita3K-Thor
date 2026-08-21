@@ -206,6 +206,8 @@ inline std::vector<std::string> default_virtual_cartridge_dirs() {
     code(bool, "check-for-updates", false, check_for_updates)                                            \
     code(bool, "asia-font-support", false, asia_font_support)                                      \
     code(bool, "cheats-enabled", true, cheats_enabled)                                             \
+    code(bool, "enable-runtime-control", false, enable_runtime_control)                            \
+    code(std::string, "runtime-control-file", std::string{}, runtime_control_file)                 \
     code(bool, "cartridge-mode", false, cartridge_mode)                                            \
     code(bool, "display-info-message", false, display_info_message)                                \
     code(bool, "display-system-apps", true, display_system_apps)                                   \

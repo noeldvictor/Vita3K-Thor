@@ -10526,7 +10526,12 @@ static std::string runtime_control_lower(std::string text) {
     return text;
 }
 
-static fs::path runtime_control_file_path() {
+static fs::path runtime_control_file_path(const EmuEnvState *emuenv) {
+    // Thor: the runtime control file is the automation surface an MCP server or
+    // a script drives. Configurable so it can be switched on without env vars.
+    if (emuenv && emuenv->cfg.enable_runtime_control && !emuenv->cfg.runtime_control_file.empty())
+        return fs_utils::utf8_to_path(emuenv->cfg.runtime_control_file);
+
     const char *path = std::getenv("VITA3K_RUNTIME_CONTROL_FILE");
     if (path == nullptr || path[0] == '\0')
         path = std::getenv("VITA3K_RENDER_CONTROL_FILE");
@@ -10646,7 +10651,7 @@ void runtime_poll_control_file(EmuEnvState &emuenv) {
     runtime_poll_control_android_properties(emuenv);
 #endif
 
-    const fs::path path = runtime_control_file_path();
+    const fs::path path = runtime_control_file_path(&emuenv);
     if (path.empty())
         return;
 
