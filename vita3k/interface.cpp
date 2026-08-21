@@ -31,13 +31,10 @@
 #include <dialog/state.h>
 #include <display/functions.h>
 #include <display/state.h>
-<<<<<<< HEAD
 #include <gui/functions.h>
 #include <gxm/state.h>
 #include <http/state.h>
-=======
 #include <emuenv/state.h>
->>>>>>> upstream/master
 #include <io/functions.h>
 #include <io/vfs.h>
 #include <kernel/state.h>
@@ -51,11 +48,8 @@
 #include <packages/license.h>
 #include <packages/pkg.h>
 #include <packages/sfo.h>
-<<<<<<< HEAD
 #include <renderer/functions.h>
-=======
 #include <packages/vci.h>
->>>>>>> upstream/master
 #include <renderer/state.h>
 #include <renderer/texture_cache.h>
 
@@ -122,8 +116,6 @@
 #include <app/discord.h>
 #endif
 
-<<<<<<< HEAD
-=======
 #include "patch/patch.h"
 
 #include <memory>
@@ -136,7 +128,6 @@ inline void delete_zip(mz_zip_archive *zip) {
     delete zip;
 }
 
->>>>>>> upstream/master
 static size_t write_to_buffer(void *pOpaque, mz_uint64 file_ofs, const void *pBuf, size_t n) {
     vfs::FileBuffer *const buffer = static_cast<vfs::FileBuffer *>(pOpaque);
     assert(file_ofs == buffer->size());
@@ -151,7 +142,6 @@ static const char *miniz_get_error(const ZipPtr &zip) {
     return mz_zip_get_error_string(mz_zip_get_last_error(zip.get()));
 }
 
-<<<<<<< HEAD
 static bool is_safe_archive_relative_path(const fs::path &entry_path);
 
 static std::string normalize_archive_member_name(std::string path) {
@@ -236,18 +226,6 @@ static void set_theme_name(EmuEnvState &emuenv, vfs::FileBuffer &buf) {
     emuenv.app_info.app_category = "theme";
     emuenv.app_info.app_content_id = emuenv.app_info.app_title_id;
     emuenv.app_info.app_title += " (Theme)";
-=======
-static std::string fallback_theme_root_name(const std::string &content_path) {
-    std::string trimmed = content_path;
-    while (!trimmed.empty() && ((trimmed.back() == '/') || (trimmed.back() == '\\')))
-        trimmed.pop_back();
-
-    if (trimmed.empty())
-        return {};
-
-    const auto separator = trimmed.find_last_of("/\\");
-    return (separator == std::string::npos) ? trimmed : trimmed.substr(separator + 1);
->>>>>>> upstream/master
 }
 
 static bool is_nonpdrm(EmuEnvState &emuenv, const fs::path &output_path) {
@@ -294,56 +272,15 @@ static bool set_content_path(EmuEnvState &emuenv, const bool is_theme, fs::path 
     return true;
 }
 
-<<<<<<< HEAD
 static bool install_archive_content(EmuEnvState &emuenv, GuiState *gui, const ZipPtr &zip, const std::string &content_path, const std::function<void(ArchiveContents)> &progress_callback) {
-=======
-static void set_theme_name(EmuEnvState &emuenv, const vfs::FileBuffer &buffer, const std::string &fallback_id_hint = {}) {
-    std::string content_id;
-    std::string title;
-
-    pugi::xml_document doc;
-    if (doc.load_buffer(buffer.data(), buffer.size())) {
-        const auto info = doc.child("theme").child("InfomationProperty");
-        content_id = info.child("m_contentId").text().as_string();
-        title = info.child("m_title").child("m_default").text().as_string();
-    } else {
-        LOG_WARN("Unable to parse theme.xml metadata during install, falling back to folder/title-derived theme identity");
-    }
-
-    const std::string resolved_id = vita_theme_utils::resolve_theme_id(
-        content_id,
-        fallback_id_hint,
-        title,
-        buffer.empty() ? nullptr : buffer.data(),
-        buffer.size());
-    emuenv.app_info.app_content_id = resolved_id;
-    emuenv.app_info.app_title_id = resolved_id;
-
-    if (!title.empty()) {
-        emuenv.app_info.app_title = title;
-    } else if (emuenv.app_info.app_title.empty()) {
-        emuenv.app_info.app_title = resolved_id;
-    }
-}
-
-static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, const std::string &content_path, const std::function<void(ArchiveContents)> &progress_callback, const ReinstallCallback &reinstall_callback) {
->>>>>>> upstream/master
     std::string sfo_path = "sce_sys/param.sfo";
     std::string theme_path = "theme.xml";
     vfs::FileBuffer buffer, theme;
 
-<<<<<<< HEAD
     const auto is_theme = extract_archive_file_to_buffer(zip, content_path + theme_path, theme);
 
     auto output_path{ emuenv.pref_path / "ux0" };
     if (extract_archive_file_to_buffer(zip, content_path + sfo_path, buffer)) {
-=======
-    const auto is_theme = mz_zip_reader_extract_file_to_callback(zip.get(), (content_path + theme_path).c_str(), &write_to_buffer, &theme, 0);
-    const std::string theme_root_name = fallback_theme_root_name(content_path);
-
-    auto output_path{ emuenv.vita_fs_path / "ux0" };
-    if (mz_zip_reader_extract_file_to_callback(zip.get(), (content_path + sfo_path).c_str(), &write_to_buffer, &buffer, 0)) {
->>>>>>> upstream/master
         sfo::get_param_info(emuenv.app_info, buffer, emuenv.cfg.sys_lang);
         if (!set_content_path(emuenv, is_theme, output_path))
             return false;
@@ -400,13 +337,9 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
             continue;
         }
         const std::string m_filename = file_stat.m_filename;
-<<<<<<< HEAD
         const std::string normalized_filename = normalize_archive_member_name(m_filename);
         const std::string normalized_filename_lower = string_utils::tolower(normalized_filename);
         if (content_root_prefix.empty() || normalized_filename_lower.starts_with(content_root_prefix)) {
-=======
-        if (m_filename.contains(content_path)) {
->>>>>>> upstream/master
             file_progress = static_cast<float>(i) / num_files * 100.0f;
             update_progress();
 
@@ -573,15 +506,10 @@ static std::vector<std::string> get_archive_contents_path(const ZipPtr &zip) {
         if (!mz_zip_reader_file_stat(zip.get(), i, &file_stat))
             continue;
 
-<<<<<<< HEAD
         const std::string m_filename = std::string(file_stat.m_filename);
         const std::string normalized_filename = normalize_archive_member_name(m_filename);
         const std::string normalized_lower = string_utils::tolower(normalized_filename);
         if (normalized_lower.find("sce_module/steroid.suprx") != std::string::npos) {
-=======
-        std::string m_filename = std::string(file_stat.m_filename);
-        if (m_filename.contains("sce_module/steroid.suprx")) {
->>>>>>> upstream/master
             LOG_CRITICAL("A Vitamin dump was detected, aborting installation...");
 #ifdef __ANDROID__
             SDL_ShowAndroidToast("Vitamin dumps are not supported!", 1, -1, 0, 0);
@@ -590,20 +518,12 @@ static std::vector<std::string> get_archive_contents_path(const ZipPtr &zip) {
             return {};
         }
 
-<<<<<<< HEAD
         const auto sfo_pos = normalized_lower.rfind(sfo_path);
         if (sfo_pos != std::string::npos && sfo_pos + sfo_path.size() == normalized_lower.size()) {
             auto root = normalized_filename.substr(0, sfo_pos);
             if (root.ends_with("/"))
                 root.pop_back();
             add_candidate(root, 100, normalized_filename);
-=======
-        const auto is_content = m_filename.contains(sfo_path) || m_filename.contains(theme_path);
-        if (is_content) {
-            const auto content_type = m_filename.contains(sfo_path) ? sfo_path : theme_path;
-            m_filename.erase(m_filename.find(content_type));
-            vector_utils::push_if_not_exists(content_path, m_filename);
->>>>>>> upstream/master
         }
 
         const auto theme_pos = normalized_lower.rfind(theme_path);
@@ -654,22 +574,7 @@ static std::vector<std::string> get_archive_contents_path(const ZipPtr &zip) {
     return content_path;
 }
 
-<<<<<<< HEAD
 std::vector<ContentInfo> install_archive(EmuEnvState &emuenv, GuiState *gui, const fs::path &archive_path, const std::function<void(ArchiveContents)> &progress_callback) {
-=======
-std::vector<ContentInfo> install_archive(EmuEnvState &emuenv, const fs::path &archive_path, const std::function<void(ArchiveContents)> &progress_callback, const ReinstallCallback &reinstall_callback) {
-    if (string_utils::tolower(archive_path.extension().string()) == ".vci") {
-        const auto vci_progress = [&](float pct) {
-            if (progress_callback)
-                progress_callback({ 1.f, 1.f, pct });
-        };
-        const bool state = install_vci(archive_path, emuenv, vci_progress);
-        std::vector<ContentInfo> content_installed{};
-        content_installed.push_back({ emuenv.app_info.app_title, emuenv.app_info.app_title_id, emuenv.app_info.app_category, emuenv.app_info.app_content_id, archive_path.string(), state });
-        return content_installed;
-    }
-
->>>>>>> upstream/master
     FILE *vpk_fp = FOPEN(archive_path.c_str(), "rb");
     if (!vpk_fp) {
         LOG_CRITICAL("Failed to load archive file in path: {}", fs_utils::path_to_utf8(archive_path));
@@ -854,39 +759,11 @@ uint32_t install_contents(EmuEnvState &emuenv, GuiState *gui, const fs::path &pa
     return installed;
 }
 
-<<<<<<< HEAD
 static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv) {
     const auto call_import = [&emuenv](CPUState &cpu, uint32_t nid, SceUID thread_id) {
         ::call_import(emuenv, cpu, nid, thread_id);
     };
     if (!emuenv.kernel.init(emuenv.mem, call_import, emuenv.kernel.cpu_opt)) {
-=======
-static void do_patches(MemState &mem, const Patches &patches, const SceKernelModuleInfo &sceKernelModuleInfo) {
-    for (const auto &patch : patches) {
-        if (patch.seg < MODULE_INFO_NUM_SEGMENTS) {
-            auto &seg = sceKernelModuleInfo.segments[patch.seg];
-            auto seg_ptr = seg.vaddr.cast<uint8_t>();
-            if (seg_ptr) {
-                LOG_INFO("Patching segment {} at offset 0x{:X} with {} values", patch.seg, patch.offset, patch.values.size());
-                if (patch.offset + patch.values.size() <= seg.memsz) {
-                    memcpy(seg_ptr.get(mem) + patch.offset, patch.values.data(), patch.values.size());
-                } else {
-                    LOG_ERROR("Patch out of bounds for segment {} at offset 0x{:X}", patch.seg, patch.offset);
-                }
-            }
-        }
-    }
-}
-
-static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const AppLaunchRequest &launch_request) {
-    const auto call_import = [&emuenv](CPUState &cpu, uint32_t nid, SceUID thread_id) {
-        ::call_import(emuenv, cpu, nid, thread_id);
-    };
-    emuenv.kernel.process_exit_callback = [&emuenv](int res, std::optional<AppLaunchRequest> relaunch) {
-        emuenv.post_app_launch_request(relaunch.value_or(AppLaunchRequest{ .reason = AppLaunchReason::ProcessExit }));
-    };
-    if (!emuenv.kernel.init(emuenv.mem, call_import, emuenv.cfg.current_config.cpu_opt)) {
->>>>>>> upstream/master
         LOG_WARN("Failed to init kernel!");
         return KernelInitFailed;
     }
@@ -939,26 +816,13 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
 
     // Load param.sfo
     vfs::FileBuffer param_sfo;
-<<<<<<< HEAD
     if (vfs::read_current_app_file(param_sfo, emuenv.io, emuenv.pref_path, "sce_sys/param.sfo"))
-=======
-    if (vfs::read_app_file(param_sfo, emuenv.vita_fs_path, emuenv.io.app_path, "sce_sys/param.sfo"))
->>>>>>> upstream/master
         sfo::load(emuenv.sfo_handle, param_sfo);
 
     init_exported_vars(emuenv);
 
     // Load main executable
-<<<<<<< HEAD
     emuenv.self_path = !emuenv.cfg.self_path.empty() ? emuenv.cfg.self_path : EBOOT_PATH;
-=======
-    if (!launch_request.self_path.empty()) {
-        emuenv.self_path = launch_request.self_path;
-    } else {
-        emuenv.self_path = !emuenv.cfg.self_path.empty() ? emuenv.cfg.self_path : EBOOT_PATH;
-    }
-
->>>>>>> upstream/master
     main_module_id = load_module(emuenv, "app0:" + emuenv.self_path);
 
     if (main_module_id >= 0) {
@@ -981,11 +845,7 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
             process_preload_disabled = *preload_disabled_ptr.get(emuenv.mem);
         }
     }
-<<<<<<< HEAD
-=======
-    const auto module_app_path{ emuenv.vita_fs_path / "ux0/app" / emuenv.io.app_path / "sce_module" };
 
->>>>>>> upstream/master
     std::vector<std::string> lib_load_list = {};
     // todo: check if module is imported
     auto add_preload_module = [&](uint32_t code, SceSysmoduleModuleId module_id, const std::string &name, bool load_from_app) {
@@ -1888,7 +1748,6 @@ static bool quick_state_same_pause_restore_available(EmuEnvState &emuenv, const 
         && slot.pause_epoch == quick_state_pause_epoch;
 }
 
-<<<<<<< HEAD
 static bool quick_state_live_host_restore_available(EmuEnvState &emuenv, const QuickStateSlot &slot, std::string *detail = nullptr);
 
 static bool quick_state_can_attempt_same_session_restore(const QuickStateSlot &slot, const std::string &title_id) {
@@ -11196,12 +11055,6 @@ ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv) {
     if (load_app_impl(main_module_id, emuenv) != Success) {
         std::string message = fmt::format(fmt::runtime(emuenv.common_dialog.lang.message["load_app_failed"]), emuenv.pref_path / "ux0/app" / emuenv.io.app_path / emuenv.self_path);
         app::error_dialog(message, emuenv.window.get());
-=======
-ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv, const AppLaunchRequest &launch_request) {
-    if (load_app_impl(main_module_id, emuenv, launch_request) != Success) {
-        std::string message = fmt::format(fmt::runtime(lang::get(lang::str::load_app_failed_msg)), emuenv.vita_fs_path / "ux0/app" / emuenv.io.app_path / emuenv.self_path);
-        LOG_ERROR(message);
->>>>>>> upstream/master
         return ModuleLoadFailed;
     }
 

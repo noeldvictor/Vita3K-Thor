@@ -46,12 +46,7 @@
 
 #ifdef __ANDROID__
 #include <SDL3/SDL_system.h>
-<<<<<<< HEAD
-#include <adrenotools/bcenabler.h>
-#include <adrenotools/driver.h>
 #include <boost/range/iterator_range.hpp>
-=======
->>>>>>> upstream/master
 #include <dlfcn.h>
 #include <jni.h>
 #include <sys/mman.h>
@@ -159,11 +154,15 @@ const static std::vector<const char *> required_device_extensions = {
 
 namespace renderer::vulkan {
 
-<<<<<<< HEAD
 static bool renderer_debug_env_flag(const char *name) {
     const char *value = std::getenv(name);
     if (value == nullptr || value[0] == '\0')
-=======
+        return false;
+
+    const std::string_view text(value);
+    return text != "0" && text != "false" && text != "False" && text != "FALSE" && text != "off" && text != "OFF" && text != "no" && text != "NO";
+}
+
 #if defined(__ANDROID__) && defined(USE_ADRENO_TOOLS)
 // need to avoid patching bcn per custom driver more than once
 static bool patch_bcn_once(void *function_to_patch) {
@@ -175,12 +174,12 @@ static bool patch_bcn_once(void *function_to_patch) {
     }
 
     if (!adrenotools_patch_bcn(function_to_patch))
->>>>>>> upstream/master
         return false;
 
-    const std::string_view text(value);
-    return text != "0" && text != "false" && text != "False" && text != "FALSE" && text != "off" && text != "OFF" && text != "no" && text != "NO";
+    patched_functions.insert(function_to_patch);
+    return true;
 }
+#endif
 
 static bool renderer_debug_env_requested() {
     return renderer_debug_env_flag("VITA3K_RENDER_DEBUG")
@@ -234,8 +233,6 @@ static bool detect_patch_bcn(bool *support_dxt) {
 }
 #endif
 
-<<<<<<< HEAD
-=======
 #if defined(__linux__) && !defined(__ANDROID__)
 static bool has_instance_extension(const std::vector<vk::ExtensionProperties> &available_extensions, const std::string_view target_name) {
     return std::find_if(available_extensions.begin(), available_extensions.end(), [&](const vk::ExtensionProperties &ext) {
@@ -283,7 +280,6 @@ static bool select_linux_surface_extension(VKState &vk_state, const renderer::Di
 }
 #endif
 
->>>>>>> upstream/master
 static bool device_is_compatible(const vk::PhysicalDevice &device) {
     const std::vector<vk::ExtensionProperties> available_extensions = device.enumerateDeviceExtensionProperties();
 
@@ -470,31 +466,22 @@ static void *load_custom_adreno_driver(const std::string &driver_name) {
 }
 #endif
 
-bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state, const Config &config) {
+bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &config) {
     // Create Instance
     {
-<<<<<<< HEAD
-        PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_Vulkan_GetVkGetInstanceProcAddr());
-        VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr);
-=======
 #if defined(__ANDROID__) && defined(USE_ADRENO_TOOLS)
+        // Custom Adreno driver selection and BCn patching now live in
+        // android_driver::resolve_vk_get_instance_proc_addr.
         PFN_vkGetInstanceProcAddr vk_get_instance_proc_addr = android_driver::resolve_vk_get_instance_proc_addr(config.current_config.custom_driver_name);
         if (!vk_get_instance_proc_addr)
             return false;
->>>>>>> upstream/master
 
-#ifdef __ANDROID__
-        if (!config.current_config.custom_driver_name.empty()) {
-            void *vulkan_handle = load_custom_adreno_driver(config.current_config.custom_driver_name);
-            if (vulkan_handle) {
-                vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(vulkan_handle, "vkGetInstanceProcAddr"));
-                VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr);
-                LOG_INFO("Custom Adreno driver {} injected successfully", config.current_config.custom_driver_name);
-            }
-        }
+        VULKAN_HPP_DEFAULT_DISPATCHER.init(vk_get_instance_proc_addr);
 
         if (!detect_patch_bcn(&texture_cache.support_dxt))
             return false;
+#else
+        VULKAN_HPP_DEFAULT_DISPATCHER.init();
 #endif
 
         vk::ApplicationInfo app_info{
@@ -505,21 +492,7 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
             .apiVersion = VK_API_VERSION_1_0
         };
 
-        unsigned int instance_req_ext_count;
-        auto instance_extensions_str = SDL_Vulkan_GetInstanceExtensions(&instance_req_ext_count);
         std::vector<const char *> instance_extensions;
-<<<<<<< HEAD
-        instance_extensions.reserve(instance_req_ext_count + 6);
-        for (size_t i = 0; i < instance_req_ext_count; i++) {
-            instance_extensions.push_back(instance_extensions_str[i]);
-        }
-
-#ifdef __APPLE__
-        // VK_KHR_portability_enumeration is a Vulkan Loader extension automatically added by SDL_Vulkan_GetInstanceExtensions.
-        // When using MoltenVK directly without the Vulkan Loader, this extension causes an instant crash on startup.
-        // Remove it from the default instance_extensions and handle it separately in the optional extensions.
-        std::erase(instance_extensions, vk::KHRPortabilityEnumerationExtensionName);
-=======
         instance_extensions.reserve(8);
         instance_extensions.push_back(vk::KHRSurfaceExtensionName);
 #ifdef _WIN32
@@ -532,7 +505,6 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
         auto *frame_host = this->renderer::State::frame;
         if (!select_linux_surface_extension(*this, frame_host->handle(), instance_extensions))
             return false;
->>>>>>> upstream/master
 #endif
 
         const std::set<std::string> optional_instance_extensions = {
