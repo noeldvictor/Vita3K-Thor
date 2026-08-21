@@ -777,6 +777,251 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
 }
 
 // ---------------------------------------------------------------------------
+// Thor virtual cartridges
+//
+// Mount a .zip/.vpk (or an extracted folder) as a read-only virtual game card
+// instead of installing it into ux0:app. Thor's preferred game flow.
+// ---------------------------------------------------------------------------
+
+static bool is_safe_archive_relative_path(const fs::path &entry_path);
+
+static std::string normalize_archive_member_name(std::string path) {
+    string_utils::replace(path, "\\", "/");
+
+    while (!path.empty() && path.front() == '/')
+        path.erase(path.begin());
+    while (path.starts_with("./"))
+        path.erase(0, 2);
+    while (!path.empty() && path.back() == '/')
+        path.pop_back();
+
+    return path;
+}
+
+static bool archive_root_is_safe(const std::string &root) {
+    return root.empty() || is_safe_archive_relative_path(fs_utils::utf8_to_path(root));
+}
+
+static std::optional<std::string> find_archive_file_case_insensitive(const ZipPtr &zip, const std::string &path) {
+    const auto normalized_path = string_utils::tolower(normalize_archive_member_name(path));
+    const mz_uint num_files = mz_zip_reader_get_num_files(zip.get());
+
+    for (mz_uint i = 0; i < num_files; i++) {
+        mz_zip_archive_file_stat file_stat;
+        if (!mz_zip_reader_file_stat(zip.get(), i, &file_stat))
+            continue;
+
+        if (mz_zip_reader_is_file_a_directory(zip.get(), i))
+            continue;
+
+        const auto normalized_member = string_utils::tolower(normalize_archive_member_name(file_stat.m_filename));
+        if (normalized_member == normalized_path)
+            return std::string(file_stat.m_filename);
+    }
+
+    return std::nullopt;
+}
+
+static bool extract_archive_file_to_buffer(const ZipPtr &zip, const std::string &path, vfs::FileBuffer &buffer) {
+    const auto archive_name = find_archive_file_case_insensitive(zip, path);
+    if (!archive_name)
+        return false;
+
+    buffer.clear();
+    return mz_zip_reader_extract_file_to_callback(zip.get(), archive_name->c_str(), &write_to_buffer, &buffer, 0);
+}
+
+static bool archive_file_exists_case_insensitive(const ZipPtr &zip, const std::string &path) {
+    return find_archive_file_case_insensitive(zip, path).has_value();
+}
+
+static bool buffer_starts_with(const vfs::FileBuffer &buffer, const std::initializer_list<uint8_t> prefix) {
+    if (buffer.size() < prefix.size())
+        return false;
+
+    return std::equal(prefix.begin(), prefix.end(), buffer.begin());
+}
+
+static bool archive_buffer_is_png(const vfs::FileBuffer &buffer) {
+    return buffer_starts_with(buffer, { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A });
+}
+
+static bool archive_buffer_is_vita_executable(const vfs::FileBuffer &buffer) {
+    return buffer_starts_with(buffer, { 'S', 'C', 'E', 0x00 }) || buffer_starts_with(buffer, { 0x7F, 'E', 'L', 'F' });
+}
+
+static bool archive_content_appears_encrypted(const ZipPtr &zip, const std::string &content_path) {
+    vfs::FileBuffer buffer;
+    if (extract_archive_file_to_buffer(zip, content_path + "eboot.bin", buffer) && !buffer.empty() && !archive_buffer_is_vita_executable(buffer))
+        return true;
+
+    buffer.clear();
+    return extract_archive_file_to_buffer(zip, content_path + "sce_sys/icon0.png", buffer) && !buffer.empty() && !archive_buffer_is_png(buffer);
+}
+
+static bool is_safe_archive_relative_path(const fs::path &entry_path) {
+    if (entry_path.empty() || entry_path.is_absolute())
+        return false;
+
+    for (const auto &part : entry_path) {
+        if (part.string() == "..")
+            return false;
+    }
+
+    return true;
+}
+
+static bool is_game_card_category(const std::string &category) {
+    return category.find("gd") != std::string::npos || category.find("gc") != std::string::npos;
+}
+
+static bool extract_archive_content_to_path(const ZipPtr &zip, const std::string &content_path, const fs::path &output_path, const std::function<void(ArchiveContents)> &progress_callback) {
+    float file_progress = 0;
+
+    const auto update_progress = [&]() {
+        if (progress_callback)
+            progress_callback({ {}, {}, file_progress });
+    };
+
+    const auto normalized_content_root = string_utils::tolower(normalize_archive_member_name(content_path));
+    const auto content_root_prefix = normalized_content_root.empty() ? std::string{} : normalized_content_root + "/";
+    mz_uint num_files = mz_zip_reader_get_num_files(zip.get());
+    for (mz_uint i = 0; i < num_files; i++) {
+        mz_zip_archive_file_stat file_stat;
+        if (!mz_zip_reader_file_stat(zip.get(), i, &file_stat))
+            continue;
+
+        const std::string filename = file_stat.m_filename;
+        const std::string normalized_filename = normalize_archive_member_name(filename);
+        const std::string normalized_filename_lower = string_utils::tolower(normalized_filename);
+        if (!content_root_prefix.empty() && !normalized_filename_lower.starts_with(content_root_prefix))
+            continue;
+
+        file_progress = static_cast<float>(i) / num_files * 100.0f;
+        update_progress();
+
+        const fs::path relative_path = fs_utils::utf8_to_path(content_root_prefix.empty() ? normalized_filename : normalized_filename.substr(content_root_prefix.size()));
+        if (!is_safe_archive_relative_path(relative_path)) {
+            LOG_WARN("Skipping unsafe cartridge archive entry {}", filename);
+            continue;
+        }
+
+        const fs::path file_output = (output_path / relative_path).generic_path();
+        if (mz_zip_reader_is_file_a_directory(zip.get(), i)) {
+            fs::create_directories(file_output);
+        } else {
+            fs::create_directories(file_output.parent_path());
+            LOG_INFO("Cartridge extract {}", file_output);
+            if (!mz_zip_reader_extract_to_file(zip.get(), i, fs_utils::path_to_utf8(file_output).c_str(), 0)) {
+                LOG_ERROR("miniz error extracting {}: {}", filename, miniz_get_error(zip));
+                return false;
+            }
+        }
+    }
+
+    file_progress = 100.f;
+    update_progress();
+    return true;
+}
+
+static bool mount_archive_content_as_cartridge(EmuEnvState &emuenv, const ZipPtr &zip, const fs::path &archive_path, const std::string &content_path, const std::function<void(ArchiveContents)> &progress_callback) {
+    vfs::FileBuffer param_sfo;
+    if (!extract_archive_file_to_buffer(zip, content_path + "sce_sys/param.sfo", param_sfo)) {
+        LOG_ERROR("Cartridge archive content has no sce_sys/param.sfo: {}", content_path);
+        return false;
+    }
+
+    sfo::get_param_info(emuenv.app_info, param_sfo, emuenv.cfg.sys_lang);
+    if (!is_game_card_category(emuenv.app_info.app_category)) {
+        LOG_ERROR("Cartridge mode only supports game app content, got category {}", emuenv.app_info.app_category);
+        return false;
+    }
+
+    if (emuenv.app_info.app_title_id.find_first_of("/\\") != std::string::npos || !is_safe_archive_relative_path(fs::path(emuenv.app_info.app_title_id))) {
+        LOG_ERROR("Unsafe cartridge title id {}", emuenv.app_info.app_title_id);
+        return false;
+    }
+
+    if (archive_content_appears_encrypted(zip, content_path)) {
+        LOG_ERROR("Cartridge archive {} root {} appears to contain encrypted app files. Direct ZIP mode needs Vita3K-readable app files from legally dumped content.", archive_path, content_path);
+        return false;
+    }
+
+    if (!vfs::mount_current_app_archive(emuenv.io, archive_path, content_path, emuenv.app_info.app_title_id))
+        return false;
+
+    if (progress_callback)
+        progress_callback({ {}, {}, 100.f });
+
+    if (vfs::current_app_file_exists(emuenv.io, "sce_sys/package/work.bin") && emuenv.app_info.app_title_id.starts_with("PCS"))
+        LOG_WARN("Direct archive cartridge mode found NoNpDrm package metadata. If this title needs install-time decryption, direct ZIP launch may fail.");
+
+    LOG_INFO("{} [{}] mounted directly from archive {} root {}", emuenv.app_info.app_title, emuenv.app_info.app_title_id, archive_path, content_path);
+    return true;
+}
+
+
+ContentInfo mount_archive_as_cartridge(EmuEnvState &emuenv, const fs::path &archive_path, const std::function<void(ArchiveContents)> &progress_callback) {
+    FILE *vpk_fp = FOPEN(archive_path.c_str(), "rb");
+    if (!vpk_fp) {
+        LOG_CRITICAL("Failed to load cartridge archive file in path: {}", fs_utils::path_to_utf8(archive_path));
+        return {};
+    }
+
+    const ZipPtr zip(new mz_zip_archive, delete_zip);
+    std::memset(zip.get(), 0, sizeof(*zip));
+
+    if (!mz_zip_reader_init_cfile(zip.get(), vpk_fp, 0, 0)) {
+        LOG_CRITICAL("miniz error reading cartridge archive: {}", miniz_get_error(zip));
+        fclose(vpk_fp);
+        return {};
+    }
+
+    const auto content_paths = get_archive_contents_path(zip);
+    if (content_paths.empty()) {
+        fclose(vpk_fp);
+        return {};
+    }
+
+    for (const auto &path : content_paths) {
+        if (!mount_archive_content_as_cartridge(emuenv, zip, archive_path, path, progress_callback))
+            continue;
+
+        fclose(vpk_fp);
+        return { emuenv.app_info.app_title, emuenv.app_info.app_title_id, emuenv.app_info.app_category, emuenv.app_info.app_content_id, path, true };
+    }
+
+    fclose(vpk_fp);
+    return {};
+}
+
+ContentInfo mount_directory_as_cartridge(EmuEnvState &emuenv, const fs::path &content_path) {
+    const auto param_sfo_path = content_path / "sce_sys/param.sfo";
+    vfs::FileBuffer param_sfo;
+    if (!fs_utils::read_data(param_sfo_path, param_sfo)) {
+        LOG_ERROR("Cartridge directory has no sce_sys/param.sfo: {}", content_path);
+        return {};
+    }
+
+    sfo::get_param_info(emuenv.app_info, param_sfo, emuenv.cfg.sys_lang);
+    if (!is_game_card_category(emuenv.app_info.app_category)) {
+        LOG_ERROR("Cartridge mode only supports game app content, got category {}", emuenv.app_info.app_category);
+        return {};
+    }
+
+    if (emuenv.app_info.app_title_id.find_first_of("/\\") != std::string::npos || !is_safe_archive_relative_path(fs::path(emuenv.app_info.app_title_id))) {
+        LOG_ERROR("Unsafe cartridge title id {}", emuenv.app_info.app_title_id);
+        return {};
+    }
+
+    vfs::unmount_current_app_archive(emuenv.io);
+    emuenv.io.app0_host_path = content_path.generic_path();
+
+    LOG_INFO("{} [{}] mounted directly from directory {}", emuenv.app_info.app_title, emuenv.app_info.app_title_id, content_path);
+    return { emuenv.app_info.app_title, emuenv.app_info.app_title_id, emuenv.app_info.app_category, emuenv.app_info.app_content_id, content_path.generic_string(), true };
+}
+
+// ---------------------------------------------------------------------------
 // Thor quickstates
 //
 // Frontend-agnostic: this block references no GUI symbols, so it survived the
