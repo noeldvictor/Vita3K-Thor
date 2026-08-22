@@ -195,6 +195,25 @@ game. Compose navigates on DPAD_* by itself; it does not know `KEYCODE_BUTTON_A`
 
 ## Things that will bite you
 
+* **`vfs::read_app_file` is a footgun for cartridges.** It resolves under
+  `ux0:app/<app path>/`, which is where an *installed* game lives - and a
+  virtual cartridge is never installed. Anything reading game content through
+  it silently gets nothing for every cartridge in the library. This has now
+  been fixed three separate times, in `module_parent.cpp` (module loading),
+  `_sceAppMgrLoadExec` (games that chain to a second executable, e.g.
+  Uncharted) and `load_app` (param.sfo, and with it SAVEDATA_MAX_SIZE,
+  ATTRIBUTE2 and APP_VER). The pattern to copy:
+
+  ```cpp
+  vfs::current_app_archive_mounted(emuenv.io)
+      ? vfs::read_current_app_file(buf, emuenv.io, emuenv.vita_fs_path, relative)
+      : vfs::read_app_file(buf, emuenv.vita_fs_path, emuenv.io.app_path, relative)
+  ```
+
+  `read_app_file` is still correct where the installed path is genuinely what
+  is wanted - `apps_list.cpp`'s `read_app_info` scans ux0:app on purpose, since
+  cartridges come from the scanner instead.
+
 * **`disable-surface-sync` causes garbage geometry on Vulkan.** Upstream
   defaults it to true; Thor defaults it to false. With it on, and memory
   mapping enabled, `handle_transfer_copy` and `handle_transfer_downscale` skip

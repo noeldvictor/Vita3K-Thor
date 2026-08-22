@@ -124,7 +124,13 @@ if (NOT (USE_LTO STREQUAL "NEVER"))
 			# meant this default had never once turned LTO on for anything we
 			# actually ship.
 			set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-			set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
+			# Thor: not on MSVC. This project rewrites /Zi to /Z7, and /GL with
+			# /Z7 makes the linker reject its own objects with
+			# "LNK1103: debugging information corrupt". Clang/NDK has no such
+			# problem, and the handheld is where the win matters anyway.
+			if (NOT MSVC)
+				set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
+			endif()
 		endif()
 	else()
 		message(STATUS "IPO / LTO not supported: <${ipo_supported_error}>")

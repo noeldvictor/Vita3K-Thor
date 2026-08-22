@@ -537,9 +537,23 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
     init_savedata_app_path(emuenv.io, emuenv.vita_fs_path);
 
     // Load param.sfo
+    //
+    // Thor: the third instance of the same mistake - read_app_file looks under
+    // ux0:app/<app path>/, where an *installed* game lives, and a virtual
+    // cartridge is never installed. So sfo_handle stayed empty for every
+    // cartridge, and it is not decorative: SceAppUtil reads SAVEDATA_MAX_SIZE
+    // out of it, SceSysmem reads ATTRIBUTE2, SceNetCtl reads APP_VER. A game
+    // asking how much savedata it may write gets nothing back.
     vfs::FileBuffer param_sfo;
-    if (vfs::read_app_file(param_sfo, emuenv.vita_fs_path, emuenv.io.app_path, "sce_sys/param.sfo"))
+    const bool param_read = vfs::current_app_archive_mounted(emuenv.io)
+        ? vfs::read_current_app_file(param_sfo, emuenv.io, emuenv.vita_fs_path, "sce_sys/param.sfo")
+        : vfs::read_app_file(param_sfo, emuenv.vita_fs_path, emuenv.io.app_path, "sce_sys/param.sfo");
+    if (param_read)
         sfo::load(emuenv.sfo_handle, param_sfo);
+    else
+        LOG_WARN("Could not read sce_sys/param.sfo for {}; SAVEDATA_MAX_SIZE, ATTRIBUTE2 and "
+                 "APP_VER will be unavailable to the game",
+            emuenv.io.title_id);
 
     init_exported_vars(emuenv);
 
