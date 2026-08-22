@@ -762,6 +762,110 @@ def qa_title(title_id: str, out_dir: str, seconds: int = 20, fps: float = 0.7,
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------
+# the guest filesystem, crashes, and the cartridge library
+#
+# Each of these replaces something that kept getting done with a raw adb shell
+# command. If a debugging step needs a bare adb call, that is a missing tool -
+# add it here rather than reaching around the server.
+# --------------------------------------------------------------------------
+
+VITA_FS = f"{EMU_FILES}/vita"
+
+
+def _vita_path(path: str) -> str:
+    """Map a guest-ish path onto the host. Accepts ux0:app/X, ux0/app/X or a full path."""
+    p = path.strip().replace(":", "/").lstrip("/")
+    if p.startswith("/sdcard") or p.startswith("/storage"):
+        return path
+    return f"{VITA_FS}/{p}" if p else VITA_FS
+
+
+def vita_ls(path: str = "", long: bool = True, serial: str = "") -> str:
+    """List a path inside the emulator's guest filesystem.
+
+    Takes ux0:user/00/savedata, ux0/app, addcont, or nothing for the root. This
+    is how you check whether a directory the game is probing actually exists -
+    a game failing on savedata or DLC usually comes down to that.
+    """
+    target = _vita_path(path)
+    out = _shell(f"ls {'-la' if long else ''} {target} 2>&1", serial).strip()
+    return f"{target}\n{out or '(empty)'}"
+
+
+def vita_mkdir(path: str, serial: str = "") -> str:
+    """Create a directory inside the guest filesystem, parents included.
+
+    Useful for testing whether a missing directory is what a game is unhappy
+    about, before writing code to create it.
+    """
+    target = _vita_path(path)
+    _shell(f"mkdir -p {target}", serial)
+    return f"{target}\n{_shell(f'ls -d {target} 2>&1', serial).strip()}"
+
+
+def vita_rm(path: str, serial: str = "") -> str:
+    """Remove a path inside the guest filesystem. Refuses the root itself."""
+    target = _vita_path(path)
+    if target.rstrip("/") == VITA_FS:
+        return "REFUSED: that is the whole guest filesystem"
+    _shell(f"rm -rf {target}", serial)
+    return f"removed {target}"
+
+
+def pull(remote: str, local: str, serial: str = "") -> str:
+    """Copy a file off the device - a log, a save, a generated cheat."""
+    target = Path(local)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    result = _run([_adb(), *_device_args(serial), "pull", _vita_path(remote), str(target)],
+                  timeout=600)
+    if not target.exists():
+        return f"pull failed\n{result}"
+    return f"wrote {target.stat().st_size} bytes to {target}"
+
+
+def crashes(lines: int = 6, serial: str = "") -> str:
+    """Native crashes and ANRs for the emulator, from logcat.
+
+    A game that vanishes has either crashed or lost the foreground, and those
+    look identical from the outside - this separates them.
+    """
+    out = _run([_adb(), *_device_args(serial), "logcat", "-d"], timeout=180)
+    wanted = ("Fatal signal", "Abort message", "ANR in", "app died", "signal 6", "signal 11")
+    hits = [l for l in out.splitlines()
+            if any(w in l for w in wanted) and (PACKAGE in l or "DEBUG" in l or "libc" in l)]
+    return "\n".join(hits[-int(lines):]) or "(no crashes or ANRs recorded)"
+
+
+def cartridges(serial: str = "") -> str:
+    """List cartridge archives on the device with the title id inside each one.
+
+    Reads the id out of the archive rather than guessing from the filename, so
+    it is the actual id to pass to boot_title or qa_title.
+    """
+    roots = ["/storage/*/Roms/psvita", "/sdcard/Roms/psvita"]
+    listing = _shell(f"ls -d {' '.join(roots)} 2>/dev/null", serial).strip().splitlines()
+    if not listing:
+        return "(no cartridge scan roots found)"
+
+    rows = []
+    for root in listing:
+        names = _shell(f"ls '{root}' 2>/dev/null | grep -iE '\\.(zip|vpk)$'", serial)
+        for name in (n.strip() for n in names.splitlines() if n.strip()):
+            found = _shell(
+                f"grep -a -o 'PCS[A-Z][0-9]\\{{5\\}}' '{root}/{name}' 2>/dev/null | sort -u | head -1",
+                serial).strip()
+            rows.append(f"  {found or '????????':<10} {name}")
+    return f"{len(rows)} cartridges\n" + "\n".join(sorted(rows))
+
+
+def device_state(serial: str = "") -> str:
+    """CPU idle, memory, and who owns each display - is the device actually free?"""
+    cpu = _shell("top -n 1 -b -o %CPU 2>/dev/null | head -4 | tail -1", serial).strip()
+    mem = _shell("free -m 2>/dev/null | head -2 | tail -1", serial).strip()
+    return f"{foreground(serial)}\ncpu:  {cpu}\nmem:  {mem}"
+
+
 TOOLS: dict[str, tuple[Callable[..., str], str, dict[str, Any]]] = {
     "devices": (devices, "List connected adb devices.", {}),
     "connect": (connect, "Connect to a device over TCP (e.g. 192.168.1.3:5555).",
@@ -920,6 +1024,32 @@ TOOLS: dict[str, tuple[Callable[..., str], str, dict[str, Any]]] = {
                   "Nothing is applied automatically.",
                   {"name": {"type": "string", "default": "Thor cheat"},
                    "value": {"type": "string"}, "serial": {"type": "string"}}),
+    "vita_ls": (vita_ls,
+                "List a path inside the emulator's guest filesystem (ux0:user/00/savedata, "
+                "ux0/app, addcont...). How to check whether a directory a game is probing "
+                "actually exists.",
+                {"path": {"type": "string"}, "long": {"type": "boolean", "default": True},
+                 "serial": {"type": "string"}}),
+    "vita_mkdir": (vita_mkdir,
+                   "Create a directory in the guest filesystem, for testing whether a "
+                   "missing one is what a game is unhappy about.",
+                   {"path": {"type": "string"}, "serial": {"type": "string"}}),
+    "vita_rm": (vita_rm, "Remove a path in the guest filesystem.",
+                {"path": {"type": "string"}, "serial": {"type": "string"}}),
+    "pull": (pull, "Copy a file off the device - a log, a save, a generated cheat.",
+             {"remote": {"type": "string"}, "local": {"type": "string"},
+              "serial": {"type": "string"}}),
+    "crashes": (crashes,
+                "Native crashes and ANRs for the emulator. A game that vanishes has "
+                "either crashed or lost the foreground; this tells them apart.",
+                {"lines": {"type": "integer", "default": 6}, "serial": {"type": "string"}}),
+    "cartridges": (cartridges,
+                   "List cartridge archives with the title id read from inside each one - "
+                   "the actual id to pass to boot_title.",
+                   {"serial": {"type": "string"}}),
+    "device_state": (device_state,
+                     "CPU idle, memory and display ownership - is the device actually free?",
+                     {"serial": {"type": "string"}}),
     "qa_title": (qa_title,
                  "Boot a title, poke it forward, record it and split it into frames. "
                  "One call per game, so a sweep across a library is repeatable.",
@@ -955,6 +1085,9 @@ REQUIRED = {
     "mem_read": ["address"],
     "mem_poke": ["address", "value"],
     "qa_title": ["title_id", "out_dir"],
+    "vita_mkdir": ["path"],
+    "vita_rm": ["path"],
+    "pull": ["remote", "local"],
 }
 
 

@@ -101,6 +101,27 @@ renderer bugs:
 
 
 
+**Debug through the MCP server, not raw `adb`.** If a debugging step needs a
+bare `adb shell`, that is a missing tool - add it to `tools/mcp_server.py`
+rather than reaching around the server. Everything the server does is
+repeatable, logged the same way each time, and safe on a shared device;
+a hand-typed `adb` command is none of those. The filesystem, crash, cartridge
+and device-state tools all exist because they were first done by hand several
+times over.
+
+Particularly worth using rather than reinventing:
+
+| instead of | use |
+|---|---|
+| `adb shell ls .../vita/ux0/...` | `vita_ls` (takes `ux0:user/00/savedata`) |
+| `adb shell mkdir`/`rm` in the guest fs | `vita_mkdir`, `vita_rm` |
+| `adb logcat \| grep -i 'Fatal signal'` | `crashes` |
+| grepping a title id out of a `.zip` | `cartridges` |
+| `adb shell top` + focus checks | `device_state` |
+| `adb pull` | `pull` |
+| a boot-and-watch loop | `boot_title`, `wait_for_log` |
+| a screenshot you then have to sanity-check | `capture` (refuses when we are not in front) |
+
 **The MCP server is a development tool, and is off by default.** It builds,
 installs, launches, drives and inspects the emulator on a real device, so it has
 no business being registered while doing anything other than working on this
