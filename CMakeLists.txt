@@ -117,7 +117,14 @@ if (NOT (USE_LTO STREQUAL "NEVER"))
 		if (USE_LTO STREQUAL "ALWAYS")
 			set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 		elseif (USE_LTO STREQUAL "RELEASE_ONLY")
+			# Thor: RelWithDebInfo counts as a release build here. Both shipped
+			# artifacts use it - the APK's reldebug variant passes
+			# -DCMAKE_BUILD_TYPE=RelWithDebInfo, and the Windows build is
+			# --config RelWithDebInfo - so setting only the RELEASE variable
+			# meant this default had never once turned LTO on for anything we
+			# actually ship.
 			set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+			set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
 		endif()
 	else()
 		message(STATUS "IPO / LTO not supported: <${ipo_supported_error}>")

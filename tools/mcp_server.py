@@ -497,6 +497,63 @@ def record_video(out_path: str, seconds: int = 10, size: str = "",
             f"wrote {target.stat().st_size} bytes to {target} ({seconds}s)")
 
 
+def _ffmpeg() -> str | None:
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    for candidate in (Path("C:/Program Files/FFmpeg/bin/ffmpeg.exe"),
+                      Path("C:/ffmpeg/bin/ffmpeg.exe")):
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def video_frames(video_path: str, out_dir: str = "", fps: float = 1.0,
+                 max_frames: int = 20) -> str:
+    """Split a recording into PNG frames.
+
+    record_video writes an mp4, and an agent cannot look at an mp4 - so this is
+    how a recording becomes readable. A per-second sample is usually enough to
+    catch corruption that only appears on some frames; raise fps to hunt
+    single-frame flicker.
+    """
+    source = Path(video_path)
+    if not source.exists():
+        return f"{source} not found"
+
+    ffmpeg = _ffmpeg()
+    if not ffmpeg:
+        return "ffmpeg not found. Put it on PATH."
+
+    target_dir = Path(out_dir) if out_dir else source.with_suffix("")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for stale in target_dir.glob("frame_*.png"):
+        stale.unlink()
+
+    result = _run([ffmpeg, "-y", "-loglevel", "error", "-i", str(source),
+                   "-vf", f"fps={fps}", "-frames:v", str(int(max_frames)),
+                   str(target_dir / "frame_%03d.png")], timeout=600)
+
+    frames = sorted(target_dir.glob("frame_*.png"))
+    if not frames:
+        return f"no frames extracted\n{result}"
+    listing = "\n".join(f"  {f}" for f in frames)
+    return f"{len(frames)} frames at {fps}/s in {target_dir}\n{listing}"
+
+
+def play(video_out: str, seconds: int = 12, fps: float = 1.0, size: str = "960x540",
+         serial: str = "") -> str:
+    """Record the running game and split it into frames in one step.
+
+    The normal way to look at gameplay: everything that matters about a renderer
+    bug is in how it changes between frames.
+    """
+    recorded = record_video(video_out, seconds=seconds, size=size, serial=serial)
+    if "wrote" not in recorded:
+        return recorded
+    return f"{recorded}\n{video_frames(video_out, fps=fps, max_frames=seconds + 4)}"
+
+
 TOOLS: dict[str, tuple[Callable[..., str], str, dict[str, Any]]] = {
     "devices": (devices, "List connected adb devices.", {}),
     "connect": (connect, "Connect to a device over TCP (e.g. 192.168.1.3:5555).",
@@ -599,6 +656,21 @@ TOOLS: dict[str, tuple[Callable[..., str], str, dict[str, Any]]] = {
                       "size": {"type": "string", "description": "e.g. 1280x720"},
                       "bit_rate_mbps": {"type": "integer", "default": 8},
                       "serial": {"type": "string"}}),
+    "video_frames": (video_frames,
+                     "Split a recording into PNG frames. An agent cannot look at "
+                     "an mp4; this is how a recording becomes readable.",
+                     {"video_path": {"type": "string"},
+                      "out_dir": {"type": "string"},
+                      "fps": {"type": "number", "default": 1.0},
+                      "max_frames": {"type": "integer", "default": 20}}),
+    "play": (play,
+             "Record the running game and split it into frames in one step - the "
+             "normal way to look at gameplay.",
+             {"video_out": {"type": "string"},
+              "seconds": {"type": "integer", "default": 12},
+              "fps": {"type": "number", "default": 1.0},
+              "size": {"type": "string", "default": "960x540"},
+              "serial": {"type": "string"}}),
 }
 
 REQUIRED = {
@@ -617,6 +689,8 @@ REQUIRED = {
     "button": ["name"],
     "type_text": ["text"],
     "record_video": ["out_path"],
+    "video_frames": ["video_path"],
+    "play": ["video_out"],
 }
 
 
