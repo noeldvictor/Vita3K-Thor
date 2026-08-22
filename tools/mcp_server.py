@@ -393,6 +393,110 @@ def release(serial: str = "") -> str:
     return f"stopped; processes left: {alive or '0'}"
 
 
+# --------------------------------------------------------------------------
+# input and capture
+#
+# The emulator takes touch and gamepad input, and a still frame often does not
+# show a bug - flicker, ordering and sync problems only read as motion. So:
+# taps, swipes, pad buttons, and video.
+# --------------------------------------------------------------------------
+
+# Pad buttons, named the way a person would say them rather than by keycode.
+# The Vita face layout is cross/circle/square/triangle; both spellings work.
+BUTTONS = {
+    "a": "BUTTON_A", "cross": "BUTTON_A", "x": "BUTTON_A",
+    "b": "BUTTON_B", "circle": "BUTTON_B", "o": "BUTTON_B",
+    "x_btn": "BUTTON_X", "square": "BUTTON_X",
+    "y": "BUTTON_Y", "triangle": "BUTTON_Y",
+    "l1": "BUTTON_L1", "r1": "BUTTON_R1",
+    "l2": "BUTTON_L2", "r2": "BUTTON_R2",
+    "l3": "BUTTON_THUMBL", "r3": "BUTTON_THUMBR",
+    "start": "BUTTON_START", "select": "BUTTON_SELECT",
+    "menu": "BUTTON_MODE", "ps": "BUTTON_MODE", "pause": "BUTTON_MODE",
+    "up": "DPAD_UP", "down": "DPAD_DOWN", "left": "DPAD_LEFT", "right": "DPAD_RIGHT",
+    "ok": "DPAD_CENTER", "confirm": "DPAD_CENTER",
+    "back": "BACK", "home": "HOME",
+}
+
+
+def screen_size(serial: str = "") -> str:
+    """Report the display size, so taps can be given in real coordinates."""
+    out = _shell("wm size", serial).strip()
+    return out or "(could not read size)"
+
+
+def tap(x: int, y: int, serial: str = "") -> str:
+    """Tap a screen coordinate.
+
+    Coordinates are physical pixels and match what `capture` writes, so read
+    them straight off a screenshot.
+    """
+    _shell(f"input tap {int(x)} {int(y)}", serial)
+    return f"tapped {int(x)},{int(y)}"
+
+
+def swipe(x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300,
+          serial: str = "") -> str:
+    """Swipe between two coordinates. Also scrolls lists - swipe up to go down."""
+    _shell(f"input swipe {int(x1)} {int(y1)} {int(x2)} {int(y2)} {int(duration_ms)}", serial)
+    return f"swiped {int(x1)},{int(y1)} -> {int(x2)},{int(y2)} over {int(duration_ms)}ms"
+
+
+def button(name: str, repeat: int = 1, serial: str = "") -> str:
+    """Press a controller button by name.
+
+    Names: a/cross, b/circle, square, triangle, l1, r1, l2, r2, l3, r3,
+    start, select, menu (the PS button, which opens the pause OSD), up, down,
+    left, right, ok, back, home.
+    """
+    key = BUTTONS.get(name.strip().lower())
+    if not key:
+        return f"unknown button {name!r}. Known: {', '.join(sorted(BUTTONS))}"
+
+    for _ in range(max(1, int(repeat))):
+        _shell(f"input keyevent KEYCODE_{key}", serial)
+    return f"pressed {name} (KEYCODE_{key}) x{max(1, int(repeat))}"
+
+
+def type_text(text: str, serial: str = "") -> str:
+    """Type text into whatever has focus, for naming saves and the like."""
+    escaped = text.replace("'", "").replace(" ", "%s")
+    _shell(f"input text '{escaped}'", serial)
+    return f"typed {text!r}"
+
+
+def record_video(out_path: str, seconds: int = 10, size: str = "",
+                 bit_rate_mbps: int = 8, serial: str = "") -> str:
+    """Record the screen to an mp4 on this machine.
+
+    Still frames hide anything that is only visible in motion - flicker,
+    tearing, one-frame corruption. Keep clips short; screenrecord caps at 180s
+    and the file has to come back over adb.
+    """
+    seconds = max(1, min(int(seconds), 180))
+    remote = "/sdcard/vita3k-mcp-capture.mp4"
+    cmd = f"screenrecord --time-limit {seconds} --bit-rate {int(bit_rate_mbps) * 1000000}"
+    if size:
+        cmd += f" --size {size}"
+    cmd += f" {remote}"
+
+    fg = foreground(serial)
+    _shell(f"rm -f {remote}", serial)
+    # screenrecord runs for the full duration, so allow for it plus the pull.
+    _run([_adb(), *_device_args(serial), "shell", cmd], timeout=seconds + 180)
+
+    target = Path(out_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    pull = _run([_adb(), *_device_args(serial), "pull", remote, str(target)],
+                timeout=300)
+    _shell(f"rm -f {remote}", serial)
+
+    if not target.exists():
+        return f"recording failed\n{pull}"
+    return (f"{fg.splitlines()[0]}\n"
+            f"wrote {target.stat().st_size} bytes to {target} ({seconds}s)")
+
+
 TOOLS: dict[str, tuple[Callable[..., str], str, dict[str, Any]]] = {
     "devices": (devices, "List connected adb devices.", {}),
     "connect": (connect, "Connect to a device over TCP (e.g. 192.168.1.3:5555).",
@@ -469,6 +573,32 @@ TOOLS: dict[str, tuple[Callable[..., str], str, dict[str, Any]]] = {
                            "serial": {"type": "string"}}),
     "release": (release, "Force-stop the emulator. Call when done - the device is shared.",
                 {"serial": {"type": "string"}}),
+    "screen_size": (screen_size, "Report the display size for coordinate math.",
+                    {"serial": {"type": "string"}}),
+    "tap": (tap, "Tap a screen coordinate, in the same pixels a screenshot uses.",
+            {"x": {"type": "integer"}, "y": {"type": "integer"},
+             "serial": {"type": "string"}}),
+    "swipe": (swipe, "Swipe between two coordinates; also scrolls lists.",
+              {"x1": {"type": "integer"}, "y1": {"type": "integer"},
+               "x2": {"type": "integer"}, "y2": {"type": "integer"},
+               "duration_ms": {"type": "integer", "default": 300},
+               "serial": {"type": "string"}}),
+    "button": (button,
+               "Press a pad button by name: a/cross, b/circle, square, triangle, "
+               "l1, r1, l2, r2, l3, r3, start, select, menu (opens the pause OSD), "
+               "up, down, left, right, ok, back, home.",
+               {"name": {"type": "string"}, "repeat": {"type": "integer", "default": 1},
+                "serial": {"type": "string"}}),
+    "type_text": (type_text, "Type text into whatever has focus.",
+                  {"text": {"type": "string"}, "serial": {"type": "string"}}),
+    "record_video": (record_video,
+                     "Record the screen to an mp4 here. Use for anything only "
+                     "visible in motion - flicker, tearing, one-frame corruption.",
+                     {"out_path": {"type": "string"},
+                      "seconds": {"type": "integer", "default": 10},
+                      "size": {"type": "string", "description": "e.g. 1280x720"},
+                      "bit_rate_mbps": {"type": "integer", "default": 8},
+                      "serial": {"type": "string"}}),
 }
 
 REQUIRED = {
@@ -482,6 +612,11 @@ REQUIRED = {
     "boot_title": ["title_id"],
     "capture": ["out_path"],
     "config_set": ["key", "value"],
+    "tap": ["x", "y"],
+    "swipe": ["x1", "y1", "x2", "y2"],
+    "button": ["name"],
+    "type_text": ["text"],
+    "record_video": ["out_path"],
 }
 
 

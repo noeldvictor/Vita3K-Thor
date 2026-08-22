@@ -547,14 +547,22 @@ void ScreenRenderer::swap_window() {
         = { vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eTransfer };
     submit_info.setWaitSemaphores(wait_semaphores);
     submit_info.setWaitDstStageMask(dst_masks);
-    submit_info.setSignalSemaphores(image_ready_semaphores[current_frame]);
+    // Thor: the present-wait semaphore must be indexed by the swapchain IMAGE, not
+    // by the frame. Its only guard against reuse is fences[swapchain_image_idx],
+    // waited in acquire_swapchain_image, and acquireNextImageKHR hands back images
+    // in whatever order it likes - so frame F can pair with image I one time round
+    // and image J the next. Keying the semaphore on the frame therefore let us
+    // signal one that an earlier vkQueuePresentKHR was still waiting on, which is
+    // the "may still be in use by VkSwapchainKHR" validation error and shows up as
+    // flicker. Keyed on the image, the fence is the correct guard.
+    submit_info.setSignalSemaphores(image_ready_semaphores[swapchain_image_idx]);
     submit_info.setCommandBuffers(current_cmd_buffer);
     state.general_queue.submit(submit_info, fences[swapchain_image_idx]);
 
     // then present the surface
     vk::PresentInfoKHR present_info{
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &image_ready_semaphores[current_frame],
+        .pWaitSemaphores = &image_ready_semaphores[swapchain_image_idx],
         .swapchainCount = 1,
         .pSwapchains = &swapchain,
         .pImageIndices = &swapchain_image_idx,
