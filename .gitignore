@@ -119,3 +119,4 @@ reports/**/*.sqlite-shm
 docs/reference/arm/*.pdf
 docs/reference/snapdragon/*.pdf
 docs/reference/thor/*.pdf
+docs/reference/vita/*.pdf

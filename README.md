@@ -171,9 +171,18 @@ Turn it off:
 claude mcp remove vita3k-thor
 ```
 
-It provides `devices`, `connect`, `build_windows`, `build_android`, `install`,
-`launch`, `launch_cartridge`, `stop`, `is_running`, `screenshot`, `logcat`,
-`runtime_action`, `knowledge_search` and `knowledge_add`.
+Build and run: `devices`, `connect`, `build_windows`, `build_android`,
+`install`, `launch`, `launch_cartridge`, `stop`, `is_running`, `screenshot`,
+`logcat`, `runtime_action`, `knowledge_search` and `knowledge_add`.
+
+Debugging: `boot_title` (force-stop, clear the log, boot a title id and wait for
+a log marker - the whole inner loop in one call), `wait_for_log`, `emu_log`
+(the emulator's own `vita3k.log`, which keeps the full boot trace rather than
+whatever survived logcat's ring buffer), `foreground`, `capture` (a screenshot
+that refuses when the emulator is not the top activity, so you never analyse
+another app by mistake), `config_get` / `config_set` (flip a flag and reboot -
+the cheapest A/B available, no rebuild), `validation_errors` (Vulkan validation
+count plus deduplicated samples) and `release`.
 
 `runtime_action` drives a running emulator (save state, load state, undo load,
 fast-forward, screenshot) through the runtime control file. Enable it in

@@ -243,6 +243,156 @@ def knowledge_add(case: str, entry_type: str, summary: str, body: str = "",
     return _run(cmd, cwd=REPO_ROOT, timeout=180)
 
 
+# --------------------------------------------------------------------------
+# debugging tools
+#
+# Everything below exists because it was hand-rolled repeatedly while chasing
+# renderer bugs. The device is shared with other agents' emulators, so anything
+# that reads the screen or the log has to say whose screen and whose log.
+# --------------------------------------------------------------------------
+
+EMU_FILES = f"/sdcard/Android/data/{PACKAGE}/files"
+EMU_LOG = f"{EMU_FILES}/vita3k.log"
+EMU_CONFIG = f"{EMU_FILES}/config.yml"
+
+
+def _shell(command: str, serial: str = "", timeout: int = 180) -> str:
+    """Run one shell command on the device and return its output without the exit line."""
+    result = _run([_adb(), *_device_args(serial), "shell", command], timeout=timeout)
+    return result.split("\n", 1)[1] if "\n" in result else ""
+
+
+def foreground(serial: str = "") -> str:
+    """Report the top resumed activity, and whether it is ours.
+
+    Check this before trusting a screenshot. Several agents drive this device,
+    and a backgrounded emulator stops stepping - its log goes quiet and its last
+    frame persists, which reads exactly like a hang.
+    """
+    out = _shell("dumpsys activity activities | grep -m1 topResumedActivity", serial)
+    ours = PACKAGE in out
+    return f"ours={ours}\n{out.strip() or '(none reported)'}"
+
+
+def emu_log(pattern: str = "", lines: int = 40, clear_first: bool = False,
+            serial: str = "") -> str:
+    """Read the emulator's own vita3k.log, optionally filtered.
+
+    This is not logcat - it is the spdlog file the emulator writes, which keeps
+    the full boot trace rather than whatever survived the ring buffer.
+    """
+    if clear_first:
+        _shell(f"rm -f {EMU_LOG}", serial)
+        return "vita3k.log removed"
+
+    quoted = pattern.replace("'", "'\\''")
+    cmd = (f"grep -iE '{quoted}' {EMU_LOG} | tail -{int(lines)}" if pattern
+           else f"tail -{int(lines)} {EMU_LOG}")
+    return _shell(cmd, serial).strip() or "(no matching lines)"
+
+
+def wait_for_log(pattern: str, timeout_s: int = 180, serial: str = "") -> str:
+    """Block until a pattern appears in vita3k.log, or the timeout expires.
+
+    Polls on the device with a real sleep rather than spinning on adb latency,
+    which otherwise burns the whole budget in round trips.
+    """
+    deadline = time.monotonic() + max(1, int(timeout_s))
+    quoted = pattern.replace("'", "'\\''")
+    while time.monotonic() < deadline:
+        hits = _shell(f"sleep 2; grep -c -iE '{quoted}' {EMU_LOG} 2>/dev/null", serial).strip()
+        if hits.isdigit() and int(hits) > 0:
+            return f"matched after {int(timeout_s - (deadline - time.monotonic()))}s ({hits} lines)"
+    return f"TIMEOUT after {timeout_s}s waiting for {pattern!r}"
+
+
+def boot_title(title_id: str, wait_for: str = "", timeout_s: int = 240,
+               serial: str = "") -> str:
+    """Force-stop, clear the log, boot a title id, and wait for a marker.
+
+    The whole inner loop of renderer debugging in one call. wait_for is a regex
+    matched against vita3k.log; leave it empty to return as soon as the activity
+    is up.
+    """
+    steps = [f"force-stop: {_shell(f'am force-stop {PACKAGE}', serial).strip() or 'ok'}"]
+    _shell(f"rm -f {EMU_LOG}", serial)
+    started = _shell(
+        f"am start -n {PACKAGE}/org.vita3k.emulator.Emulator --es title_id {title_id}",
+        serial)
+    steps.append(f"start: {started.strip().splitlines()[0] if started.strip() else 'ok'}")
+    if wait_for:
+        steps.append(f"wait: {wait_for_log(wait_for, timeout_s, serial)}")
+    steps.append(foreground(serial).splitlines()[0])
+    return "\n".join(steps)
+
+
+def capture(out_path: str, require_foreground: bool = True, serial: str = "") -> str:
+    """Screenshot, refusing by default when the emulator is not the top activity.
+
+    A plain screencap returns whatever app is in front, which on a shared device
+    is regularly somebody else's emulator.
+    """
+    fg = foreground(serial)
+    if require_foreground and not fg.startswith("ours=True"):
+        return (f"REFUSED: the emulator is not in the foreground, so a capture would "
+                f"show another app.\n{fg}\n"
+                f"Pass require_foreground=false to capture anyway.")
+    return f"{fg.splitlines()[0]}\n{screenshot(out_path, serial)}"
+
+
+def config_get(keys: str = "", serial: str = "") -> str:
+    """Read config.yml from the device. keys is an optional regex of key names."""
+    if not keys:
+        return _shell(f"cat {EMU_CONFIG}", serial).strip() or "(empty)"
+    quoted = keys.replace("'", "'\\''")
+    return _shell(f"grep -iE '{quoted}' {EMU_CONFIG}", serial).strip() or "(no matching keys)"
+
+
+def config_set(key: str, value: str, serial: str = "") -> str:
+    """Set one scalar key in the device's config.yml, keeping a .bak.
+
+    Config flags are the cheapest A/B available - no rebuild, no reinstall.
+    disable-surface-sync was found this way.
+    """
+    safe_key = key.replace("'", "")
+    before = _shell(f"grep -E '^{safe_key}:' {EMU_CONFIG}", serial).strip()
+    if not before:
+        return f"key {key!r} not present in {EMU_CONFIG}"
+
+    _shell(f"cp {EMU_CONFIG} {EMU_CONFIG}.bak", serial)
+    _shell(f"sed -i 's|^{safe_key}:.*|{safe_key}: {value}|' {EMU_CONFIG}", serial)
+    after = _shell(f"grep -E '^{safe_key}:' {EMU_CONFIG}", serial).strip()
+    return f"before: {before}\nafter:  {after}\n(previous config kept at config.yml.bak)"
+
+
+def validation_errors(lines: int = 10, serial: str = "") -> str:
+    """Count and sample Vulkan validation-layer errors in vita3k.log.
+
+    A regression check with a number attached: capture the count before a change
+    and after it.
+    """
+    count = _shell(f"grep -c 'Validation layer' {EMU_LOG} 2>/dev/null", serial).strip()
+    if not count.isdigit():
+        return "(no log, or the emulator has not run yet)"
+    if count == "0":
+        return "0 validation errors"
+    sample = _shell(
+        f"grep 'Validation layer' {EMU_LOG} | sed 's/.*Validation layer: //' "
+        f"| cut -c1-160 | sort | uniq -c | sort -rn | head -{int(lines)}", serial)
+    return f"{count} validation errors\n{sample.strip()}"
+
+
+def release(serial: str = "") -> str:
+    """Force-stop the emulator. Call this when you are done with the device.
+
+    Leaving it resident makes the next agent fight it for the foreground and the
+    GPU.
+    """
+    _shell(f"am force-stop {PACKAGE}", serial)
+    alive = _shell(f"ps -A | grep -c {PACKAGE}", serial).strip()
+    return f"stopped; processes left: {alive or '0'}"
+
+
 TOOLS: dict[str, tuple[Callable[..., str], str, dict[str, Any]]] = {
     "devices": (devices, "List connected adb devices.", {}),
     "connect": (connect, "Connect to a device over TCP (e.g. 192.168.1.3:5555).",
@@ -278,6 +428,47 @@ TOOLS: dict[str, tuple[Callable[..., str], str, dict[str, Any]]] = {
                       {"case": {"type": "string"}, "entry_type": {"type": "string"},
                        "summary": {"type": "string"}, "body": {"type": "string"},
                        "platform": {"type": "string"}}),
+    "foreground": (foreground,
+                   "Report the top resumed activity and whether it is ours. Check "
+                   "before trusting a screenshot; the device is shared.",
+                   {"serial": {"type": "string"}}),
+    "emu_log": (emu_log,
+                "Read the emulator's own vita3k.log (not logcat), optionally filtered.",
+                {"pattern": {"type": "string", "description": "optional regex"},
+                 "lines": {"type": "integer", "default": 40},
+                 "clear_first": {"type": "boolean", "default": False},
+                 "serial": {"type": "string"}}),
+    "wait_for_log": (wait_for_log,
+                     "Block until a regex appears in vita3k.log, or time out.",
+                     {"pattern": {"type": "string"},
+                      "timeout_s": {"type": "integer", "default": 180},
+                      "serial": {"type": "string"}}),
+    "boot_title": (boot_title,
+                   "Force-stop, clear the log, boot a title id, wait for a log marker. "
+                   "The inner loop of renderer debugging.",
+                   {"title_id": {"type": "string", "description": "e.g. PCSG00500"},
+                    "wait_for": {"type": "string", "description": "regex to wait for"},
+                    "timeout_s": {"type": "integer", "default": 240},
+                    "serial": {"type": "string"}}),
+    "capture": (capture,
+                "Screenshot, refusing when the emulator is not in the foreground.",
+                {"out_path": {"type": "string"},
+                 "require_foreground": {"type": "boolean", "default": True},
+                 "serial": {"type": "string"}}),
+    "config_get": (config_get, "Read config.yml from the device, optionally filtered.",
+                   {"keys": {"type": "string", "description": "optional regex of key names"},
+                    "serial": {"type": "string"}}),
+    "config_set": (config_set,
+                   "Set one scalar key in the device's config.yml, keeping a .bak. "
+                   "The cheapest A/B available - no rebuild.",
+                   {"key": {"type": "string"}, "value": {"type": "string"},
+                    "serial": {"type": "string"}}),
+    "validation_errors": (validation_errors,
+                          "Count and sample Vulkan validation errors in vita3k.log.",
+                          {"lines": {"type": "integer", "default": 10},
+                           "serial": {"type": "string"}}),
+    "release": (release, "Force-stop the emulator. Call when done - the device is shared.",
+                {"serial": {"type": "string"}}),
 }
 
 REQUIRED = {
@@ -287,6 +478,10 @@ REQUIRED = {
     "runtime_action": ["action"],
     "knowledge_search": ["query"],
     "knowledge_add": ["case", "entry_type", "summary"],
+    "wait_for_log": ["pattern"],
+    "boot_title": ["title_id"],
+    "capture": ["out_path"],
+    "config_set": ["key", "value"],
 }
 
 

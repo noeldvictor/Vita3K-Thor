@@ -81,9 +81,23 @@ Turn it off:
 claude mcp remove vita3k-thor
 ```
 
-Tools: `devices`, `connect`, `build_windows`, `build_android`, `install`,
-`launch`, `launch_cartridge`, `stop`, `is_running`, `screenshot`, `logcat`,
-`runtime_action`, `knowledge_search`, `knowledge_add`.
+Build and run: `devices`, `connect`, `build_windows`, `build_android`,
+`install`, `launch`, `launch_cartridge`, `stop`, `is_running`, `screenshot`,
+`logcat`, `runtime_action`, `knowledge_search`, `knowledge_add`.
+
+Debugging, added because each was hand-rolled over and over while chasing
+renderer bugs:
+
+| tool | why it exists |
+|---|---|
+| `boot_title` | force-stop, clear the log, boot a title id, wait for a log marker - the whole inner loop in one call |
+| `wait_for_log` | poll `vita3k.log` on the device with a real sleep, instead of spinning on adb latency |
+| `emu_log` | read `vita3k.log` itself, which keeps the full boot trace, rather than whatever survived logcat's ring buffer |
+| `foreground` | whose activity is on top. A backgrounded emulator stops stepping and reads exactly like a hang |
+| `capture` | screenshot that **refuses** when the emulator is not in front, so you never analyse someone else's app |
+| `config_get` / `config_set` | flip a config flag and reboot - the cheapest A/B there is, no rebuild. `disable-surface-sync` was found this way |
+| `validation_errors` | Vulkan validation count plus deduplicated samples; a regression check with a number attached |
+| `release` | force-stop when done, because the device is shared |
 
 `runtime_action` drives a *running* emulator — `save_state`, `load_state`,
 `undo_load_state`, `toggle_fast_forward`, `screenshot` — through the runtime
