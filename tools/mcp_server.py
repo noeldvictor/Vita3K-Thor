@@ -269,9 +269,25 @@ def foreground(serial: str = "") -> str:
     and a backgrounded emulator stops stepping - its log goes quiet and its last
     frame persists, which reads exactly like a hang.
     """
-    out = _shell("dumpsys activity activities | grep -m1 topResumedActivity", serial)
-    ours = PACKAGE in out
-    return f"ours={ours}\n{out.strip() or '(none reported)'}"
+    # The Thor drives more than one display, so dumpsys reports a
+    # topResumedActivity per display. Taking the first line reports whichever
+    # display happens to be listed first, which is not necessarily the screen
+    # anyone is looking at - and that made this answer "not ours" while the
+    # emulator was perfectly visible.
+    out = _shell("dumpsys activity activities | grep -E 'Display #|topResumedActivity'", serial)
+
+    display = "?"
+    per_display = []
+    for line in (l.strip() for l in out.splitlines()):
+        if line.startswith("Display #"):
+            display = line.split("#", 1)[1].split(" ", 1)[0]
+        elif "topResumedActivity" in line:
+            owner = line.split("u0 ", 1)[1].split("/", 1)[0] if "u0 " in line else line
+            per_display.append((display, owner))
+
+    ours = any(owner == PACKAGE for _d, owner in per_display)
+    summary = "; ".join(f"display {d}: {o}" for d, o in per_display) or "(none reported)"
+    return f"ours={ours}\n{summary}"
 
 
 def emu_log(pattern: str = "", lines: int = 40, clear_first: bool = False,
