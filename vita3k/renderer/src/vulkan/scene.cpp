@@ -318,7 +318,13 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
         for (int i = 0; i < max_stream_idx; i++) {
             if (state.vertex_streams[i].data)
                 // on the PS Vita, shader stores are used most of the time to write to a vertex buffer
-                context.state.buffer_trapping.access_buffer(state.vertex_streams[i].data.address(), static_cast<uint32_t>(state.vertex_streams[i].size), mem, context.state.has_shader_store);
+                // Thor: cover_everything, for the same reason the uniform path above
+                // already does. A game rewrites a vertex buffer at whatever offset it
+                // likes, and trapping only the exact requested range leaves the head
+                // and tail of the surrounding pages unprotected - so double-buffer
+                // mapping keeps serving stale vertices from them, which draws as
+                // stretched and degenerate geometry.
+                context.state.buffer_trapping.access_buffer(state.vertex_streams[i].data.address(), static_cast<uint32_t>(state.vertex_streams[i].size), mem, context.state.has_shader_store, true);
         }
     }
 
@@ -515,8 +521,8 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     if (use_memory_mapping) {
         auto [buffer, offset] = context.state.get_matching_mapping(indices);
         if (context.state.mapping_method == MappingMethod::DoubleBuffer) {
-            TrappedBuffer *trapped_buffer = context.state.buffer_trapping.access_buffer(indices.address(), count * index_size, mem);
-            if (trapped_buffer->extra == ~0) {
+            TrappedBuffer *trapped_buffer = context.state.buffer_trapping.access_buffer(indices.address(), count * index_size, mem, false, true);
+            if (count != 0 && trapped_buffer->extra == ~0) {
                 // store the max element in extra
                 if (format == SCE_GXM_INDEX_FORMAT_U16) {
                     uint16_t *data = indices.cast<uint16_t>().get(mem);
@@ -526,7 +532,9 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
                     trapped_buffer->extra = *std::max_element(&data[0], &data[count]);
                 }
             }
-            max_index = trapped_buffer->extra;
+            // A zero-count draw never computed a max, so extra is still the ~0
+            // sentinel; feeding that through as a real index is nonsense.
+            max_index = (count == 0) ? 0 : trapped_buffer->extra;
         }
         context.render_cmd.bindIndexBuffer(buffer, offset, index_type);
     } else {

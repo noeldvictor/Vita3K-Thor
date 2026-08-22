@@ -425,14 +425,24 @@ def screen_size(serial: str = "") -> str:
     return out or "(could not read size)"
 
 
-def tap(x: int, y: int, serial: str = "") -> str:
-    """Tap a screen coordinate.
+def tap(x: int, y: int, hold_ms: int = 150, serial: str = "") -> str:
+    """Tap a screen coordinate, as a brief held press.
 
     Coordinates are physical pixels and match what `capture` writes, so read
     them straight off a screenshot.
+
+    This deliberately does not use `input tap`. That injects a down and an up in
+    the same instant, which the Compose UI accepts but the emulated Vita
+    touchscreen ignores completely - the game sees nothing. A zero-distance
+    swipe holds the contact long enough to register. Set hold_ms to 0 for the
+    instantaneous form if you specifically want it.
     """
-    _shell(f"input tap {int(x)} {int(y)}", serial)
-    return f"tapped {int(x)},{int(y)}"
+    if int(hold_ms) <= 0:
+        _shell(f"input tap {int(x)} {int(y)}", serial)
+        return f"tapped {int(x)},{int(y)} (instant)"
+
+    _shell(f"input swipe {int(x)} {int(y)} {int(x)} {int(y)} {int(hold_ms)}", serial)
+    return f"tapped {int(x)},{int(y)} (held {int(hold_ms)}ms)"
 
 
 def swipe(x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300,
@@ -632,8 +642,12 @@ TOOLS: dict[str, tuple[Callable[..., str], str, dict[str, Any]]] = {
                 {"serial": {"type": "string"}}),
     "screen_size": (screen_size, "Report the display size for coordinate math.",
                     {"serial": {"type": "string"}}),
-    "tap": (tap, "Tap a screen coordinate, in the same pixels a screenshot uses.",
+    "tap": (tap,
+            "Tap a screen coordinate as a brief held press, in the same pixels a "
+            "screenshot uses. A held press is required: the emulated Vita "
+            "touchscreen ignores an instantaneous down+up.",
             {"x": {"type": "integer"}, "y": {"type": "integer"},
+             "hold_ms": {"type": "integer", "default": 150},
              "serial": {"type": "string"}}),
     "swipe": (swipe, "Swipe between two coordinates; also scrolls lists.",
               {"x1": {"type": "integer"}, "y1": {"type": "integer"},
