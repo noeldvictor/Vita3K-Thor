@@ -142,6 +142,12 @@ game. Compose navigates on DPAD_* by itself; it does not know `KEYCODE_BUTTON_A`
 
 ## Things that will bite you
 
+* **Nothing heavy may run on the Android UI thread from the pause menu.** A
+  quickstate capture is hundreds of megabytes - Chaos Rings III is 373 MiB - and
+  calling it inline from a Compose `onClick` blocks input long enough for Android
+  to kill the app with an ANR. `EmulationSessionViewModel.runtimeAction` goes
+  through `viewModelScope` + `Dispatchers.IO` for exactly this reason; keep any
+  new runtime action on that path.
 * **Nothing that runs before SDL is initialised may use `fs_utils::read_data` on
   Android.** It routes through `SDL_IOFromFile` → `Android_JNI_FileOpen` and
   aborts the process with `CallStaticObjectMethod received NULL jclass`. Use

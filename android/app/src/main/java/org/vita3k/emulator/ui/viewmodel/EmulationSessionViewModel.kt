@@ -5,6 +5,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.vita3k.emulator.Emulator
 import org.vita3k.emulator.NativeLib
 import org.vita3k.emulator.data.NativeImeState
@@ -190,9 +194,27 @@ class EmulationSessionViewModel(application: Application) : AndroidViewModel(app
         runCatching { NativeLib.setPerformanceOverlay(enabled) }
     }
 
+    fun performanceOverlayPosition(): Int =
+        runCatching { NativeLib.performanceOverlayPosition() }.getOrDefault(0)
+
+    fun setPerformanceOverlayPosition(position: Int) {
+        runCatching { NativeLib.setPerformanceOverlayPosition(position) }
+    }
+
+    /**
+     * Thor: runs off the UI thread on purpose. save_state captures the whole guest
+     * address space - hundreds of MiB - and doing that inline blocked input long
+     * enough for Android to raise an ANR.
+     */
     fun runtimeAction(action: String, successMessage: String, failureMessage: String) {
-        val ok = runCatching { NativeLib.runtimeAction(action) }.getOrDefault(false)
-        uiState = uiState.copy(statusMessage = if (ok) successMessage else failureMessage)
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                runCatching { NativeLib.runtimeAction(action) }.getOrDefault(false)
+            }
+            uiState = uiState.copy(
+                statusMessage = if (ok) successMessage else failureMessage
+            )
+        }
     }
 
     fun requestExit() {

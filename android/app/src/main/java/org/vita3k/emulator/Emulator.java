@@ -324,17 +324,19 @@ public class Emulator extends SDLActivity
         }
 
         // Thor: let a controller drive the pause menu. Compose navigates on DPAD_*
-        // and activates on DPAD_CENTER, but knows nothing about BUTTON_A/B, and
-        // while the menu is up SDL would otherwise swallow the pad entirely. So
-        // remap the face buttons onto what Compose understands and keep the events
-        // away from the game underneath.
-        if (isPauseMenuVisible() && event.getSource() != InputDevice.SOURCE_KEYBOARD) {
+        // and activates on DPAD_CENTER, but knows nothing about BUTTON_A/BUTTON_B,
+        // and while the menu is up SDL would otherwise swallow the pad entirely.
+        if (isPauseMenuVisible()) {
             final int remapped = remapControllerKeyForMenu(event.getKeyCode());
             if (remapped == KeyEvent.KEYCODE_BACK) {
                 if (event.getAction() == KeyEvent.ACTION_UP && event.getRepeatCount() == 0
                         && sessionViewModel != null) {
                     sessionViewModel.handleBackPressed(this);
                 }
+                return true;
+            }
+            if (remapped == MENU_KEY_CONSUME) {
+                // Consumed so it cannot reach the game running underneath.
                 return true;
             }
             if (remapped != KeyEvent.KEYCODE_UNKNOWN) {
@@ -648,6 +650,9 @@ public class Emulator extends SDLActivity
         }, IME_RESTORE_DELAY_MS);
     }
 
+    /** Thor: sentinel meaning "swallow this key", distinct from KEYCODE_UNKNOWN. */
+    private static final int MENU_KEY_CONSUME = -1;
+
     /** Thor: true while the pause menu owns the screen. */
     private boolean isPauseMenuVisible() {
         return sessionViewModel != null
@@ -665,11 +670,17 @@ public class Emulator extends SDLActivity
                 return KeyEvent.KEYCODE_DPAD_CENTER;
             case KeyEvent.KEYCODE_BUTTON_B:
                 return KeyEvent.KEYCODE_BACK;
+            case KeyEvent.KEYCODE_BUTTON_X:
+            case KeyEvent.KEYCODE_BUTTON_Y:
             case KeyEvent.KEYCODE_BUTTON_L1:
             case KeyEvent.KEYCODE_BUTTON_R1:
-                // Nothing sensible to map the shoulders onto; swallow them so they
-                // do not reach the game while the menu is open.
-                return KeyEvent.KEYCODE_UNKNOWN;
+            case KeyEvent.KEYCODE_BUTTON_L2:
+            case KeyEvent.KEYCODE_BUTTON_R2:
+            case KeyEvent.KEYCODE_BUTTON_THUMBL:
+            case KeyEvent.KEYCODE_BUTTON_THUMBR:
+                // Nothing sensible to map these onto, but they must not reach the
+                // game while the menu is open.
+                return MENU_KEY_CONSUME;
             default:
                 return KeyEvent.KEYCODE_UNKNOWN;
         }

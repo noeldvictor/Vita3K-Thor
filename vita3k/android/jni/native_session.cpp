@@ -271,4 +271,17 @@ Java_org_vita3k_emulator_NativeLib_setPerformanceOverlay(JNIEnv *env, jclass, jb
         runtime_set_performance_overlay(*emuenv, enabled == JNI_TRUE);
 }
 
+JNIEXPORT jint JNICALL
+Java_org_vita3k_emulator_NativeLib_performanceOverlayPosition(JNIEnv *env, jclass) {
+    auto *emuenv = get_emuenv();
+    return emuenv ? static_cast<jint>(runtime_performance_overlay_position(*emuenv)) : 0;
+}
+
+JNIEXPORT void JNICALL
+Java_org_vita3k_emulator_NativeLib_setPerformanceOverlayPosition(JNIEnv *env, jclass, jint position) {
+    auto *emuenv = get_emuenv();
+    if (emuenv)
+        runtime_set_performance_overlay_position(*emuenv, static_cast<int>(position));
+}
+
 } // extern "C"

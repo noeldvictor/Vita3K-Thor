@@ -62,6 +62,8 @@ struct perf_overlay : public overlay {
     compiled_resource get_compiled() override;
 
 private:
+    // The graph is meaningless in badge-only mode, where the overlay proper is off.
+    bool graph_active() const { return m_graph_enabled && !m_speed_only; }
     void reset_transforms();
     void reset_body();
     void update_text();

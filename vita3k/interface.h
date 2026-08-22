@@ -57,6 +57,9 @@ uint32_t runtime_speed_percent(const EmuEnvState &emuenv);
 void runtime_set_fast_forward_speed(EmuEnvState &emuenv, uint32_t speed_percent);
 bool runtime_performance_overlay_enabled(const EmuEnvState &emuenv);
 void runtime_set_performance_overlay(EmuEnvState &emuenv, bool enabled);
+// Corner the overlay sits in; see PerformanceOverlayPosition.
+int runtime_performance_overlay_position(const EmuEnvState &emuenv);
+void runtime_set_performance_overlay_position(EmuEnvState &emuenv, int position);
 void runtime_request_save_state(EmuEnvState &emuenv);
 void runtime_request_load_state(EmuEnvState &emuenv);
 void runtime_request_undo_load_state(EmuEnvState &emuenv);

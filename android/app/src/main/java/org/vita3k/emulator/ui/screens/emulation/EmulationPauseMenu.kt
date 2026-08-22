@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Switch
@@ -1043,6 +1044,7 @@ private fun SpeedSection(sessionViewModel: EmulationSessionViewModel) {
     var configured by remember { mutableIntStateOf(sessionViewModel.fastForwardSpeedPercent()) }
     var current by remember { mutableIntStateOf(sessionViewModel.runtimeSpeedPercent()) }
     var overlayOn by remember { mutableStateOf(sessionViewModel.performanceOverlayEnabled()) }
+    var overlayPos by remember { mutableIntStateOf(sessionViewModel.performanceOverlayPosition()) }
 
     val fastForwarding = current > 100
 
@@ -1097,20 +1099,27 @@ private fun SpeedSection(sessionViewModel: EmulationSessionViewModel) {
                 }
             }
 
-            FilledTonalButton(
-                onClick = {
-                    sessionViewModel.runtimeAction("toggle_fast_forward", "", "")
-                    current = sessionViewModel.runtimeSpeedPercent()
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    if (fastForwarding) {
-                        stringResource(R.string.emulation_speed_stop)
-                    } else {
-                        stringResource(R.string.emulation_speed_start, speedLabel(configured))
-                    }
-                )
+            // A filled button while engaged and a tonal one while idle, so the state
+            // reads from the button itself rather than only from its label.
+            val toggleFastForward = {
+                sessionViewModel.runtimeAction("toggle_fast_forward", "", "")
+                current = sessionViewModel.runtimeSpeedPercent()
+            }
+            val toggleLabel = if (fastForwarding) {
+                stringResource(R.string.emulation_speed_stop)
+            } else {
+                stringResource(R.string.emulation_speed_start, speedLabel(configured))
+            }
+            if (fastForwarding) {
+                Button(
+                    onClick = toggleFastForward,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(toggleLabel) }
+            } else {
+                FilledTonalButton(
+                    onClick = toggleFastForward,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(toggleLabel) }
             }
 
             Row(
@@ -1129,6 +1138,38 @@ private fun SpeedSection(sessionViewModel: EmulationSessionViewModel) {
                         overlayOn = it
                     }
                 )
+            }
+
+            // Where the readout sits. Upper right is the usual choice - upper left
+            // collides with a lot of games' own HUDs.
+            if (overlayOn) {
+                Text(
+                    text = stringResource(R.string.emulation_overlay_position),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val corners = listOf(
+                        0 to R.string.emulation_overlay_pos_tl,
+                        2 to R.string.emulation_overlay_pos_tr,
+                        3 to R.string.emulation_overlay_pos_bl,
+                        5 to R.string.emulation_overlay_pos_br
+                    )
+                    corners.forEach { (value, label) ->
+                        FilterChip(
+                            selected = overlayPos == value,
+                            onClick = {
+                                sessionViewModel.setPerformanceOverlayPosition(value)
+                                overlayPos = value
+                            },
+                            label = { Text(stringResource(label)) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
             }
 
             Text(

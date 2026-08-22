@@ -10399,6 +10399,17 @@ void runtime_set_performance_overlay(EmuEnvState &emuenv, bool enabled) {
     LOG_INFO("Performance overlay {}", enabled ? "on" : "off");
 }
 
+int runtime_performance_overlay_position(const EmuEnvState &emuenv) {
+    return emuenv.cfg.performance_overlay_position;
+}
+
+void runtime_set_performance_overlay_position(EmuEnvState &emuenv, int position) {
+    emuenv.cfg.performance_overlay_position = std::clamp(position,
+        static_cast<int>(TOP_LEFT), static_cast<int>(BOTTOM_RIGHT));
+    app::sync_perf_overlay_config(emuenv);
+    config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
+}
+
 
 void runtime_request_save_state(EmuEnvState &emuenv) {
     const auto title_id = emuenv.io.title_id.empty() ? std::string("unknown-title") : emuenv.io.title_id;

@@ -92,7 +92,7 @@ void perf_overlay::set_fps_data(uint32_t fps, uint32_t avg_fps, uint32_t min_fps
     m_ms_per_frame = ms_per_frame;
 
     if (changed || m_force_repaint) {
-        if (m_graph_enabled && fps_values && fps_values_count > 0) {
+        if (graph_active() && fps_values && fps_values_count > 0) {
             m_fps_graph.record_datapoint(static_cast<float>(fps), true);
             m_fps_graph.set_title(fmt::format("Framerate: {:04.1f}", static_cast<float>(fps)).c_str());
         }
@@ -162,16 +162,16 @@ void perf_overlay::reset_transforms() {
     m_body.set_padding(k_padding, k_padding, k_padding, k_padding);
 
     uint16_t graph_height = 0;
-    if (m_graph_enabled) {
+    if (graph_active()) {
         m_fps_graph.set_size(m_body.w > 0 ? m_body.w : 150, k_graph_h);
         graph_height = m_fps_graph.get_height();
     }
 
-    const uint16_t overlay_width = m_graph_enabled
+    const uint16_t overlay_width = graph_active()
         ? std::max(m_body.w, m_fps_graph.w)
         : m_body.w;
     const uint16_t overlay_height = static_cast<uint16_t>(
-        m_body.h + (m_graph_enabled && m_body.h > 0 ? k_padding + graph_height : 0));
+        m_body.h + (graph_active() && m_body.h > 0 ? k_padding + graph_height : 0));
 
     int16_t pos_x = 0;
     int16_t pos_y = 0;
@@ -205,7 +205,7 @@ void perf_overlay::reset_transforms() {
 
     m_body.set_pos(pos_x, pos_y);
 
-    if (m_graph_enabled) {
+    if (graph_active()) {
         int16_t graph_y = static_cast<int16_t>(pos_y + m_body.h + k_padding);
         m_fps_graph.set_pos(pos_x, graph_y);
         m_fps_graph.set_size(overlay_width, k_graph_h);
@@ -218,13 +218,15 @@ void perf_overlay::reset_transforms() {
 compiled_resource perf_overlay::get_compiled() {
     compiled_resource result;
 
-    if (!visible || m_fps == 0)
+    // In badge-only mode there is no FPS reading to gate on - the badge exists to
+    // report fast forward, which is just as true before the first frame lands.
+    if (!visible || (m_fps == 0 && !m_speed_only))
         return result;
 
     auto &body = m_body.get_compiled();
     result.add(body);
 
-    if (m_graph_enabled) {
+    if (graph_active()) {
         auto &gr = m_fps_graph.get_compiled();
         result.add(gr);
     }

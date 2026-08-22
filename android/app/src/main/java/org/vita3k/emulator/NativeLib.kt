@@ -173,6 +173,11 @@ object NativeLib {
     external fun performanceOverlayEnabled(): Boolean
 
     external fun setPerformanceOverlay(enabled: Boolean)
+
+    /** Thor: corner the FPS overlay sits in. 0 TL, 1 TC, 2 TR, 3 BL, 4 BC, 5 BR. */
+    external fun performanceOverlayPosition(): Int
+
+    external fun setPerformanceOverlayPosition(position: Int)
     /** Returns the title of the currently running app session, or an empty string when unavailable. */
     external fun getRunningAppTitle(): String
     /** Returns true while either SceIme or CommonDialog IME is active. */
