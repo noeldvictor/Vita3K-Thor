@@ -418,9 +418,19 @@ EXPORT(SceInt32, _sceAppMgrLoadExec, const char *appPath, Ptr<char> const argv[]
 
     LOG_INFO("sceAppMgrLoadExec run self: {}", appPath);
 
-    // Load exec executable
+    // Load exec executable.
+    //
+    // Thor: read_app_file looks under ux0:app/<app path>/, which is where an
+    // *installed* game lives. A virtual cartridge is never installed - its
+    // content is in the mounted archive - so games that chain to a second
+    // executable, like Uncharted, failed here with INVALID_SELF_PATH and never
+    // got past their first eboot. Same fix as module_parent.cpp: when a
+    // cartridge is mounted, read through it.
     vfs::FileBuffer exec_buffer;
-    if (vfs::read_app_file(exec_buffer, emuenv.vita_fs_path, emuenv.io.app_path, exec_path)) {
+    const bool exec_found = vfs::current_app_archive_mounted(emuenv.io)
+        ? vfs::read_current_app_file(exec_buffer, emuenv.io, emuenv.vita_fs_path, exec_path)
+        : vfs::read_app_file(exec_buffer, emuenv.vita_fs_path, emuenv.io.app_path, exec_path);
+    if (exec_found) {
         std::vector<std::string> exec_argv;
         if (argv && argv->get(emuenv.mem)) {
             size_t args = 0;
