@@ -56,8 +56,8 @@ void sync_viewport_real(const GLState &state, GLContext &context, const float xO
 
 void sync_clipping(const GLState &state, GLContext &context);
 void sync_cull(const GxmRecordState &state);
-void sync_depth_func(const SceGxmDepthFunc func, const bool is_front);
-void sync_depth_write_enable(const SceGxmDepthWriteMode mode, const bool is_front);
+void sync_depth_func(const renderer::GxmRecordState &state);
+void sync_depth_write_enable(const renderer::GxmRecordState &state);
 void sync_depth_data(const renderer::GxmRecordState &state);
 void sync_stencil_data(const renderer::GxmRecordState &state, const MemState &mem);
 void sync_stencil_func(const GxmStencilStateOp &state_op, const GxmStencilStateValues &state_vals, const MemState &mem, const bool is_back_stencil);

@@ -202,14 +202,23 @@ void sync_cull(const GxmRecordState &state) {
     }
 }
 
-void sync_depth_func(const SceGxmDepthFunc func, const bool is_front) {
-    if (is_front)
-        glDepthFunc(translate_depth_func(func));
+// GL, like a Vulkan pipeline, has a single glDepthFunc and glDepthMask covering
+// both faces, while GXM keeps separate front and back values. The back side used
+// to be dropped outright - these took an is_front flag and ignored the false
+// case - which is wrong whenever culling leaves only back faces visible. Apply
+// the state for whichever side survives; see the longer note in
+// vulkan/pipeline_cache.cpp.
+static bool back_faces_visible(const renderer::GxmRecordState &state) {
+    return state.two_sided == SCE_GXM_TWO_SIDED_ENABLED && state.cull_mode == SCE_GXM_CULL_CCW;
 }
 
-void sync_depth_write_enable(const SceGxmDepthWriteMode mode, const bool is_front) {
-    if (is_front)
-        glDepthMask(mode == SCE_GXM_DEPTH_WRITE_ENABLED ? GL_TRUE : GL_FALSE);
+void sync_depth_func(const renderer::GxmRecordState &state) {
+    glDepthFunc(translate_depth_func(back_faces_visible(state) ? state.back_depth_func : state.front_depth_func));
+}
+
+void sync_depth_write_enable(const renderer::GxmRecordState &state) {
+    const SceGxmDepthWriteMode mode = back_faces_visible(state) ? state.back_depth_write_mode : state.front_depth_write_mode;
+    glDepthMask(mode == SCE_GXM_DEPTH_WRITE_ENABLED ? GL_TRUE : GL_FALSE);
 }
 
 void sync_depth_data(const renderer::GxmRecordState &state) {

@@ -97,6 +97,29 @@ runtime-control-file: /path/to/vita3k-control.txt
 or set `VITA3K_RUNTIME_CONTROL_FILE`. Without one, `runtime_action` tells you so
 rather than failing silently.
 
+## The AYN Thor is shared
+
+Several agents work on emulators for this device at once, and there is one
+device. It is not yours for the duration of a task.
+
+* **Expect to be interrupted.** Another agent will launch its own emulator,
+  and Android will background yours. A backgrounded emulator stops stepping,
+  so its log goes quiet and its last frame persists. That looks exactly like a
+  hang, and it is not one. Before calling anything a hang, check that your
+  activity is still `topResumedActivity` for the whole window you measured.
+* **Close the emulator when you are done with it** -
+  `adb shell am force-stop org.vita3k.emulator.debug`. Leaving it resident
+  makes the next agent fight it for the foreground and the GPU.
+* **A busy device is not a reason to stop.** Most of the work here does not
+  need hardware: reading upstream, porting commits, comparing patches against
+  what upstream already fixed, building both targets, writing up findings.
+  Do that while you wait, and batch the on-device verification into one pass
+  at the end.
+* **Screenshots are of whatever is on top**, which may be someone else's app.
+  Check focus before reading a screenshot as evidence about Vita3K.
+* Do not force-stop, uninstall, or reconfigure the other emulators. They
+  belong to work in progress elsewhere.
+
 ## Things that will bite you
 
 * **Nothing that runs before SDL is initialised may use `fs_utils::read_data` on

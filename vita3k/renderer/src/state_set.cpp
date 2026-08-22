@@ -271,7 +271,7 @@ COMMAND_SET_STATE(depth_func) {
 
     switch (renderer.current_backend) {
     case Backend::OpenGL:
-        gl::sync_depth_func(depth_func, is_front);
+        gl::sync_depth_func(render_context->record);
         break;
 
     case Backend::Vulkan:
@@ -296,7 +296,7 @@ COMMAND_SET_STATE(depth_write_enable) {
 
     switch (renderer.current_backend) {
     case Backend::OpenGL:
-        gl::sync_depth_write_enable(mode, is_front);
+        gl::sync_depth_write_enable(render_context->record);
         break;
 
     case Backend::Vulkan:
@@ -450,7 +450,8 @@ COMMAND_SET_STATE(two_sided) {
 
     switch (renderer.current_backend) {
     case Backend::OpenGL:
-        // TODO: something should be done here
+        gl::sync_depth_func(render_context->record);
+        gl::sync_depth_write_enable(render_context->record);
         break;
 
     case Backend::Vulkan:
@@ -473,6 +474,8 @@ COMMAND_SET_STATE(cull_mode) {
     switch (renderer.current_backend) {
     case Backend::OpenGL:
         gl::sync_cull(render_context->record);
+        gl::sync_depth_func(render_context->record);
+        gl::sync_depth_write_enable(render_context->record);
         break;
 
     case Backend::Vulkan:

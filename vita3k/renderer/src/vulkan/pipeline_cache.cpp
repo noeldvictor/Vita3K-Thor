@@ -831,15 +831,31 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     const vk::PipelineShaderStageCreateInfo vertex_shader = retrieve_shader(vertex_program_gxm.program.get(mem), vertex_program.hash, true, fragment_program_gxm.is_maskupdate, mem, hints);
     const vk::PipelineShaderStageCreateInfo fragment_shader = retrieve_shader(gxm_fragment_shader, fragment_program.hash, false, fragment_program_gxm.is_maskupdate, mem, hints, record.is_gamma_corrected);
     const vk::PipelineShaderStageCreateInfo shader_stages[] = { vertex_shader, fragment_shader };
-    // disable the fragment shader if gxm asks us to
-    const bool is_fragment_disabled = record.front_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED || gxm_fragment_shader->has_no_effect();
+    // GXM keeps separate depth and fragment-program state for front and back
+    // faces. A Vulkan pipeline has only one depthCompareOp and one
+    // depthWriteEnable - unlike stencil, depth state is not two-sided - so one
+    // side has to be chosen, and taking the front unconditionally is wrong
+    // exactly when culling leaves only back faces visible. That is the case the
+    // back state exists for: the hardware then uses the back values, and the
+    // front values may be anything at all.
+    //
+    // gxm's front face is always counter clockwise, so SCE_GXM_CULL_CCW culls the
+    // front and leaves the back. With two-sided disabled GXM applies the front
+    // state to both faces, which makes the back fields meaningless - so they must
+    // only be consulted when it is enabled.
+    const bool two_sided = (record.two_sided == SCE_GXM_TWO_SIDED_ENABLED);
+    const bool back_faces_visible = two_sided && record.cull_mode == SCE_GXM_CULL_CCW;
+    const SceGxmDepthFunc visible_depth_func = back_faces_visible ? record.back_depth_func : record.front_depth_func;
+    const SceGxmDepthWriteMode visible_depth_write_mode = back_faces_visible ? record.back_depth_write_mode : record.front_depth_write_mode;
+    const SceGxmFragmentProgramMode visible_fragment_program_mode = back_faces_visible ? record.back_side_fragment_program_mode : record.front_side_fragment_program_mode;
+
+    // disable the fragment shader if gxm asks us to, for the side being drawn
+    const bool is_fragment_disabled = visible_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED || gxm_fragment_shader->has_no_effect();
     const uint32_t shader_stage_count = is_fragment_disabled ? 1U : 2U;
 
     const vk::PipelineInputAssemblyStateCreateInfo input_assembly{
         .topology = translate_primitive(type)
     };
-
-    const bool two_sided = (record.two_sided == SCE_GXM_TWO_SIDED_ENABLED);
 
     // A pass bound with no colour surface has nothing to write to, so shader
     // interlock is meaningless there and the write mask has to be empty - the
@@ -848,7 +864,7 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     const bool use_shader_interlock = has_color_surface && state.features.support_shader_interlock && gxm_fragment_shader->is_frag_color_used();
 
     const vk::PipelineRasterizationStateCreateInfo rasterizer{
-        .polygonMode = translate_polygon_mode(record.front_polygon_mode),
+        .polygonMode = translate_polygon_mode(back_faces_visible ? record.back_polygon_mode : record.front_polygon_mode),
         .cullMode = translate_cull_mode(record.cull_mode),
         // front face is always counter clockwise
         .frontFace = vk::FrontFace::eCounterClockwise,
@@ -862,8 +878,8 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     // on a tiled renderer
     const vk::PipelineDepthStencilStateCreateInfo ds_info{
         .depthTestEnable = VK_TRUE,
-        .depthWriteEnable = (record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED),
-        .depthCompareOp = translate_depth_func(record.front_depth_func),
+        .depthWriteEnable = (visible_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED),
+        .depthCompareOp = translate_depth_func(visible_depth_func),
         .depthBoundsTestEnable = VK_FALSE,
         .stencilTestEnable = VK_TRUE,
         .front = convert_op_state(record.front_stencil_state_op),
