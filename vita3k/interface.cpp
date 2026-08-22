@@ -63,6 +63,8 @@
 // Thor: headers for the quickstate implementation below.
 #include <app/functions.h>
 #include <app/memory_search.h>
+#include <touch/functions.h>
+#include <touch/state.h>
 #include <app/state.h>
 #include <audio/state.h>
 #include <bgm_player/functions.h>
@@ -10719,6 +10721,25 @@ static bool apply_runtime_memory_action(EmuEnvState &emuenv, const std::string &
     if (action == "mem_narrow" || action == "mem_filter") {
         app::memory_search_narrow(emuenv, runtime_memory_search, compare, value);
         runtime_write_search_result(emuenv, app::memory_search_report(emuenv, runtime_memory_search));
+        return true;
+    }
+
+    // Thor: the Vita has two touch panels and a single global selector, so a
+    // front-panel UI simply never sees a tap while the emulator is switched to
+    // the rear. Being able to say which panel a tap lands on is the difference
+    // between driving a game and guessing why nothing happens.
+    if (action == "touch_front" || action == "touch_back") {
+        const bool is_back = action == "touch_back";
+        set_rear_touchscreen(emuenv.touch, is_back);
+        runtime_write_search_result(emuenv,
+            fmt::format("touch panel = {}\n", is_back ? "back" : "front"));
+        return true;
+    }
+
+    if (action == "touch_panel") {
+        runtime_write_search_result(emuenv,
+            fmt::format("touch panel = {}\n",
+                emuenv.touch.touchscreen_port == SCE_TOUCH_PORT_BACK ? "back" : "front"));
         return true;
     }
 

@@ -101,6 +101,24 @@ renderer bugs:
 
 
 
+**Driving a game from adb is not the same as driving the Compose UI.** Three
+separate things bite here, and each one looks like "input is broken":
+
+* **A tap must be held.** `input tap` injects a down and an up in the same
+  instant. The Compose pause menu accepts that; the emulated Vita touchscreen
+  ignores it completely and the game sees nothing at all. The MCP `tap` holds
+  the contact for 150ms, which is what actually got Chaos Rings III past its
+  title screen.
+* **There are two touch panels.** The Vita has front and rear, and the emulator
+  has one global selector (`set_rear_touchscreen`). A front-panel UI never sees
+  a tap while the emulator is switched to the rear. `touch_panel` reads and sets
+  it - check it before concluding touch is broken.
+* **Some prompts still do not respond**, to held taps, to `input keyevent`, or
+  to gamepad-sourced `input gamepad keyevent`. DOA Venus's autosave notice is
+  the known case: it renders, the emulator is in the foreground and running at
+  30fps, and none of the three advance it. This is unexplained and is the thing
+  blocking automated play from reaching real gameplay.
+
 **Debug through the MCP server, not raw `adb`.** If a debugging step needs a
 bare `adb shell`, that is a missing tool - add it to `tools/mcp_server.py`
 rather than reaching around the server. Everything the server does is

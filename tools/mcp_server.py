@@ -661,6 +661,22 @@ def _control(serial: str, action: str, **args: Any) -> str:
             "rebooted since? run runtime_control_enable)")
 
 
+def touch_panel(panel: str = "", serial: str = "") -> str:
+    """Read or set which Vita touch panel taps land on: front or back.
+
+    The Vita has two panels and the emulator has one global selector, so a
+    front-panel UI never sees a tap while the emulator is switched to the rear -
+    the game simply does not respond and nothing says why. Check this before
+    concluding that touch input is broken.
+    """
+    key = panel.strip().lower()
+    if key in ("front", "back"):
+        return _control(serial, f"touch_{key}")
+    if key:
+        return "panel must be 'front' or 'back' (or empty to read the current one)"
+    return _control(serial, "touch_panel")
+
+
 def mem_search(value: str, width: int = 4, compare: str = "equal",
                serial: str = "") -> str:
     """First scan: every mapped guest page, for a value you can see in-game.
@@ -992,6 +1008,12 @@ TOOLS: dict[str, tuple[Callable[..., str], str, dict[str, Any]]] = {
                                "Point the emulator at a control file and enable polling. "
                                "Required before any mem_* tool works.",
                                {"serial": {"type": "string"}}),
+    "touch_panel": (touch_panel,
+                    "Read or set which Vita touch panel taps land on - front or back. "
+                    "A front-panel UI never sees a tap while the emulator is on the "
+                    "rear, so check this before deciding touch is broken.",
+                    {"panel": {"type": "string", "description": "front, back, or empty to read"},
+                     "serial": {"type": "string"}}),
     "mem_search": (mem_search,
                    "First scan of guest memory for a value visible in-game (HP, gold, "
                    "a counter). width is 1, 2 or 4 bytes.",
