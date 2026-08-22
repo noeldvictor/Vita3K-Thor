@@ -77,6 +77,17 @@ struct CtrlState {
 
     std::atomic<bool> overlay_input_intercepted{ false };
 
+    // Thor: buttons injected from outside the process, via the runtime control
+    // file. Android input injection cannot drive a game - an injected event has
+    // no backing InputDevice, so SDL drops it rather than matching it to an
+    // opened joystick - which left automated play unable to press anything. This
+    // goes in below SDL entirely.
+    //
+    // The hold expires on a deadline rather than needing a matching release, so
+    // a caller that dies mid-press cannot leave a button stuck down forever.
+    std::atomic<uint32_t> injected_buttons{ 0 };
+    std::atomic<uint64_t> injected_buttons_until_us{ 0 };
+
     struct OverlayMouseState {
         std::atomic<float> x{ 0.f };
         std::atomic<float> y{ 0.f };

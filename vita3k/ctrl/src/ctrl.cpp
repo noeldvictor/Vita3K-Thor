@@ -127,6 +127,28 @@ void refresh_controllers(CtrlState &state, EmuEnvState &emuenv) {
     state.has_motion_support = found_gyro && found_accel;
 }
 
+#include <chrono>
+
+// Thor: see CtrlState::injected_buttons. Applied last so an injected press
+// cannot be cleared by a real controller reporting nothing pressed.
+static void apply_injected(uint32_t *buttons, EmuEnvState &emuenv) {
+    auto &ctrl = emuenv.ctrl;
+    const uint32_t injected = ctrl.injected_buttons.load(std::memory_order_relaxed);
+    if (injected == 0)
+        return;
+
+    const uint64_t now_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+    if (now_us >= ctrl.injected_buttons_until_us.load(std::memory_order_relaxed)) {
+        ctrl.injected_buttons.store(0, std::memory_order_relaxed);
+        return;
+    }
+
+    *buttons |= injected;
+}
+
 static void apply_keyboard(uint32_t *buttons, float axes[4], bool ext, EmuEnvState &emuenv) {
     const auto &kb = emuenv.ctrl.keyboard_state;
     const uint32_t kb_buttons = ext ? kb.buttons_ext : kb.buttons;
@@ -277,6 +299,9 @@ static void retrieve_ctrl_data(EmuEnvState &emuenv, int port, bool is_v2, bool n
             apply_controller(emuenv, &buttons, axes.data(), controller.controller.get(), is_v2);
         }
     }
+
+    if (port == 1)
+        apply_injected(&buttons, emuenv);
 
     reset_axes();
 }

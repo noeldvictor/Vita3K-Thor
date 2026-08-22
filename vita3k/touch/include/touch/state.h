@@ -34,6 +34,14 @@ struct TouchState {
     SceInt16 pinch_dist = initial_pinch_dist;
     SceInt16 pinch_speed = 40;
 
+    // Thor: a touch injected from outside the process, in 0..1 screen space.
+    // Same reason as CtrlState::injected_buttons - Android input injection never
+    // reaches the game - and the same deadline, so a caller that dies cannot
+    // leave a finger stuck on the panel.
+    float injected_x = 0.f;
+    float injected_y = 0.f;
+    uint64_t injected_until_us = 0;
+
     void reset_runtime() {
         touch_mode[0] = SCE_TOUCH_SAMPLING_STATE_STOP;
         touch_mode[1] = SCE_TOUCH_SAMPLING_STATE_STOP;

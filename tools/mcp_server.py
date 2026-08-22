@@ -661,6 +661,32 @@ def _control(serial: str, action: str, **args: Any) -> str:
             "rebooted since? run runtime_control_enable)")
 
 
+def press(button: str, hold_ms: int = 120, serial: str = "") -> str:
+    """Press a Vita button directly inside the emulator.
+
+    This does NOT go through Android. An injected Android event carries no
+    InputDevice, so SDL drops it rather than matching it to an opened joystick -
+    which is why `button` can drive the Compose pause menu but never the game.
+    This writes into the emulator's own pad state, below SDL, so a game cannot
+    tell the difference.
+
+    cross/a, circle/b, square, triangle, up, down, left, right, start, select,
+    l1, r1, l3, r3. The hold expires on its own, so a caller dying mid-press
+    cannot leave a button stuck down.
+    """
+    return _control(serial, "press", button=button, hold_ms=hold_ms)
+
+
+def touch(x: int, y: int, hold_ms: int = 150, serial: str = "") -> str:
+    """Touch the Vita screen directly inside the emulator.
+
+    x and y are permille of the screen, 0-1000, so 500/500 is the centre - a
+    resolution-independent way to say where. Like press, this bypasses Android
+    entirely and reports as a real finger on the selected panel.
+    """
+    return _control(serial, "touch", x=x, y=y, hold_ms=hold_ms)
+
+
 def touch_panel(panel: str = "", serial: str = "") -> str:
     """Read or set which Vita touch panel taps land on: front or back.
 
@@ -1008,6 +1034,19 @@ TOOLS: dict[str, tuple[Callable[..., str], str, dict[str, Any]]] = {
                                "Point the emulator at a control file and enable polling. "
                                "Required before any mem_* tool works.",
                                {"serial": {"type": "string"}}),
+    "press": (press,
+              "Press a Vita button INSIDE the emulator, bypassing Android. Android "
+              "injection cannot drive a game - SDL drops events with no InputDevice. "
+              "cross/a, circle/b, square, triangle, up/down/left/right, start, select, "
+              "l1, r1, l3, r3.",
+              {"button": {"type": "string"}, "hold_ms": {"type": "integer", "default": 120},
+               "serial": {"type": "string"}}),
+    "touch": (touch,
+              "Touch the Vita screen inside the emulator. x and y are permille "
+              "(0-1000), so 500/500 is the centre.",
+              {"x": {"type": "integer"}, "y": {"type": "integer"},
+               "hold_ms": {"type": "integer", "default": 150},
+               "serial": {"type": "string"}}),
     "touch_panel": (touch_panel,
                     "Read or set which Vita touch panel taps land on - front or back. "
                     "A front-panel UI never sees a tap while the emulator is on the "
@@ -1103,6 +1142,8 @@ REQUIRED = {
     "record_video": ["out_path"],
     "video_frames": ["video_path"],
     "play": ["video_out"],
+    "press": ["button"],
+    "touch": ["x", "y"],
     "mem_search": ["value"],
     "mem_read": ["address"],
     "mem_poke": ["address", "value"],

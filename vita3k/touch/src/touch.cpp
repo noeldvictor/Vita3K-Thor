@@ -37,6 +37,8 @@ static void reset_pinch(TouchState &state) {
     state.pinch_dist = TouchState::initial_pinch_dist;
 }
 
+#include <chrono>
+
 static bool is_common_dialog_running(const EmuEnvState &emuenv) {
     return emuenv.common_dialog.type != NO_DIALOG
         && emuenv.common_dialog.status == SCE_COMMON_DIALOG_STATUS_RUNNING;
@@ -46,6 +48,24 @@ static SceTouchData recover_touch_events(const EmuEnvState &emuenv) {
     const auto &touch = emuenv.touch;
     SceTouchData touch_data;
     memset(&touch_data, 0, sizeof(touch_data));
+
+    // Thor: an injected touch reports as a real finger, in the same coordinate
+    // space the panel uses, so a game cannot tell the difference. See
+    // TouchState::injected_until_us.
+    const uint64_t now_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+    if (now_us < touch.injected_until_us) {
+        touch_data.report[0].id = 0;
+        touch_data.report[0].force = 128;
+        touch_data.report[0].x = static_cast<uint16_t>(touch.injected_x * 1920);
+        touch_data.report[0].y = (touch.touchscreen_port == SCE_TOUCH_PORT_FRONT)
+            ? static_cast<uint16_t>(touch.injected_y * 1088)
+            : static_cast<uint16_t>(108 + touch.injected_y * 781);
+        touch_data.reportNum = 1;
+        return touch_data;
+    }
 
     for (uint8_t i = 0; i < touch.finger_count; i++) {
         touch_data.report[i].id = static_cast<uint8_t>(touch.finger_buffer[i].touchID);

@@ -23,6 +23,7 @@
 #include <config/state.h>
 #include <config/functions.h>
 #include <ctime>
+#include <ctrl/ctrl.h>
 #include <ctrl/state.h>
 #include <dialog/state.h>
 #include <display/functions.h>
@@ -63,6 +64,8 @@
 // Thor: headers for the quickstate implementation below.
 #include <app/functions.h>
 #include <app/memory_search.h>
+#include <ctrl/state.h>
+#include <gxm/types.h>
 #include <touch/functions.h>
 #include <touch/state.h>
 #include <app/state.h>
@@ -91,8 +94,6 @@
 #include <modules/SceVideodec/quick_state.h>
 #include <motion/event_handler.h>
 #include <motion/state.h>
-#include <touch/functions.h>
-#include <touch/state.h>
 #include <util/fs.h>
 #include <algorithm>
 #include <array>
@@ -10721,6 +10722,70 @@ static bool apply_runtime_memory_action(EmuEnvState &emuenv, const std::string &
     if (action == "mem_narrow" || action == "mem_filter") {
         app::memory_search_narrow(emuenv, runtime_memory_search, compare, value);
         runtime_write_search_result(emuenv, app::memory_search_report(emuenv, runtime_memory_search));
+        return true;
+    }
+
+    // Thor: synthetic input. Android input injection cannot drive a game - an
+    // injected event carries no InputDevice, so SDL drops it instead of matching
+    // it to an opened joystick - which left automated play unable to press
+    // anything at all. These write straight into the emulator's own input state,
+    // below SDL, so a game cannot tell the difference.
+    if (action == "press") {
+        static const std::map<std::string, uint32_t> vita_buttons = {
+            { "cross", SCE_CTRL_CROSS }, { "a", SCE_CTRL_CROSS },
+            { "circle", SCE_CTRL_CIRCLE }, { "b", SCE_CTRL_CIRCLE },
+            { "square", SCE_CTRL_SQUARE }, { "triangle", SCE_CTRL_TRIANGLE },
+            { "up", SCE_CTRL_UP }, { "down", SCE_CTRL_DOWN },
+            { "left", SCE_CTRL_LEFT }, { "right", SCE_CTRL_RIGHT },
+            { "start", SCE_CTRL_START }, { "select", SCE_CTRL_SELECT },
+            { "l1", SCE_CTRL_L }, { "r1", SCE_CTRL_R },
+            { "l3", SCE_CTRL_L3 }, { "r3", SCE_CTRL_R3 },
+        };
+
+        const auto button_it = vita_buttons.find(runtime_control_lower(arg("button")));
+        if (button_it == vita_buttons.end()) {
+            runtime_write_search_result(emuenv,
+                fmt::format("error=unknown button '{}'\n", arg("button")));
+            return true;
+        }
+
+        const uint64_t hold_ms = runtime_parse_number(arg("hold_ms"), ok);
+        const uint64_t hold = ok && hold_ms > 0 ? hold_ms : 120;
+        const uint64_t now_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count());
+
+        emuenv.ctrl.injected_buttons.store(button_it->second, std::memory_order_relaxed);
+        emuenv.ctrl.injected_buttons_until_us.store(now_us + hold * 1000, std::memory_order_relaxed);
+        runtime_write_search_result(emuenv,
+            fmt::format("pressed {} for {}ms\n", arg("button"), hold));
+        return true;
+    }
+
+    if (action == "touch") {
+        const uint64_t x_permille = runtime_parse_number(arg("x"), ok);
+        const bool has_x = ok;
+        const uint64_t y_permille = runtime_parse_number(arg("y"), ok);
+        if (!has_x || !ok) {
+            runtime_write_search_result(emuenv,
+                "error=touch needs x= and y= in permille of the screen (0-1000)\n");
+            return true;
+        }
+
+        const uint64_t hold_ms = runtime_parse_number(arg("hold_ms"), ok);
+        const uint64_t hold = ok && hold_ms > 0 ? hold_ms : 150;
+        const uint64_t now_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count());
+
+        emuenv.touch.injected_x = std::clamp(static_cast<float>(x_permille) / 1000.0f, 0.0f, 1.0f);
+        emuenv.touch.injected_y = std::clamp(static_cast<float>(y_permille) / 1000.0f, 0.0f, 1.0f);
+        emuenv.touch.injected_until_us = now_us + hold * 1000;
+        runtime_write_search_result(emuenv,
+            fmt::format("touched {:.3f},{:.3f} for {}ms\n",
+                emuenv.touch.injected_x, emuenv.touch.injected_y, hold));
         return true;
     }
 

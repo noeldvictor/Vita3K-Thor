@@ -101,23 +101,36 @@ renderer bugs:
 
 
 
-**Driving a game from adb is not the same as driving the Compose UI.** Three
-separate things bite here, and each one looks like "input is broken":
+**Android input injection cannot drive a game. Use `press` and `touch`.**
+`adb shell input` events carry no InputDevice, so SDL drops them instead of
+matching them to an opened joystick - and the Thor always has a real controller
+open. That is why `adb shell input keyevent` can drive the Compose pause menu
+and never the game, whichever source you inject with. Gamepad-sourced
+`input gamepad keyevent` does not help either; it was tried.
 
-* **A tap must be held.** `input tap` injects a down and an up in the same
-  instant. The Compose pause menu accepts that; the emulated Vita touchscreen
-  ignores it completely and the game sees nothing at all. The MCP `tap` holds
-  the contact for 150ms, which is what actually got Chaos Rings III past its
-  title screen.
-* **There are two touch panels.** The Vita has front and rear, and the emulator
-  has one global selector (`set_rear_touchscreen`). A front-panel UI never sees
-  a tap while the emulator is switched to the rear. `touch_panel` reads and sets
-  it - check it before concluding touch is broken.
-* **Some prompts still do not respond**, to held taps, to `input keyevent`, or
-  to gamepad-sourced `input gamepad keyevent`. DOA Venus's autosave notice is
-  the known case: it renders, the emulator is in the foreground and running at
-  30fps, and none of the three advance it. This is unexplained and is the thing
-  blocking automated play from reaching real gameplay.
+The MCP `press` and `touch` tools write straight into the emulator's own pad and
+touch state, below SDL, through the runtime control file - so a game cannot tell
+the difference:
+
+```
+press  button=circle hold_ms=150      cross/a, circle/b, square, triangle,
+                                      up/down/left/right, start, select,
+                                      l1, r1, l3, r3
+touch  x=500 y=850 hold_ms=150        permille of the screen, so 500/500 is
+                                      the centre
+```
+
+Both holds expire on a deadline rather than needing a matching release, so a
+caller that dies mid-press cannot leave a button stuck down or a finger welded
+to the panel.
+
+Two related things still matter for the Android-level `tap`, which remains
+useful for the Compose UI:
+
+* **A tap must be held.** `input tap` sends down and up in the same instant.
+  Compose accepts that; the emulated touchscreen ignores it entirely.
+* **There are two touch panels.** `touch_panel` reads and sets front/rear. A
+  front-panel UI never sees a touch while the emulator is switched to the rear.
 
 **Debug through the MCP server, not raw `adb`.** If a debugging step needs a
 bare `adb shell`, that is a missing tool - add it to `tools/mcp_server.py`
