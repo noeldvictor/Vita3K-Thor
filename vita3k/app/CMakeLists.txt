@@ -6,12 +6,14 @@ add_library(
 	include/app/virtual_cartridge.h
 	include/app/session_controller.h
 	include/app/discord.h
+	include/app/memory_search.h
 	include/app/state.h
 	src/app_init.cpp
 	src/sdl_frame_host.cpp
 	src/virtual_cartridge.cpp
 	src/app.cpp
 	src/apps_list.cpp
+	src/memory_search.cpp
 	src/discord.cpp
 	src/session_controller.cpp
 	src/user.cpp

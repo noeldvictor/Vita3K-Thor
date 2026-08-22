@@ -62,6 +62,7 @@
 
 // Thor: headers for the quickstate implementation below.
 #include <app/functions.h>
+#include <app/memory_search.h>
 #include <app/state.h>
 #include <audio/state.h>
 #include <bgm_player/functions.h>
@@ -10624,7 +10625,152 @@ static void runtime_set_pause_state(EmuEnvState &emuenv, const bool pause) {
     LOG_INFO("Runtime control {}", pause ? "paused emulation" : "resumed emulation");
 }
 
-static void apply_runtime_control_action(EmuEnvState &emuenv, const std::string &raw_action) {
+// Thor: memory search for building cheats. State lives here rather than in
+// EmuEnvState because it is a debugging aid with no business being saved into a
+// quickstate or shared with anything else.
+static app::MemorySearchState runtime_memory_search;
+
+static fs::path runtime_search_result_path(EmuEnvState &emuenv) {
+    const fs::path control = runtime_control_file_path(&emuenv);
+    if (control.empty())
+        return {};
+    // Sits beside the control file, so whoever wrote the command can find it.
+    return control.parent_path() / "vita3k-search-results.txt";
+}
+
+static void runtime_write_search_result(EmuEnvState &emuenv, const std::string &text) {
+    LOG_INFO("Memory search result:\n{}", text);
+
+    const fs::path path = runtime_search_result_path(emuenv);
+    if (path.empty())
+        return;
+
+    fs::ofstream out(path, std::ios::trunc);
+    if (out.good())
+        out << text;
+}
+
+static uint64_t runtime_parse_number(const std::string &text, bool &ok) {
+    ok = false;
+    const std::string trimmed = runtime_control_trim(text);
+    if (trimmed.empty())
+        return 0;
+    try {
+        const int base = (trimmed.starts_with("0x") || trimmed.starts_with("0X")) ? 16 : 10;
+        const uint64_t value = std::stoull(trimmed, nullptr, base);
+        ok = true;
+        return value;
+    } catch (const std::exception &) {
+        return 0;
+    }
+}
+
+/**
+ * @brief Handles the mem_* runtime control actions. Returns false if not one.
+ *
+ * The Cheat Engine loop, driven from a text file so it works the same on the
+ * handheld as on desktop: mem_search for a value, play until it changes,
+ * mem_narrow for the new one, repeat, then mem_poke or mem_cheat.
+ */
+static bool apply_runtime_memory_action(EmuEnvState &emuenv, const std::string &action,
+    const std::map<std::string, std::string> &values) {
+    const auto arg = [&](const char *key) -> std::string {
+        const auto it = values.find(key);
+        return it == values.end() ? std::string() : it->second;
+    };
+
+    bool ok = false;
+    const uint64_t value = runtime_parse_number(arg("value"), ok);
+    const bool has_value = ok;
+    const uint64_t width_arg = runtime_parse_number(arg("width"), ok);
+    const uint32_t width = ok ? static_cast<uint32_t>(width_arg) : 4;
+
+    app::SearchCompare compare = app::SearchCompare::Equal;
+    const std::string compare_text = arg("compare");
+    if (!compare_text.empty() && !app::parse_search_compare(compare_text, compare)) {
+        runtime_write_search_result(emuenv, fmt::format("error=unknown compare '{}'\n", compare_text));
+        return true;
+    }
+
+    if (action == "mem_search" || action == "mem_scan") {
+        if (!has_value && compare_text.empty()) {
+            runtime_write_search_result(emuenv, "error=mem_search needs value=\n");
+            return true;
+        }
+        app::memory_search_first(emuenv, runtime_memory_search, width, compare, value);
+        runtime_write_search_result(emuenv, app::memory_search_report(emuenv, runtime_memory_search));
+        return true;
+    }
+
+    if (action == "mem_narrow" || action == "mem_filter") {
+        app::memory_search_narrow(emuenv, runtime_memory_search, compare, value);
+        runtime_write_search_result(emuenv, app::memory_search_report(emuenv, runtime_memory_search));
+        return true;
+    }
+
+    if (action == "mem_reset" || action == "mem_clear") {
+        app::memory_search_reset(runtime_memory_search);
+        runtime_write_search_result(emuenv, "candidates=0 (reset)\n");
+        return true;
+    }
+
+    if (action == "mem_list" || action == "mem_report") {
+        runtime_write_search_result(emuenv, app::memory_search_report(emuenv, runtime_memory_search, 64));
+        return true;
+    }
+
+    if (action == "mem_read") {
+        const uint64_t address = runtime_parse_number(arg("address"), ok);
+        if (!ok) {
+            runtime_write_search_result(emuenv, "error=mem_read needs address=\n");
+            return true;
+        }
+        uint64_t current = 0;
+        const bool read_ok = app::memory_read_value(emuenv, static_cast<Address>(address), width, current);
+        runtime_write_search_result(emuenv, read_ok
+                ? fmt::format("0x{:08X} = {}\n", address, current)
+                : fmt::format("error=0x{:08X} is not mapped\n", address));
+        return true;
+    }
+
+    if (action == "mem_poke" || action == "mem_write") {
+        const uint64_t address = runtime_parse_number(arg("address"), ok);
+        if (!ok || !has_value) {
+            runtime_write_search_result(emuenv, "error=mem_poke needs address= and value=\n");
+            return true;
+        }
+        const bool wrote = app::memory_write_value(emuenv, static_cast<Address>(address), width, value);
+        runtime_write_search_result(emuenv, wrote
+                ? fmt::format("wrote 0x{:08X} = {}\n", address, value)
+                : fmt::format("error=0x{:08X} is not writable\n", address));
+        return true;
+    }
+
+    if (action == "mem_cheat") {
+        const std::string name = arg("name").empty() ? std::string("Thor cheat") : arg("name");
+        const std::string body = app::memory_search_to_cheat(runtime_memory_search, name, value);
+
+        // Written next to the results so it can be reviewed before being moved
+        // into a cheats folder; nothing is applied automatically.
+        const fs::path result = runtime_search_result_path(emuenv);
+        if (!result.empty()) {
+            const fs::path cheat_path = result.parent_path()
+                / fmt::format("{}.psv", emuenv.io.title_id.empty() ? "cheat" : emuenv.io.title_id);
+            fs::ofstream out(cheat_path, std::ios::trunc);
+            if (out.good())
+                out << body;
+            runtime_write_search_result(emuenv, fmt::format("wrote {}\n{}", cheat_path, body));
+        } else {
+            runtime_write_search_result(emuenv, body);
+        }
+        return true;
+    }
+
+    return false;
+}
+
+static void apply_runtime_control_action(EmuEnvState &emuenv, const std::string &raw_action,
+    const std::map<std::string, std::string> &values = {}) {
     std::string action = runtime_control_lower(runtime_control_trim(raw_action));
     std::replace(action.begin(), action.end(), '-', '_');
     if (action.empty() || action == "none" || action == "clear")
@@ -10648,6 +10794,8 @@ static void apply_runtime_control_action(EmuEnvState &emuenv, const std::string 
         runtime_set_pause_state(emuenv, true);
     } else if (action == "resume" || action == "unpause") {
         runtime_set_pause_state(emuenv, false);
+    } else if (apply_runtime_memory_action(emuenv, action, values)) {
+        // handled by the memory search
     } else if (action == "toggle_pause") {
         runtime_set_pause_state(emuenv, !emuenv.kernel.is_threads_paused());
     } else if (action == "open_osd") {
@@ -10728,7 +10876,7 @@ void runtime_poll_control_file(EmuEnvState &emuenv) {
         return;
 
     state.last_action_id = action_id;
-    apply_runtime_control_action(emuenv, action_it->second);
+    apply_runtime_control_action(emuenv, action_it->second, values);
 }
 
 static SDL_GamepadButton runtime_configured_button(const EmuEnvState &emuenv, const SDL_GamepadButton default_button) {

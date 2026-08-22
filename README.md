@@ -184,6 +184,16 @@ another app by mistake), `config_get` / `config_set` (flip a flag and reboot -
 the cheapest A/B available, no rebuild), `validation_errors` (Vulkan validation
 count plus deduplicated samples) and `release`.
 
+
+
+The server is a development tool and is **off by default** - turn it on and off
+with `python tools/mcp_toggle.py on|off|status`.
+
+Cheats: `runtime_control_enable`, then `mem_search`, `mem_narrow`, `mem_read`,
+`mem_poke`, `mem_list`, `mem_reset` and `mem_cheat` give the usual Cheat Engine
+loop - scan for a value you can see on screen, play until it changes, narrow to
+the new one, repeat, then poke it or write it out as a `.psv`. It runs through
+the same control file on the handheld as on desktop, so no debugger is needed.
 `runtime_action` drives a running emulator (save state, load state, undo load,
 fast-forward, screenshot) through the runtime control file. Enable it in
 `config.yml`:

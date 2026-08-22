@@ -564,6 +564,101 @@ def play(video_out: str, seconds: int = 12, fps: float = 1.0, size: str = "960x5
     return f"{recorded}\n{video_frames(video_out, fps=fps, max_frames=seconds + 4)}"
 
 
+# --------------------------------------------------------------------------
+# memory search and cheats
+#
+# The emulator polls a plain text control file, so the whole Cheat Engine loop
+# works identically on the handheld and on desktop, with no debugger attached:
+# search for a value, play until it changes, narrow to the new one, repeat,
+# then poke it or write it out as a cheat.
+# --------------------------------------------------------------------------
+
+CONTROL_FILE = f"{EMU_FILES}/vita3k-control.txt"
+SEARCH_RESULTS = f"{EMU_FILES}/vita3k-search-results.txt"
+
+
+def runtime_control_enable(serial: str = "") -> str:
+    """Point the emulator at a control file and turn polling on.
+
+    Required before any mem_* tool will do anything. Takes effect on the next
+    boot, since the setting is read at startup.
+    """
+    out = [config_set("enable-runtime-control", "true", serial),
+           config_set("runtime-control-file", f'"{CONTROL_FILE}"', serial)]
+    return "\n".join(out) + "\n(reboot the title for this to take effect)"
+
+
+def _control(serial: str, action: str, **args: Any) -> str:
+    """Write one command to the control file and read back the result."""
+    # action_id has to differ every time or the emulator dedupes the command.
+    body = [f"action = {action}", f"action_id = {action}-{time.monotonic_ns()}"]
+    body += [f"{k} = {v}" for k, v in args.items() if v not in (None, "")]
+
+    _shell(f"rm -f {SEARCH_RESULTS}", serial)
+    payload = "\n".join(body).replace("'", "")
+    _shell(f"printf '%s\\n' '{payload}' > {CONTROL_FILE}", serial)
+
+    # The emulator picks this up on its next frame; give it a moment, then poll.
+    for _ in range(15):
+        out = _shell(f"sleep 1; cat {SEARCH_RESULTS} 2>/dev/null", serial).strip()
+        if out:
+            return out
+    return ("(no result yet - is enable-runtime-control on, and has the title been "
+            "rebooted since? run runtime_control_enable)")
+
+
+def mem_search(value: str, width: int = 4, compare: str = "equal",
+               serial: str = "") -> str:
+    """First scan: every mapped guest page, for a value you can see in-game.
+
+    Start from something displayed on screen - HP, gold, a counter. width is 1,
+    2 or 4 bytes; 4 is the usual guess and 2 is common for HP.
+    """
+    return _control(serial, "mem_search", value=value, width=width, compare=compare)
+
+
+def mem_narrow(value: str = "", compare: str = "equal", serial: str = "") -> str:
+    """Filter the surviving candidates after the value changed in-game.
+
+    compare takes equal / not_equal / greater / less / changed / unchanged.
+    The relative ones need no value: take damage, then narrow on "less".
+    """
+    return _control(serial, "mem_narrow", value=value, compare=compare)
+
+
+def mem_list(serial: str = "") -> str:
+    """Show the surviving candidates and what they currently hold."""
+    return _control(serial, "mem_list")
+
+
+def mem_reset(serial: str = "") -> str:
+    """Throw away the current search."""
+    return _control(serial, "mem_reset")
+
+
+def mem_read(address: str, width: int = 4, serial: str = "") -> str:
+    """Read one guest address."""
+    return _control(serial, "mem_read", address=address, width=width)
+
+
+def mem_poke(address: str, value: str, width: int = 4, serial: str = "") -> str:
+    """Write one guest address - the way to confirm a candidate is the real one.
+
+    Poke it and look at the screen. If the number on screen changed, that is the
+    address; if not, keep narrowing.
+    """
+    return _control(serial, "mem_poke", address=address, value=value, width=width)
+
+
+def mem_cheat(name: str = "Thor cheat", value: str = "", serial: str = "") -> str:
+    """Write the surviving candidates out as a .psv cheat file on the device.
+
+    Only worth doing once the search is down to a handful. Nothing is applied
+    automatically - the file is written next to the control file for review.
+    """
+    return _control(serial, "mem_cheat", name=name, value=value)
+
+
 TOOLS: dict[str, tuple[Callable[..., str], str, dict[str, Any]]] = {
     "devices": (devices, "List connected adb devices.", {}),
     "connect": (connect, "Connect to a device over TCP (e.g. 192.168.1.3:5555).",
@@ -685,6 +780,42 @@ TOOLS: dict[str, tuple[Callable[..., str], str, dict[str, Any]]] = {
               "fps": {"type": "number", "default": 1.0},
               "size": {"type": "string", "default": "960x540"},
               "serial": {"type": "string"}}),
+    "runtime_control_enable": (runtime_control_enable,
+                               "Point the emulator at a control file and enable polling. "
+                               "Required before any mem_* tool works.",
+                               {"serial": {"type": "string"}}),
+    "mem_search": (mem_search,
+                   "First scan of guest memory for a value visible in-game (HP, gold, "
+                   "a counter). width is 1, 2 or 4 bytes.",
+                   {"value": {"type": "string"},
+                    "width": {"type": "integer", "default": 4},
+                    "compare": {"type": "string", "default": "equal"},
+                    "serial": {"type": "string"}}),
+    "mem_narrow": (mem_narrow,
+                   "Filter candidates after the value changed in-game. compare takes "
+                   "equal/not_equal/greater/less/changed/unchanged; the relative ones "
+                   "need no value.",
+                   {"value": {"type": "string"},
+                    "compare": {"type": "string", "default": "equal"},
+                    "serial": {"type": "string"}}),
+    "mem_list": (mem_list, "Show surviving candidates and their current values.",
+                 {"serial": {"type": "string"}}),
+    "mem_reset": (mem_reset, "Throw away the current search.",
+                  {"serial": {"type": "string"}}),
+    "mem_read": (mem_read, "Read one guest address.",
+                 {"address": {"type": "string"}, "width": {"type": "integer", "default": 4},
+                  "serial": {"type": "string"}}),
+    "mem_poke": (mem_poke,
+                 "Write one guest address - the way to confirm a candidate is real: "
+                 "poke it and see whether the number on screen changed.",
+                 {"address": {"type": "string"}, "value": {"type": "string"},
+                  "width": {"type": "integer", "default": 4},
+                  "serial": {"type": "string"}}),
+    "mem_cheat": (mem_cheat,
+                  "Write surviving candidates out as a .psv cheat file on the device. "
+                  "Nothing is applied automatically.",
+                  {"name": {"type": "string", "default": "Thor cheat"},
+                   "value": {"type": "string"}, "serial": {"type": "string"}}),
 }
 
 REQUIRED = {
@@ -705,6 +836,9 @@ REQUIRED = {
     "record_video": ["out_path"],
     "video_frames": ["video_path"],
     "play": ["video_out"],
+    "mem_search": ["value"],
+    "mem_read": ["address"],
+    "mem_poke": ["address", "value"],
 }
 
 

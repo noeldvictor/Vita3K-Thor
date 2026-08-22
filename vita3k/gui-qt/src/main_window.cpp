@@ -1267,6 +1267,10 @@ void MainWindow::pump_sdl_events() {
     if (handle_pending_app_launch_request())
         return;
 
+    // Thor: see the note in main_android.cpp - the control file needs polling
+    // from whichever loop is actually running.
+    runtime_poll_control_file(emuenv);
+
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         // Thor: runtime chords (fast forward, save/load quickstate) get first

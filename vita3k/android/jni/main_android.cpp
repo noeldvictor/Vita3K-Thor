@@ -444,6 +444,12 @@ SDLMAIN_DECLSPEC int SDL_main(int argc, char *argv[]) {
 
         bool running = !pending_launch_request.has_value();
         while (running) {
+            // Thor: the runtime control file drives save/load, speed and the
+            // memory search from outside the process. Nothing polled it after
+            // the upstream merge landed, which quietly made the whole control
+            // file - and the MCP server's runtime_action - a no-op.
+            runtime_poll_control_file(*emuenv);
+
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
                 // Thor: runtime chords (fast forward, save/load quickstate)

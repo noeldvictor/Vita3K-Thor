@@ -99,7 +99,46 @@ renderer bugs:
 | `validation_errors` | Vulkan validation count plus deduplicated samples; a regression check with a number attached |
 | `release` | force-stop when done, because the device is shared |
 
-`runtime_action` drives a *running* emulator — `save_state`, `load_state`,
+
+
+**The MCP server is a development tool, and is off by default.** It builds,
+installs, launches, drives and inspects the emulator on a real device, so it has
+no business being registered while doing anything other than working on this
+fork - and on a machine where several agents share one AYN Thor, an idle
+registration is one more thing that can reach for the device.
+
+```
+python tools/mcp_toggle.py status
+python tools/mcp_toggle.py on
+python tools/mcp_toggle.py off
+```
+
+That is a thin wrapper over `claude mcp add|remove|list`; use those directly if
+you prefer.
+
+### Cheats, by memory search
+
+The emulator polls a plain text control file, so the whole Cheat Engine loop
+works the same on the handheld as on desktop with no debugger attached. Turn it
+on once with `runtime_control_enable`, reboot the title, then:
+
+| tool | what it does |
+|---|---|
+| `mem_search` | first scan of every mapped guest page for a value you can see on screen - HP, gold, a counter. Width 1, 2 or 4 bytes |
+| `mem_narrow` | filter the survivors after the value moved. `equal`, `not_equal`, `greater`, `less`, `changed`, `unchanged` - the relative ones need no value, so "take damage, narrow on less" works |
+| `mem_read` / `mem_poke` | read or write one address. Poking is how you *confirm* a candidate: poke it and see whether the number on screen changed |
+| `mem_list`, `mem_reset` | show survivors, or start over |
+| `mem_cheat` | write the survivors out as a `.psv` next to the control file. Nothing is applied automatically |
+
+The engine lives in `vita3k/app/src/memory_search.cpp` and only ever reads pages
+`is_valid_addr` vouches for - guest RAM is a 4GiB host reservation of which very
+little is committed, so scanning it blindly would fault.
+
+**`runtime_poll_control_file` must be called from whichever loop is running.**
+Its call site was lost in the upstream merge, which silently made the control
+file - and every `runtime_action` in the MCP server - a no-op. It is now called
+from both `main_android.cpp` and `gui-qt/src/main_window.cpp`. If a runtime
+action ever stops working, check that first.`runtime_action` drives a *running* emulator — `save_state`, `load_state`,
 `undo_load_state`, `toggle_fast_forward`, `screenshot` — through the runtime
 control file. Enable it in `config.yml`:
 
