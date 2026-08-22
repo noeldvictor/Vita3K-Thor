@@ -332,10 +332,27 @@ def boot_title(title_id: str, wait_for: str = "", timeout_s: int = 240,
     """
     steps = [f"force-stop: {_shell(f'am force-stop {PACKAGE}', serial).strip() or 'ok'}"]
     _shell(f"rm -f {EMU_LOG}", serial)
+
     started = _shell(
         f"am start -n {PACKAGE}/org.vita3k.emulator.Emulator --es title_id {title_id}",
         serial)
     steps.append(f"start: {started.strip().splitlines()[0] if started.strip() else 'ok'}")
+
+    # On a shared device another app can hold the display, and a plain `am start`
+    # will happily launch us into the background - the activity exists, nothing
+    # is visible, and every capture after it is of somebody else's app. Going in
+    # through the launcher is what actually takes the foreground, so fall back to
+    # it and re-deliver the title.
+    _shell("sleep 3", serial)
+    if not foreground(serial).startswith("ours=True"):
+        steps.append("start did not take the foreground; retrying via the launcher")
+        _shell("input keyevent KEYCODE_WAKEUP", serial)
+        _shell(f"monkey -p {PACKAGE} -c android.intent.category.LAUNCHER 1", serial)
+        _shell("sleep 4", serial)
+        _shell(f"am start -n {PACKAGE}/org.vita3k.emulator.Emulator --es title_id {title_id}",
+               serial)
+        _shell("sleep 3", serial)
+
     if wait_for:
         steps.append(f"wait: {wait_for_log(wait_for, timeout_s, serial)}")
     steps.append(foreground(serial).splitlines()[0])

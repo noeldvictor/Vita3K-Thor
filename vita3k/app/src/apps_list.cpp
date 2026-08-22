@@ -620,11 +620,24 @@ bool set_app_info(EmuEnvState &emuenv, const std::string &app_path) {
         // so a mount taken earlier (from the app grid or an intent) is already
         // gone by the time the session boots.
         const fs::path source{ it->source_path };
+
+        // Use the content root the scan actually found. Archives are laid out
+        // every way people zip them - "app/<title id>/", a bare "<title id>/",
+        // or the files at the archive root - and get_archive_content_roots_for_scan
+        // already scores the candidates and records the winner in source_root.
+        // This used to hardcode "app/<title id>/", which happens to be right for
+        // some archives and wrong for the rest: the mount failed, app0: fell back
+        // to a ux0:app path that was never written, and the boot died on a
+        // mangled "ux0/app/<the whole archive path>/eboot.bin".
+        const std::string content_root = it->source_root.empty()
+            ? "app/" + it->title_id + "/"
+            : it->source_root;
+
         vfs::unmount_current_app_archive(emuenv.io);
-        if (vfs::mount_current_app_archive(emuenv.io, source, "app/" + it->title_id + "/", it->title_id))
-            LOG_INFO("Re-mounted virtual cartridge {} from {}", it->title_id, it->source_path);
+        if (vfs::mount_current_app_archive(emuenv.io, source, content_root, it->title_id))
+            LOG_INFO("Re-mounted virtual cartridge {} from {} (root '{}')", it->title_id, it->source_path, content_root);
         else
-            LOG_ERROR("Failed to re-mount virtual cartridge {} from {}", it->title_id, it->source_path);
+            LOG_ERROR("Failed to re-mount virtual cartridge {} from {} (root '{}')", it->title_id, it->source_path, content_root);
     }
 
     return true;
