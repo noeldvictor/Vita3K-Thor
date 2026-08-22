@@ -476,12 +476,19 @@ def type_text(text: str, serial: str = "") -> str:
 
 
 def record_video(out_path: str, seconds: int = 10, size: str = "",
-                 bit_rate_mbps: int = 8, serial: str = "") -> str:
+                 bit_rate_mbps: int = 8, require_foreground: bool = True,
+                 serial: str = "") -> str:
     """Record the screen to an mp4 on this machine.
 
     Still frames hide anything that is only visible in motion - flicker,
     tearing, one-frame corruption. Keep clips short; screenrecord caps at 180s
     and the file has to come back over adb.
+
+    Refuses by default when the emulator is not in front, and checks again after
+    the clip, because on a shared device another agent's app can take the screen
+    part way through - which produces a recording of somebody else's emulator
+    that looks perfectly valid. A clip that started ours and ended not ours is
+    reported as contaminated rather than returned as a result.
     """
     seconds = max(1, min(int(seconds), 180))
     remote = "/sdcard/vita3k-mcp-capture.mp4"
@@ -491,6 +498,11 @@ def record_video(out_path: str, seconds: int = 10, size: str = "",
     cmd += f" {remote}"
 
     fg = foreground(serial)
+    if require_foreground and not fg.startswith("ours=True"):
+        return (f"REFUSED: the emulator is not in the foreground, so the recording "
+                f"would be of another app.\n{fg}\n"
+                f"Pass require_foreground=false to record anyway.")
+
     _shell(f"rm -f {remote}", serial)
     # screenrecord runs for the full duration, so allow for it plus the pull.
     _run([_adb(), *_device_args(serial), "shell", cmd], timeout=seconds + 180)
@@ -503,7 +515,16 @@ def record_video(out_path: str, seconds: int = 10, size: str = "",
 
     if not target.exists():
         return f"recording failed\n{pull}"
-    return (f"{fg.splitlines()[0]}\n"
+
+    after = foreground(serial)
+    if require_foreground and not after.startswith("ours=True"):
+        return (f"CONTAMINATED: the emulator lost the foreground during the clip, so "
+                f"part of it is another app. Discard it.\n"
+                f"  before: {fg.splitlines()[0]}\n"
+                f"  after:  {after.splitlines()[0]}\n"
+                f"  (kept at {target} if you want to look anyway)")
+
+    return (f"{after.splitlines()[0]}\n"
             f"wrote {target.stat().st_size} bytes to {target} ({seconds}s)")
 
 
@@ -659,6 +680,55 @@ def mem_cheat(name: str = "Thor cheat", value: str = "", serial: str = "") -> st
     return _control(serial, "mem_cheat", name=name, value=value)
 
 
+# --------------------------------------------------------------------------
+# visual QA
+# --------------------------------------------------------------------------
+
+# Enough to get most titles off a logo, through a press-start, past a
+# confirmation and into whatever the first real screen is. Cross twice because
+# plenty of games put a EULA or an autosave notice in the way.
+QA_ADVANCE = ("cross", "start", "cross", "cross", "circle", "cross")
+
+
+def qa_title(title_id: str, out_dir: str, seconds: int = 20, fps: float = 0.7,
+             advance: bool = True, boot_wait: str = "", timeout_s: int = 300,
+             serial: str = "") -> str:
+    """Boot a title, poke it forward, record it, and split it into frames.
+
+    One call per game, so a sweep across a library is repeatable and every title
+    gets the same treatment. Returns the boot trace, the validation-error count
+    and where the frames landed; look at the frames, since that is the only
+    thing that actually decides whether it rendered correctly.
+    """
+    lines = [f"=== {title_id} ===",
+             boot_title(title_id, wait_for=boot_wait, timeout_s=timeout_s, serial=serial)]
+
+    fg = foreground(serial)
+    if not fg.startswith("ours=True"):
+        lines.append(f"ABORT: emulator is not in the foreground\n{fg}")
+        return "\n".join(lines)
+
+    if advance:
+        for name in QA_ADVANCE:
+            button(name, serial=serial)
+            _shell("sleep 3", serial)
+        lines.append(f"advanced with: {', '.join(QA_ADVANCE)}")
+
+    target = Path(out_dir) / title_id
+    video = target.with_suffix(".mp4")
+    recorded = record_video(str(video), seconds=seconds, size="960x540", serial=serial)
+    lines.append(recorded)
+    if "wrote" not in recorded or recorded.startswith(("REFUSED", "CONTAMINATED")):
+        lines.append("SKIPPED frame extraction - the recording is not trustworthy")
+        return "\n".join(lines)
+
+    lines.append(video_frames(str(video), out_dir=str(target), fps=fps,
+                              max_frames=seconds + 4).splitlines()[0])
+    lines.append(validation_errors(3, serial))
+    lines.append(emu_log("", 3, serial=serial))
+    return "\n".join(lines)
+
+
 TOOLS: dict[str, tuple[Callable[..., str], str, dict[str, Any]]] = {
     "devices": (devices, "List connected adb devices.", {}),
     "connect": (connect, "Connect to a device over TCP (e.g. 192.168.1.3:5555).",
@@ -764,6 +834,7 @@ TOOLS: dict[str, tuple[Callable[..., str], str, dict[str, Any]]] = {
                       "seconds": {"type": "integer", "default": 10},
                       "size": {"type": "string", "description": "e.g. 1280x720"},
                       "bit_rate_mbps": {"type": "integer", "default": 8},
+                      "require_foreground": {"type": "boolean", "default": True},
                       "serial": {"type": "string"}}),
     "video_frames": (video_frames,
                      "Split a recording into PNG frames. An agent cannot look at "
@@ -816,6 +887,17 @@ TOOLS: dict[str, tuple[Callable[..., str], str, dict[str, Any]]] = {
                   "Nothing is applied automatically.",
                   {"name": {"type": "string", "default": "Thor cheat"},
                    "value": {"type": "string"}, "serial": {"type": "string"}}),
+    "qa_title": (qa_title,
+                 "Boot a title, poke it forward, record it and split it into frames. "
+                 "One call per game, so a sweep across a library is repeatable.",
+                 {"title_id": {"type": "string"},
+                  "out_dir": {"type": "string"},
+                  "seconds": {"type": "integer", "default": 20},
+                  "fps": {"type": "number", "default": 0.7},
+                  "advance": {"type": "boolean", "default": True},
+                  "boot_wait": {"type": "string", "description": "regex to wait for"},
+                  "timeout_s": {"type": "integer", "default": 300},
+                  "serial": {"type": "string"}}),
 }
 
 REQUIRED = {
@@ -839,6 +921,7 @@ REQUIRED = {
     "mem_search": ["value"],
     "mem_read": ["address"],
     "mem_poke": ["address", "value"],
+    "qa_title": ["title_id", "out_dir"],
 }
 
 
