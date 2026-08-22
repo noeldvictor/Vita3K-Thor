@@ -1493,7 +1493,11 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
     }
 
     case MappingMethod::DoubleBuffer: {
-        vkutil::Buffer buffer(size + KiB(4));
+        // Thor: guard region after the Vita range. A uniform, index or vertex
+        // buffer may straddle the emulated mapping boundary, and the shader reads
+        // into the padding legally. One page was not enough - DOA Venus gameplay
+        // crosses by more than that.
+        vkutil::Buffer buffer(size + KiB(64));
         buffer.init_buffer(mapped_memory_flags, vkutil::vma_mapped_alloc);
 
         vk::BufferDeviceAddressInfoKHR address_info{
@@ -1796,6 +1800,14 @@ void VKState::set_turbo_mode(bool set) {
 BufferTrapping::BufferTrapping(VKState &state)
     : state(state) {}
 
+// Thor: the CPU sync path has to accept the same bytes the GPU buffer covers,
+// guard region included, or a legal straddling access is rejected as unmapped
+// and the draw silently gets an empty buffer.
+static uint64_t mapped_memory_sync_size(const VKState &state, const MappedMemory &mapped_memory) {
+    return static_cast<uint64_t>(mapped_memory.size)
+        + (state.mapping_method == MappingMethod::DoubleBuffer ? KiB(64) : 0);
+}
+
 TrappedBuffer *BufferTrapping::access_buffer(Address addr, uint32_t size, MemState &mem, bool always_trap, bool cover_everything) {
     const bool is_buffer_small = (size < 3 * KiB(4));
 
@@ -1805,8 +1817,9 @@ TrappedBuffer *BufferTrapping::access_buffer(Address addr, uint32_t size, MemSta
     } else if (is_buffer_small) {
         // not big enough to apply buffer trapping
         auto mem_it = state.mapped_memories.lower_bound(addr);
-        if (mem_it == state.mapped_memories.end() || mem_it->first + mem_it->second.size < addr + size) {
+        if (mem_it == state.mapped_memories.end() || mem_it->first + mapped_memory_sync_size(state, mem_it->second) < static_cast<uint64_t>(addr) + size) {
             LOG_ERROR("Buffer at address {} is not completely mapped", log_hex(addr));
+            temp_buffer = {};
             return &temp_buffer;
         }
 
@@ -1850,7 +1863,7 @@ TrappedBuffer *BufferTrapping::access_buffer(Address addr, uint32_t size, MemSta
     if (is_new) {
         // we must find the matching mapped buffer
         auto mem_it = state.mapped_memories.lower_bound(addr);
-        if (mem_it == state.mapped_memories.end() || mem_it->first + mem_it->second.size < addr + size) {
+        if (mem_it == state.mapped_memories.end() || mem_it->first + mapped_memory_sync_size(state, mem_it->second) < static_cast<uint64_t>(addr) + size) {
             LOG_ERROR("Buffer at address {} is not completely mapped", log_hex(addr));
             return &it->second;
         }

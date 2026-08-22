@@ -279,14 +279,23 @@ bool create(std::unique_ptr<FragmentProgram> &fp, VKState &state, const SceGxmPr
         if (blend->colorMask & SCE_GXM_COLOR_MASK_A)
             color_mask |= vk::ColorComponentFlagBits::eA;
 
+        // GXM treats SCE_GXM_BLEND_FUNC_NONE as "this channel does not blend", and
+        // leaves that channel's src/dst factors meaningless. Vulkan has a single
+        // blendEnable covering both colour and alpha, so whenever one channel does
+        // blend the other still gets its factors used - and translating the ignored
+        // ones fed the pipeline whatever happened to be in the unused fields.
+        // Substitute the identity (One/Zero/Add) for a channel GXM disabled.
+        const bool color_blend_enabled = blend->colorFunc != SCE_GXM_BLEND_FUNC_NONE;
+        const bool alpha_blend_enabled = blend->alphaFunc != SCE_GXM_BLEND_FUNC_NONE;
+
         fp_vk->blending = vk::PipelineColorBlendAttachmentState{
-            .blendEnable = (blend->colorFunc != SCE_GXM_BLEND_FUNC_NONE) || (blend->alphaFunc != SCE_GXM_BLEND_FUNC_NONE),
-            .srcColorBlendFactor = translate_blend_factor(blend->colorSrc),
-            .dstColorBlendFactor = translate_blend_factor(blend->colorDst),
-            .colorBlendOp = translate_blend_func(blend->colorFunc),
-            .srcAlphaBlendFactor = translate_blend_factor(blend->alphaSrc),
-            .dstAlphaBlendFactor = translate_blend_factor(blend->alphaDst),
-            .alphaBlendOp = translate_blend_func(blend->alphaFunc),
+            .blendEnable = color_blend_enabled || alpha_blend_enabled,
+            .srcColorBlendFactor = color_blend_enabled ? translate_blend_factor(blend->colorSrc) : vk::BlendFactor::eOne,
+            .dstColorBlendFactor = color_blend_enabled ? translate_blend_factor(blend->colorDst) : vk::BlendFactor::eZero,
+            .colorBlendOp = color_blend_enabled ? translate_blend_func(blend->colorFunc) : vk::BlendOp::eAdd,
+            .srcAlphaBlendFactor = alpha_blend_enabled ? translate_blend_factor(blend->alphaSrc) : vk::BlendFactor::eOne,
+            .dstAlphaBlendFactor = alpha_blend_enabled ? translate_blend_factor(blend->alphaDst) : vk::BlendFactor::eZero,
+            .alphaBlendOp = alpha_blend_enabled ? translate_blend_func(blend->alphaFunc) : vk::BlendOp::eAdd,
             .colorWriteMask = color_mask
         };
     } else {
