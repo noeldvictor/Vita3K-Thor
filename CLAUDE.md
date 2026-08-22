@@ -142,6 +142,14 @@ game. Compose navigates on DPAD_* by itself; it does not know `KEYCODE_BUTTON_A`
 
 ## Things that will bite you
 
+* **`disable-surface-sync` causes garbage geometry on Vulkan.** Upstream
+  defaults it to true; Thor defaults it to false. With it on, and memory
+  mapping enabled, `handle_transfer_copy` and `handle_transfer_downscale` skip
+  the Vulkan surface cache and do a CPU copy out of guest memory - which is
+  stale for any surface the GPU rendered and never wrote back. Chaos Rings III
+  shows this as coloured streaks and black blocks over its 3D title scenes,
+  and turning sync on visibly clears them. The performance cost has not been
+  measured; if a game needs the speed, the flag is still per-game.
 * **Nothing heavy may run on the Android UI thread from the pause menu.** A
   quickstate capture is hundreds of megabytes - Chaos Rings III is 373 MiB - and
   calling it inline from a Compose `onClick` blocks input long enough for Android

@@ -159,7 +159,7 @@ inline std::vector<std::string> default_virtual_cartridge_dirs() {
     code(int, "gpu-idx", 0, gpu_idx)                                                                    \
     code(bool, "high-accuracy", false, high_accuracy)                                                   \
     code(float, "resolution-multiplier", 1.0f, resolution_multiplier)                                   \
-    code(bool, "disable-surface-sync", true, disable_surface_sync)                                      \
+    code(bool, "disable-surface-sync", false, disable_surface_sync)                                      \
     code(std::string, "screen-filter", "Bilinear", screen_filter)                                       \
     code(bool, "v-sync", true, v_sync)                                                                  \
     code(int, "anisotropic-filtering", 1, anisotropic_filtering)                                        \
