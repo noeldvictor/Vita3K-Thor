@@ -560,7 +560,22 @@ EXPORT(int, sceNetCheckDialogGetPS3ConnectInfo) {
 
 EXPORT(int, sceNetCheckDialogGetResult, SceNetCheckDialogResult *result) {
     TRACY_FUNC(sceNetCheckDialogGetResult, result);
+    if (!result)
+        return RET_ERROR(SCE_COMMON_DIALOG_ERROR_NULL);
+
     result->result = emuenv.common_dialog.result;
+
+    // Thor: psnModeSucceeded was never written by anything. A game running the
+    // dialog in one of the PSN modes reads whatever was already in its own
+    // struct, decides the check failed, and reports a NETCHECK_DIALOG error -
+    // DOA Xtreme 3 Venus does exactly that at its first autosave and stops with
+    // 0x80100C06, which is in this dialog's error family.
+    //
+    // Report what the emulator is configured to pretend: psn-signed-in is the
+    // same switch the rest of the offline-PSN handling reads.
+    const bool psn_mode = emuenv.common_dialog.netcheck.mode == SCE_NETCHECK_DIALOG_MODE_PSN
+        || emuenv.common_dialog.netcheck.mode == SCE_NETCHECK_DIALOG_MODE_PSN_ONLINE;
+    result->psnModeSucceeded = (psn_mode && emuenv.cfg.psn_signed_in) ? 1 : 0;
 
     if (emuenv.common_dialog.netcheck.mode != SCE_NETCHECK_DIALOG_MODE_ADHOC_CONN)
         STUBBED("result->result = 0");
