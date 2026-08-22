@@ -237,4 +237,38 @@ Java_org_vita3k_emulator_NativeLib_quickStateUndoAvailable(JNIEnv *env, jclass) 
     return runtime_quick_state_load_undo_available(*emuenv) ? JNI_TRUE : JNI_FALSE;
 }
 
+/** Thor: current runtime speed as a percentage, 100 = normal. */
+JNIEXPORT jint JNICALL
+Java_org_vita3k_emulator_NativeLib_runtimeSpeedPercent(JNIEnv *env, jclass) {
+    auto *emuenv = get_emuenv();
+    return emuenv ? static_cast<jint>(runtime_speed_percent(*emuenv)) : 100;
+}
+
+/** Thor: the speed the fast forward toggle switches to, as a percentage. */
+JNIEXPORT jint JNICALL
+Java_org_vita3k_emulator_NativeLib_fastForwardSpeedPercent(JNIEnv *env, jclass) {
+    auto *emuenv = get_emuenv();
+    return emuenv ? static_cast<jint>(emuenv->cfg.fast_forward_speed_percent) : 200;
+}
+
+JNIEXPORT void JNICALL
+Java_org_vita3k_emulator_NativeLib_setFastForwardSpeedPercent(JNIEnv *env, jclass, jint speed_percent) {
+    auto *emuenv = get_emuenv();
+    if (emuenv)
+        runtime_set_fast_forward_speed(*emuenv, static_cast<uint32_t>(speed_percent));
+}
+
+JNIEXPORT jboolean JNICALL
+Java_org_vita3k_emulator_NativeLib_performanceOverlayEnabled(JNIEnv *env, jclass) {
+    auto *emuenv = get_emuenv();
+    return emuenv && runtime_performance_overlay_enabled(*emuenv) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_org_vita3k_emulator_NativeLib_setPerformanceOverlay(JNIEnv *env, jclass, jboolean enabled) {
+    auto *emuenv = get_emuenv();
+    if (emuenv)
+        runtime_set_performance_overlay(*emuenv, enabled == JNI_TRUE);
+}
+
 } // extern "C"

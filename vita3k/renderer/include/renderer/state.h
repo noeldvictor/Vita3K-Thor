@@ -66,6 +66,11 @@ struct PerformanceOverlayState {
     std::array<float, 20> fps_values = {};
     uint32_t fps_values_count = 0;
     uint32_t current_fps_offset = 0;
+
+    // Thor: runtime speed, 100 = normal. Drives the fast forward badge, which
+    // shows even when the overlay is otherwise off so that fast forward is never
+    // silently left on.
+    uint32_t speed_percent = 100;
 };
 
 class TextureCache;

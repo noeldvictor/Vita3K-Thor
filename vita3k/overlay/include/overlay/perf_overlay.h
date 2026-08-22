@@ -50,6 +50,10 @@ struct perf_overlay : public overlay {
     // Configuration
     void set_detail_level(perf_detail_level level);
     void set_position(screen_quadrant quadrant);
+    // 100 = normal speed. Anything above adds a fast forward badge.
+    void set_speed_percent(uint32_t speed_percent);
+    // Show only the fast forward badge, for when the perf overlay itself is off.
+    void set_speed_only(bool speed_only);
     void set_fps_data(uint32_t fps, uint32_t avg_fps, uint32_t min_fps,
         uint32_t max_fps, uint32_t ms_per_frame,
         const float *fps_values, uint32_t fps_values_count,
@@ -75,6 +79,8 @@ private:
     uint32_t m_min_fps = 0;
     uint32_t m_max_fps = 0;
     uint32_t m_ms_per_frame = 0;
+    uint32_t m_speed_percent = 100;
+    bool m_speed_only = false;
 
     bool m_force_repaint = true;
 

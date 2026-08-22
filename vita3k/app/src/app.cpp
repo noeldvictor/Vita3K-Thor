@@ -20,6 +20,7 @@
 #include <camera/camera.h>
 #include <config/functions.h>
 #include <config/state.h>
+#include <display/state.h>
 #include <emuenv/state.h>
 #include <io/functions.h>
 #include <io/state.h>
@@ -345,6 +346,7 @@ bool update_runtime_metrics(EmuEnvState &emuenv, LaunchRuntimeMetrics &metrics) 
     std::copy(std::begin(emuenv.fps_values), std::end(emuenv.fps_values), renderer.perf_overlay.fps_values.begin());
     renderer.perf_overlay.fps_values_count = perf_frames_size;
     renderer.perf_overlay.current_fps_offset = emuenv.current_fps_offset;
+    renderer.perf_overlay.speed_percent = emuenv.display.speed_percent.load(std::memory_order_relaxed);
 
     return true;
 }

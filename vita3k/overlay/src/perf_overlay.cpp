@@ -59,6 +59,24 @@ void perf_overlay::set_position(screen_quadrant quadrant) {
     m_force_repaint = true;
 }
 
+void perf_overlay::set_speed_percent(uint32_t speed_percent) {
+    if (m_speed_percent == speed_percent)
+        return;
+
+    m_speed_percent = speed_percent;
+    update_text();
+    m_force_repaint = true;
+}
+
+void perf_overlay::set_speed_only(bool speed_only) {
+    if (m_speed_only == speed_only)
+        return;
+
+    m_speed_only = speed_only;
+    update_text();
+    m_force_repaint = true;
+}
+
 void perf_overlay::set_fps_data(uint32_t fps, uint32_t avg_fps, uint32_t min_fps,
     uint32_t max_fps, uint32_t ms_per_frame,
     const float *fps_values, uint32_t fps_values_count,
@@ -85,20 +103,42 @@ void perf_overlay::set_fps_data(uint32_t fps, uint32_t avg_fps, uint32_t min_fps
 }
 
 void perf_overlay::update_text() {
+    // Thor: a fast forward badge, rendered as e.g. "2x". It is deliberately
+    // separated from the FPS by two spaces so it reads as its own token at a
+    // glance - "60 FPS  2x" - rather than as part of the number.
+    std::string speed;
+    if (m_speed_percent > 100) {
+        if (m_speed_percent % 100 == 0)
+            speed = fmt::format("{}x", m_speed_percent / 100);
+        else
+            speed = fmt::format("{:.1f}x", static_cast<float>(m_speed_percent) / 100.0f);
+    }
+
+    // With the overlay switched off we still surface fast forward, so it can
+    // never be left running unnoticed.
+    if (m_speed_only) {
+        m_body.set_text(speed.empty() ? std::string() : fmt::format(">> {}", speed));
+        m_body.auto_resize();
+        m_body.refresh();
+        return;
+    }
+
+    const std::string suffix = speed.empty() ? std::string() : "  " + speed;
+
     std::string text;
 
     switch (m_detail) {
     case perf_detail_level::minimum:
-        text = fmt::format("FPS: {}", m_fps);
+        text = fmt::format("FPS: {}{}", m_fps, suffix);
         break;
     case perf_detail_level::low:
-        text = fmt::format("FPS: {} ({} ms)", m_fps, m_ms_per_frame);
+        text = fmt::format("FPS: {} ({} ms){}", m_fps, m_ms_per_frame, suffix);
         break;
     case perf_detail_level::medium:
     case perf_detail_level::maximum:
-        text = fmt::format("FPS: {} ({} ms)\n"
+        text = fmt::format("FPS: {} ({} ms){}\n"
                            "Avg: {}  Min: {}  Max: {}",
-            m_fps, m_ms_per_frame,
+            m_fps, m_ms_per_frame, suffix,
             m_avg_fps, m_min_fps, m_max_fps);
         break;
     }

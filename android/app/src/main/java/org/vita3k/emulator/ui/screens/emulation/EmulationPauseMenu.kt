@@ -46,6 +46,7 @@ import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Switch
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -59,6 +60,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -603,6 +605,7 @@ private fun SessionTab(
             activity = activity,
             sessionViewModel = sessionViewModel
         )
+        SpeedSection(sessionViewModel = sessionViewModel)
 
         CustomConfigSection(
             settingsLoaded = settingsLoaded,
@@ -1027,6 +1030,121 @@ private fun ControlsEditorBar(
  * Thor: quickstate and fast-forward controls in the pause menu, so the
  * Select-chord hotkeys are not the only way to reach them.
  */
+/**
+ * Thor: speed controls. Fast forward used to be a bare toggle with no feedback,
+ * so there was no way to tell whether it was on or what multiplier it used.
+ */
+@Composable
+private fun SpeedSection(sessionViewModel: EmulationSessionViewModel) {
+    val choices = listOf(200, 300, 400)
+
+    // Read straight from the emulator - the menu only exists while paused, so
+    // these are always current while it is on screen.
+    var configured by remember { mutableIntStateOf(sessionViewModel.fastForwardSpeedPercent()) }
+    var current by remember { mutableIntStateOf(sessionViewModel.runtimeSpeedPercent()) }
+    var overlayOn by remember { mutableStateOf(sessionViewModel.performanceOverlayEnabled()) }
+
+    val fastForwarding = current > 100
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = stringResource(R.string.emulation_speed_title),
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            // Live state, coloured so an engaged fast forward is unmistakable.
+            Text(
+                text = if (fastForwarding) {
+                    stringResource(R.string.emulation_speed_running, speedLabel(current))
+                } else {
+                    stringResource(R.string.emulation_speed_normal)
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (fastForwarding) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            )
+
+            Text(
+                text = stringResource(R.string.emulation_speed_multiplier),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                choices.forEach { percent ->
+                    FilterChip(
+                        selected = configured == percent,
+                        onClick = {
+                            sessionViewModel.setFastForwardSpeedPercent(percent)
+                            configured = percent
+                            // Choosing a speed while already fast forwarding retargets
+                            // it, so reflect that immediately.
+                            current = sessionViewModel.runtimeSpeedPercent()
+                        },
+                        label = { Text(speedLabel(percent)) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            FilledTonalButton(
+                onClick = {
+                    sessionViewModel.runtimeAction("toggle_fast_forward", "", "")
+                    current = sessionViewModel.runtimeSpeedPercent()
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    if (fastForwarding) {
+                        stringResource(R.string.emulation_speed_stop)
+                    } else {
+                        stringResource(R.string.emulation_speed_start, speedLabel(configured))
+                    }
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = stringResource(R.string.emulation_overlay_fps),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Switch(
+                    checked = overlayOn,
+                    onCheckedChange = {
+                        sessionViewModel.setPerformanceOverlay(it)
+                        overlayOn = it
+                    }
+                )
+            }
+
+            Text(
+                text = stringResource(R.string.emulation_overlay_fps_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/** Thor: 200 becomes "2x", 150 becomes "1.5x". */
+private fun speedLabel(percent: Int): String =
+    if (percent % 100 == 0) "${percent / 100}x" else String.format("%.1fx", percent / 100f)
+
+
 @Composable
 private fun QuickStateSection(
     activity: Emulator,

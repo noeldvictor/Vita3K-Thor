@@ -21,6 +21,7 @@
 #include "module/load_module.h"
 
 #include <config/state.h>
+#include <config/functions.h>
 #include <ctime>
 #include <ctrl/state.h>
 #include <dialog/state.h>
@@ -10368,6 +10369,36 @@ void runtime_toggle_fast_forward(EmuEnvState &emuenv) {
     runtime_set_speed_percent(emuenv, speed_percent);
     LOG_INFO("Fast forward {}", enable ? fmt::format("{}%", configured_speed) : "off");
 }
+uint32_t runtime_speed_percent(const EmuEnvState &emuenv) {
+    return emuenv.display.speed_percent.load(std::memory_order_relaxed);
+}
+
+void runtime_set_fast_forward_speed(EmuEnvState &emuenv, uint32_t speed_percent) {
+    // 100 would make the fast forward toggle a no-op, so the floor is 101 - the
+    // same clamp runtime_toggle_fast_forward applies when it reads this back.
+    const int clamped = std::clamp(static_cast<int>(speed_percent), 101, 1000);
+    emuenv.cfg.fast_forward_speed_percent = clamped;
+
+    // If fast forward is already engaged, retarget it now rather than waiting for
+    // the next toggle - picking 3x from the OSD should take effect as you pick it.
+    if (emuenv.display.speed_percent.load(std::memory_order_relaxed) > 100)
+        runtime_set_speed_percent(emuenv, static_cast<uint32_t>(clamped));
+
+    config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
+    LOG_INFO("Fast forward speed set to {}%", clamped);
+}
+
+bool runtime_performance_overlay_enabled(const EmuEnvState &emuenv) {
+    return emuenv.cfg.performance_overlay;
+}
+
+void runtime_set_performance_overlay(EmuEnvState &emuenv, bool enabled) {
+    emuenv.cfg.performance_overlay = enabled;
+    app::sync_perf_overlay_config(emuenv);
+    config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
+    LOG_INFO("Performance overlay {}", enabled ? "on" : "off");
+}
+
 
 void runtime_request_save_state(EmuEnvState &emuenv) {
     const auto title_id = emuenv.io.title_id.empty() ? std::string("unknown-title") : emuenv.io.title_id;

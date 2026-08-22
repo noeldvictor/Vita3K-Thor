@@ -23,6 +23,7 @@
 #include <kernel/state.h>
 #include <renderer/state.h>
 
+#include <algorithm>
 #include <chrono>
 #include <motion/functions.h>
 #include <touch/functions.h>
@@ -75,8 +76,15 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
                 }
             }
         }
-        const auto time_ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-        const auto time_left = TARGET_MICRO_PER_FRAME - (time_ms % TARGET_MICRO_PER_FRAME);
+        // Thor: pace the vblank by the runtime speed. Almost every game blocks on
+        // sceDisplayWaitVblankStart, so this loop - not the kernel clock - is what
+        // actually caps the frame rate. Fast forward used to scale the kernel,
+        // audio and threadmgr clocks while this stayed pinned at a hardcoded 60Hz,
+        // which is why it appeared to do nothing.
+        const uint32_t speed = std::max<uint32_t>(display.speed_percent.load(std::memory_order_relaxed), 1);
+        const int64_t frame_micro = std::max<int64_t>(1, (TARGET_MICRO_PER_FRAME * 100) / speed);
+        const auto time_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        const auto time_left = frame_micro - (time_us % frame_micro);
         std::this_thread::sleep_for(std::chrono::microseconds(time_left));
     }
 }

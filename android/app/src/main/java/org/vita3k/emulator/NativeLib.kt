@@ -160,6 +160,19 @@ object NativeLib {
 
     /** Thor: whether a quickstate load can currently be undone. */
     external fun quickStateUndoAvailable(): Boolean
+
+    /** Thor: current runtime speed as a percentage; 100 is normal, >100 is fast forward. */
+    external fun runtimeSpeedPercent(): Int
+
+    /** Thor: the speed the fast forward toggle switches to, as a percentage. */
+    external fun fastForwardSpeedPercent(): Int
+
+    external fun setFastForwardSpeedPercent(speedPercent: Int)
+
+    /** Thor: whether the on-screen FPS/performance overlay is showing. */
+    external fun performanceOverlayEnabled(): Boolean
+
+    external fun setPerformanceOverlay(enabled: Boolean)
     /** Returns the title of the currently running app session, or an empty string when unavailable. */
     external fun getRunningAppTitle(): String
     /** Returns true while either SceIme or CommonDialog IME is active. */

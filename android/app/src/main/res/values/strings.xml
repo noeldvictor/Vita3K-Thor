@@ -206,6 +206,14 @@
     <string name="emulation_quickstate_screenshot">Screenshot</string>
     <string name="emulation_quickstate_hint">Select + R1 fast forward, Select + right stick down/up save/load.</string>
     <string name="emulation_quickstate_empty">No quickstate saved for this title yet.</string>
+    <string name="emulation_speed_title">Speed</string>
+    <string name="emulation_speed_normal">Normal speed</string>
+    <string name="emulation_speed_running">Fast forwarding at %1$s</string>
+    <string name="emulation_speed_multiplier">Fast forward speed</string>
+    <string name="emulation_speed_stop">Back to 1x</string>
+    <string name="emulation_speed_start">Fast forward %1$s</string>
+    <string name="emulation_overlay_fps">Show FPS overlay</string>
+    <string name="emulation_overlay_fps_hint">The speed badge shows whenever fast forward is on, even with this off.</string>
     <string name="emulation_action_done">Done.</string>
     <string name="emulation_action_failed">That action is not available right now.</string>
     <string name="emulation_tab_session">Session</string>

@@ -72,13 +72,20 @@ void State::update_overlays() {
         }
     }
 
-    if (perf_overlay.enabled && perf_overlay.fps > 0) {
+    // Thor: the badge has to be visible whenever fast forward is on, even with
+    // the perf overlay switched off - otherwise it is easy to leave a game running
+    // at 3x and not realise why it feels wrong.
+    const bool fast_forwarding = perf_overlay.speed_percent > 100;
+    const bool show_stats = perf_overlay.enabled && perf_overlay.fps > 0;
+    if (show_stats || fast_forwarding) {
         auto perf = overlay_manager->get<overlay::perf_overlay>();
         if (!perf)
             perf = overlay_manager->create<overlay::perf_overlay>();
 
         perf->set_position(static_cast<overlay::screen_quadrant>(perf_overlay.position));
         perf->set_detail_level(static_cast<overlay::perf_detail_level>(perf_overlay.detail));
+        perf->set_speed_only(!show_stats);
+        perf->set_speed_percent(perf_overlay.speed_percent);
         perf->set_fps_data(perf_overlay.fps, perf_overlay.avg_fps, perf_overlay.min_fps,
             perf_overlay.max_fps, perf_overlay.ms_per_frame,
             perf_overlay.fps_values.data(), perf_overlay.fps_values_count,

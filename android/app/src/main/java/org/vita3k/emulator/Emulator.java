@@ -11,6 +11,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.Log;
+import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.Surface;
 import android.view.ViewGroup;
@@ -322,6 +323,27 @@ public class Emulator extends SDLActivity
             return true;
         }
 
+        // Thor: let a controller drive the pause menu. Compose navigates on DPAD_*
+        // and activates on DPAD_CENTER, but knows nothing about BUTTON_A/B, and
+        // while the menu is up SDL would otherwise swallow the pad entirely. So
+        // remap the face buttons onto what Compose understands and keep the events
+        // away from the game underneath.
+        if (isPauseMenuVisible() && event.getSource() != InputDevice.SOURCE_KEYBOARD) {
+            final int remapped = remapControllerKeyForMenu(event.getKeyCode());
+            if (remapped == KeyEvent.KEYCODE_BACK) {
+                if (event.getAction() == KeyEvent.ACTION_UP && event.getRepeatCount() == 0
+                        && sessionViewModel != null) {
+                    sessionViewModel.handleBackPressed(this);
+                }
+                return true;
+            }
+            if (remapped != KeyEvent.KEYCODE_UNKNOWN) {
+                return super.dispatchKeyEvent(
+                        new KeyEvent(event.getDownTime(), event.getEventTime(), event.getAction(),
+                                remapped, event.getRepeatCount(), event.getMetaState()));
+            }
+        }
+
         return super.dispatchKeyEvent(event);
     }
 
@@ -624,6 +646,33 @@ public class Emulator extends SDLActivity
             restoreVitaTextInput();
             ensureOverlayUiOrder();
         }, IME_RESTORE_DELAY_MS);
+    }
+
+    /** Thor: true while the pause menu owns the screen. */
+    private boolean isPauseMenuVisible() {
+        return sessionViewModel != null
+                && sessionViewModel.getUiState().getShowMenu()
+                && !sessionViewModel.getUiState().isEditingControls();
+    }
+
+    /**
+     * Thor: controller keycode to the equivalent Compose understands, or
+     * KEYCODE_UNKNOWN to pass the event through untouched.
+     */
+    private int remapControllerKeyForMenu(int keyCode) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_BUTTON_A:
+                return KeyEvent.KEYCODE_DPAD_CENTER;
+            case KeyEvent.KEYCODE_BUTTON_B:
+                return KeyEvent.KEYCODE_BACK;
+            case KeyEvent.KEYCODE_BUTTON_L1:
+            case KeyEvent.KEYCODE_BUTTON_R1:
+                // Nothing sensible to map the shoulders onto; swallow them so they
+                // do not reach the game while the menu is open.
+                return KeyEvent.KEYCODE_UNKNOWN;
+            default:
+                return KeyEvent.KEYCODE_UNKNOWN;
+        }
     }
 
     public void openPauseMenuFromController() {

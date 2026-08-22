@@ -174,6 +174,22 @@ class EmulationSessionViewModel(application: Application) : AndroidViewModel(app
     fun quickStateUndoAvailable(): Boolean =
         runCatching { NativeLib.quickStateUndoAvailable() }.getOrDefault(false)
 
+    fun runtimeSpeedPercent(): Int = runCatching { NativeLib.runtimeSpeedPercent() }.getOrDefault(100)
+
+    fun fastForwardSpeedPercent(): Int =
+        runCatching { NativeLib.fastForwardSpeedPercent() }.getOrDefault(200)
+
+    fun setFastForwardSpeedPercent(speedPercent: Int) {
+        runCatching { NativeLib.setFastForwardSpeedPercent(speedPercent) }
+    }
+
+    fun performanceOverlayEnabled(): Boolean =
+        runCatching { NativeLib.performanceOverlayEnabled() }.getOrDefault(false)
+
+    fun setPerformanceOverlay(enabled: Boolean) {
+        runCatching { NativeLib.setPerformanceOverlay(enabled) }
+    }
+
     fun runtimeAction(action: String, successMessage: String, failureMessage: String) {
         val ok = runCatching { NativeLib.runtimeAction(action) }.getOrDefault(false)
         uiState = uiState.copy(statusMessage = if (ok) successMessage else failureMessage)

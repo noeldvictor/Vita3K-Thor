@@ -51,6 +51,12 @@ uint64_t runtime_quick_state_slot_bytes();
 std::string runtime_quick_state_slot_status(EmuEnvState &emuenv);
 void runtime_set_speed_percent(EmuEnvState &emuenv, uint32_t speed_percent);
 void runtime_toggle_fast_forward(EmuEnvState &emuenv);
+// Current runtime speed, 100 = normal.
+uint32_t runtime_speed_percent(const EmuEnvState &emuenv);
+// The speed fast forward switches to, as a percentage. Persisted to config.
+void runtime_set_fast_forward_speed(EmuEnvState &emuenv, uint32_t speed_percent);
+bool runtime_performance_overlay_enabled(const EmuEnvState &emuenv);
+void runtime_set_performance_overlay(EmuEnvState &emuenv, bool enabled);
 void runtime_request_save_state(EmuEnvState &emuenv);
 void runtime_request_load_state(EmuEnvState &emuenv);
 void runtime_request_undo_load_state(EmuEnvState &emuenv);

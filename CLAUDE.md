@@ -120,6 +120,26 @@ device. It is not yours for the duration of a task.
 * Do not force-stop, uninstall, or reconfigure the other emulators. They
   belong to work in progress elsewhere.
 
+## Runtime speed and the OSD
+
+Fast forward scales four clocks - kernel, audio, threadmgr and **the vblank**.
+That last one is the one that matters and the one that was missing: nearly every
+game blocks on `sceDisplayWaitVblankStart`, so `display.speed_percent` is what
+actually caps the frame rate. It used to be written and never read, which is why
+fast forward looked like it did nothing at all. If a speed change ever appears to
+have no effect again, check `vblank_sync_thread` in `vita3k/display/src/display.cpp`
+before anything else.
+
+The speed badge is rendered by `overlay::perf_overlay`, and `State::update_overlays`
+deliberately creates that overlay when fast forward is on *even if the performance
+overlay is disabled* - leaving a game silently running at 3x is worse than an
+unwanted glyph. Keep that behaviour if you touch the gating.
+
+Controller input reaches the pause OSD through `Emulator.dispatchKeyEvent`, which
+remaps the pad onto what Compose understands (A -> DPAD_CENTER, B -> back) only
+while the menu is up, and swallows the rest so it cannot leak into the running
+game. Compose navigates on DPAD_* by itself; it does not know `KEYCODE_BUTTON_A`.
+
 ## Things that will bite you
 
 * **Nothing that runs before SDL is initialised may use `fs_utils::read_data` on
