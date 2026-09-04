@@ -172,6 +172,7 @@ inline std::vector<std::string> default_virtual_cartridge_dirs() {
     code(bool, "export-as-png", true, export_as_png)                                                    \
     code(std::string, "memory-mapping", "double-buffer", memory_mapping)                                \
     code(bool, "boot-apps-full-screen", false, boot_apps_full_screen)                                   \
+    code(bool, "enable-cheats", true, enable_cheats)                                                    \
     code(bool, "show-live-area-screen", false, show_live_area_screen)                                   \
     code(std::string, "audio-backend", "SDL", audio_backend)                                            \
     code(int, "audio-volume", 100, audio_volume)                                                        \
@@ -205,7 +206,6 @@ inline std::vector<std::string> default_virtual_cartridge_dirs() {
     code(bool, "warn-missing-firmware", true, warn_missing_firmware)                                    \
     code(bool, "check-for-updates", false, check_for_updates)                                            \
     code(bool, "asia-font-support", false, asia_font_support)                                      \
-    code(bool, "cheats-enabled", true, cheats_enabled)                                             \
     code(bool, "enable-runtime-control", false, enable_runtime_control)                            \
     code(std::string, "runtime-control-file", std::string{}, runtime_control_file)                 \
     code(bool, "cartridge-mode", false, cartridge_mode)                                            \
