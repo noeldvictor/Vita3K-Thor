@@ -34,6 +34,8 @@ bool read_current_app_file(FileBuffer &buf, const IOState &io, const fs::path &v
 bool mount_current_app_archive(IOState &io, const fs::path &archive_path, const std::string &content_root, const std::string &title_id = {});
 void unmount_current_app_archive(IOState &io);
 bool current_app_archive_mounted(const IOState &io);
+bool current_app_source_mounted(const IOState &io);
+bool mount_current_app_source(IOState &io, const fs::path &source, const std::string &content_root, const std::string &title_id);
 bool current_app_file_exists(const IOState &io, const fs::path &vfs_file_path);
 bool current_app_directory_exists(const IOState &io, const fs::path &vfs_dir_path);
 SceOff current_app_file_size(const IOState &io, const fs::path &vfs_file_path);

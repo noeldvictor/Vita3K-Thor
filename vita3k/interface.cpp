@@ -596,7 +596,7 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
     // their own libfios2 and the firmware one rejects their sceFiosInitialize
     // params, so no PSARC ever mounts and the game sits on a black screen.
     const auto app_bundles_module = [&](const std::string &module_name_file) {
-        if (vfs::current_app_archive_mounted(emuenv.io) || !emuenv.io.app0_host_path.empty())
+        if (vfs::current_app_source_mounted(emuenv.io))
             return vfs::current_app_file_exists(emuenv.io, fs::path("sce_module") / module_name_file);
         return fs::exists(module_app_path / module_name_file);
     };
@@ -727,9 +727,9 @@ ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv, const AppLaunchR
             }
         }
 
-        if (!cartridge_source.empty() && !vfs::current_app_archive_mounted(emuenv.io)) {
+        if (!cartridge_source.empty() && !vfs::current_app_source_mounted(emuenv.io)) {
             const fs::path source{ cartridge_source };
-            if (vfs::mount_current_app_archive(emuenv.io, source, "app/" + cartridge_title_id + "/", cartridge_title_id))
+            if (vfs::mount_current_app_source(emuenv.io, source, "app/" + cartridge_title_id + "/", cartridge_title_id))
                 LOG_INFO("Re-mounted virtual cartridge {} from {} for boot", cartridge_title_id, cartridge_source);
             else
                 LOG_ERROR("Failed to re-mount virtual cartridge {} from {}", cartridge_title_id, cartridge_source);

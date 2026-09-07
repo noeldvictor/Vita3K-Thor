@@ -634,7 +634,7 @@ bool set_app_info(EmuEnvState &emuenv, const std::string &app_path) {
             : it->source_root;
 
         vfs::unmount_current_app_archive(emuenv.io);
-        if (vfs::mount_current_app_archive(emuenv.io, source, content_root, it->title_id))
+        if (vfs::mount_current_app_source(emuenv.io, source, content_root, it->title_id))
             LOG_INFO("Re-mounted virtual cartridge {} from {} (root '{}')", it->title_id, it->source_path, content_root);
         else
             LOG_ERROR("Failed to re-mount virtual cartridge {} from {} (root '{}')", it->title_id, it->source_path, content_root);

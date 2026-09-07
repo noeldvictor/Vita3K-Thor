@@ -558,6 +558,30 @@ bool current_app_archive_mounted(const IOState &io) {
     return io.app0_archive.mounted();
 }
 
+bool current_app_source_mounted(const IOState &io) {
+    return io.app0_archive.mounted() || !io.app0_host_path.empty();
+}
+
+// Thor: a scanned cartridge is either a .zip/.vpk or an extracted folder, and
+// the boot path used to treat every one as an archive - a folder died on
+// "failed finding central directory" and then fell back to a ux0:app path that
+// was never written. Mount whichever the source actually is.
+bool mount_current_app_source(IOState &io, const fs::path &source, const std::string &content_root, const std::string &title_id) {
+    boost::system::error_code error;
+    if (fs::is_directory(source, error) && !error) {
+        if (!fs::is_regular_file(source / "sce_sys/param.sfo", error) || error) {
+            LOG_ERROR("Cartridge directory {} has no sce_sys/param.sfo", source);
+            return false;
+        }
+        unmount_current_app_archive(io);
+        io.app0_host_path = source.generic_path();
+        LOG_INFO("Mounted app0 directly from directory {}", source);
+        return true;
+    }
+
+    return mount_current_app_archive(io, source, content_root, title_id);
+}
+
 bool current_app_file_exists(const IOState &io, const fs::path &vfs_file_path) {
     if (io.app0_archive.mounted()) {
         const auto entry = find_archive_entry(io.app0_archive, normalize_archive_path(vfs_file_path));
