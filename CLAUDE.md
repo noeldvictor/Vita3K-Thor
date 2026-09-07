@@ -1,9 +1,32 @@
 # Vita3K Thor — working notes for agents
 
 Thor is a fork of [Vita3K](https://github.com/Vita3K/Vita3K) aimed at the AYN
-Thor handheld (Snapdragon 8 Gen 2 / QCS8550). `AGENTS.md` holds the standing
-project rules and is the authority when the two disagree; this file covers how
-to build, run and automate the thing.
+Thor handheld (Snapdragon 8 Gen 2 / QCS8550).
+
+**[`AGENTS.md`](./AGENTS.md) is the rulebook and wins whenever the two
+disagree.** This file is the map: how to build, run and automate the thing, and
+the traps that cost a day each. Where a topic has a section in `AGENTS.md`,
+this file points at it instead of repeating it.
+
+## Where the rules live
+
+| Topic | `AGENTS.md` section |
+|---|---|
+| What the fork is for, what is out of scope | Project Goals, Safety Scope, Android And Thor Focus, Frontend Direction |
+| Remotes, SSH push, commit cadence, how upstream batches are taken | Source Control |
+| SQLite knowledge base, cases, the attempt ledger, compat checkpoints | Debug Knowledge Base, Repo-Local Skills |
+| Renderer/core experiments: the anti-loop gate, one variable per run, A/B/A | Experiment Discipline, Graphics Debugging And Profiling |
+| Scripted button presses on Windows and the Thor | Input Automation |
+| Turnip driver picker | Custom Driver Workflow |
+| Toolchain paths, vcpkg, the Gradle invocation | Build Notes, Fast Debug Loop Strategy |
+| Cartridges instead of installs, archive layout rules, encrypted content | Playing Without Install |
+| Cheats, hotkeys, fast forward, quickstates and their harnesses | Cheats And Runtime Hotkeys, Runtime OSD |
+| Sharing the one device, ADB conventions | ADB Thor Testing |
+| What a "works" claim needs | Reporting Thor Results |
+
+Start every game or renderer task with `python tools/debug_knowledge.py case
+focus` and a search of `reports/debug_knowledge.sqlite`; the rules for that are
+in Debug Knowledge Base and Experiment Discipline.
 
 ## Layout
 
@@ -16,77 +39,81 @@ to build, run and automate the thing.
 | `android/app/` | the Android app (upstream's Compose UI) |
 | `android/src/` | Thor's retired Android module, kept as a porting reference |
 | `android/assets/` | assets packaged into the APK — note this is **not** `android/app/assets` |
-| `tools/` | dev tooling, including the MCP server and the knowledge base |
+| `tools/` | dev tooling: the MCP server, the knowledge base, the cartridge converter |
 | `docs/reference/arm/` | Arm ARM + Cortex SWOGs (PDFs gitignored) |
 | `reports/debug_knowledge.sqlite` | the canonical report store |
 
 ## Building
 
-**Windows** needs Qt 6.11+ for the frontend:
+Both commands, with the toolchain paths from `AGENTS.md` → Build Notes:
 
 ```
+# Windows (needs Qt 6.11+ at C:/Qt)
 cmake --preset windows-vs2022 -DVITA3K_ENABLE_QT_GUI=ON
 cmake --build build/windows-vs2022 --config RelWithDebInfo -- -m
-```
 
-Qt lives at `C:/Qt` on this machine. `aqtinstall` cannot fetch Qt 6.11 — Qt
-split its repo per architecture (`qt6_6112/qt6_6112_msvc2022_64/`) and aqt still
-looks under `qt6_6112/qt6_6112/`, which 404s. The archives were pulled from that
-path directly.
-
-**Android** needs vcpkg and the NDK gradle pins:
-
-```
+# Android (VCPKG_ROOT and ANDROID_NDK_HOME must be set in the same shell)
 export VCPKG_ROOT=~/Documents/SteamPortableTools/toolchains/vcpkg
-export ANDROID_NDK_HOME=.../Android/Sdk/ndk/29.0.14206865
+export ANDROID_NDK_HOME=~/AppData/Local/Android/Sdk/ndk/29.0.14206865
 cd android && ./gradlew assembleReldebug -Pandroid.injected.build.abi=arm64-v8a
 ```
 
-Upstream's `vcpkg.json` puts the project in manifest mode, so the first Android
-build compiles ~64 dependencies from source into a per-project
-`vcpkg_installed/`. Later builds reuse them.
+The NDK is the one `android/app/build.gradle` pins (`ndkVersion`). `aqtinstall`
+cannot fetch Qt 6.11 — Qt split its repo per architecture and aqt looks in the
+old place, which 404s — so the archives were pulled from
+`qt6_6112/qt6_6112_msvc2022_64/` by hand.
 
 The APK lands in `android/app/build/intermediates/apk/reldebug/` and is marked
-`testOnly`, so install it with `adb install -r -t`. A plain `install -r` fails
-with `INSTALL_FAILED_TEST_ONLY`.
+`testOnly`, so install it with `adb install -r -t`; a plain `install -r` fails
+with `INSTALL_FAILED_TEST_ONLY`. The first Android build compiles the vcpkg
+manifest dependencies from source; later builds reuse them.
+
+**Build both targets before committing shared code.** The desktop build sat
+broken for two weeks because a declaration was left Android-only.
 
 ## Running a game
 
-Thor's flow is virtual cartridges, not installs. A `.zip`/`.vpk` is mounted
-read-only as a game card; nothing is written to `ux0:app`.
+Thor's flow is virtual cartridges, not installs (`AGENTS.md` → Playing Without
+Install has the layout rules). Two kinds of cartridge exist and they are not
+equal:
 
-* **Desktop:** `Vita3K.exe --cartridge <path>`
-* **Android:** open the archive from a file manager (ACTION_VIEW/ACTION_SEND), or
-  drop it in a scan root — `/storage/<card>/Roms/psvita` and friends — and it
-  appears in the app grid.
+* **An extracted folder** — `Roms/psvita/<Game>/sce_sys/param.sfo` on the SD
+  card. Mounted straight from the card, no cache, no first-launch wait. This
+  is the preferred form; `tools/unpack_cartridges.py` converts a card full of
+  zips into folders on the device itself (see "The cartridge cache" below).
+* **A `.zip`/`.vpk`** — mounted read-only through miniz, with `patch/<id>/`
+  and `rePatch/<id>/` folded over the content root at read time. Any member
+  over 64 MiB (PSARCs, movies) is unpacked once into the cartridge cache on
+  internal storage, because a deflated entry cannot be read at an offset.
 
-A mounted cartridge gets a *transient* app entry so the boot path can find it by
-title id. That entry is never written to the apps cache, because the content
-lives outside VitaFS.
+Launching:
+
+* **Desktop:** `Vita3K.exe --cartridge <zip or folder>`
+* **Android:** drop it in a scan root (`/storage/<card>/Roms/psvita` and
+  friends) and it appears in the app grid, or open an archive from a file
+  manager (ACTION_VIEW / ACTION_SEND).
+
+A cartridge gets a *transient* app entry so the boot path can find it by title
+id; it is never written to the apps cache because the content lives outside
+VitaFS. Both boot paths (`apps_list.cpp` `set_app_info` and `interface.cpp`
+`load_app`) re-mount from the recorded source through
+`vfs::mount_current_app_source`, which handles a folder and an archive alike —
+before 2026-09-07 they assumed an archive, and a folder died on "failed finding
+central directory".
 
 ## Automation: the MCP server
 
 `tools/mcp_server.py` exposes the dev loop over MCP so an agent can build,
-install, launch, drive and observe without a human relaying commands.
-
-Turn it on:
-
-```
-claude mcp add vita3k-thor -- python tools/mcp_server.py
-```
-
-Turn it off:
-
-```
-claude mcp remove vita3k-thor
-```
+install, launch, drive and observe without a human relaying commands. It is a
+development tool and **off by default** (`python tools/mcp_toggle.py on|off|status`,
+a thin wrapper over `claude mcp add|remove|list`): it reaches for a shared
+device, so it has no business being registered outside work on this fork.
 
 Build and run: `devices`, `connect`, `build_windows`, `build_android`,
 `install`, `launch`, `launch_cartridge`, `stop`, `is_running`, `screenshot`,
 `logcat`, `runtime_action`, `knowledge_search`, `knowledge_add`.
 
-Debugging, added because each was hand-rolled over and over while chasing
-renderer bugs:
+Debugging, each added because it kept being hand-rolled:
 
 | tool | why it exists |
 |---|---|
@@ -98,19 +125,16 @@ renderer bugs:
 | `config_get` / `config_set` | flip a config flag and reboot - the cheapest A/B there is, no rebuild. `disable-surface-sync` was found this way |
 | `validation_errors` | Vulkan validation count plus deduplicated samples; a regression check with a number attached |
 | `release` | force-stop when done, because the device is shared |
-
-
+| `vita_ls`, `vita_mkdir`, `vita_rm`, `pull` | the guest filesystem without a raw `adb shell` |
+| `crashes`, `cartridges`, `device_state` | native crashes and ANRs; title ids read out of every archive; CPU, memory and who owns each display |
 
 **Android input injection cannot drive a game. Use `press` and `touch`.**
 `adb shell input` events carry no InputDevice, so SDL drops them instead of
 matching them to an opened joystick - and the Thor always has a real controller
 open. That is why `adb shell input keyevent` can drive the Compose pause menu
-and never the game, whichever source you inject with. Gamepad-sourced
-`input gamepad keyevent` does not help either; it was tried.
-
-The MCP `press` and `touch` tools write straight into the emulator's own pad and
-touch state, below SDL, through the runtime control file - so a game cannot tell
-the difference:
+and never the game. The MCP `press` and `touch` tools write straight into the
+emulator's own pad and touch state, below SDL, through the runtime control
+file, so a game cannot tell the difference:
 
 ```
 press  button=circle hold_ms=150      cross/a, circle/b, square, triangle,
@@ -120,207 +144,148 @@ touch  x=500 y=850 hold_ms=150        permille of the screen, so 500/500 is
                                       the centre
 ```
 
-Both holds expire on a deadline rather than needing a matching release, so a
-caller that dies mid-press cannot leave a button stuck down or a finger welded
-to the panel.
+Both holds expire on a deadline rather than needing a matching release. Known
+gap: an injected `start` did not advance the Trails Evolution title screens on
+2026-09-07 while DOA Venus reacts fine; see the `automated-input-debug-loop`
+case before touching the injection.
 
-Two related things still matter for the Android-level `tap`, which remains
-useful for the Compose UI:
-
-* **A tap must be held.** `input tap` sends down and up in the same instant.
-  Compose accepts that; the emulated touchscreen ignores it entirely.
-* **There are two touch panels.** `touch_panel` reads and sets front/rear. A
-  front-panel UI never sees a touch while the emulator is switched to the rear.
+The Android-level `tap` still matters for the Compose UI: a tap must be held
+(`input tap` sends down and up in the same instant, which the emulated panel
+ignores), and there are two touch panels (`touch_panel` reads and sets
+front/rear; a front-panel UI never sees a touch while the emulator is switched
+to the rear).
 
 Two Windows-side traps when calling the server's functions directly from
 Python rather than over MCP: Git Bash rewrites a leading `/storage/...` or
 `/sdcard/...` argument into `C:/Program Files/Git/storage/...` before adb sees
 it (set `MSYS_NO_PATHCONV=1`), and printing a Japanese game title from
 `python -c` dies with a cp1252 `UnicodeEncodeError` (set
-`PYTHONIOENCODING=utf-8`). Over MCP neither applies, because JSON escapes the
-text and no shell is involved.
+`PYTHONIOENCODING=utf-8`). Over MCP neither applies.
 
 **Debug through the MCP server, not raw `adb`.** If a debugging step needs a
-bare `adb shell`, that is a missing tool - add it to `tools/mcp_server.py`
-rather than reaching around the server. Everything the server does is
-repeatable, logged the same way each time, and safe on a shared device;
-a hand-typed `adb` command is none of those. The filesystem, crash, cartridge
-and device-state tools all exist because they were first done by hand several
-times over.
-
-Particularly worth using rather than reinventing:
-
-| instead of | use |
-|---|---|
-| `adb shell ls .../vita/ux0/...` | `vita_ls` (takes `ux0:user/00/savedata`) |
-| `adb shell mkdir`/`rm` in the guest fs | `vita_mkdir`, `vita_rm` |
-| `adb logcat \| grep -i 'Fatal signal'` | `crashes` |
-| grepping a title id out of a `.zip` | `cartridges` |
-| `adb shell top` + focus checks | `device_state` |
-| `adb pull` | `pull` |
-| a boot-and-watch loop | `boot_title`, `wait_for_log` |
-| a screenshot you then have to sanity-check | `capture` (refuses when we are not in front) |
-
-**The MCP server is a development tool, and is off by default.** It builds,
-installs, launches, drives and inspects the emulator on a real device, so it has
-no business being registered while doing anything other than working on this
-fork - and on a machine where several agents share one AYN Thor, an idle
-registration is one more thing that can reach for the device.
-
-```
-python tools/mcp_toggle.py status
-python tools/mcp_toggle.py on
-python tools/mcp_toggle.py off
-```
-
-That is a thin wrapper over `claude mcp add|remove|list`; use those directly if
-you prefer.
+bare `adb shell`, that is a missing tool - add it to `tools/mcp_server.py`.
+Everything the server does is repeatable, logged the same way each time, and
+safe on a shared device; a hand-typed `adb` command is none of those.
 
 ### Cheats, by memory search
 
 The emulator polls a plain text control file, so the whole Cheat Engine loop
 works the same on the handheld as on desktop with no debugger attached. Turn it
-on once with `runtime_control_enable`, reboot the title, then:
-
-| tool | what it does |
-|---|---|
-| `mem_search` | first scan of every mapped guest page for a value you can see on screen - HP, gold, a counter. Width 1, 2 or 4 bytes |
-| `mem_narrow` | filter the survivors after the value moved. `equal`, `not_equal`, `greater`, `less`, `changed`, `unchanged` - the relative ones need no value, so "take damage, narrow on less" works |
-| `mem_read` / `mem_poke` | read or write one address. Poking is how you *confirm* a candidate: poke it and see whether the number on screen changed |
-| `mem_list`, `mem_reset` | show survivors, or start over |
-| `mem_cheat` | write the survivors out as a `.psv` next to the control file. Nothing is applied automatically |
-
-The engine lives in `vita3k/app/src/memory_search.cpp` and only ever reads pages
-`is_valid_addr` vouches for - guest RAM is a 4GiB host reservation of which very
-little is committed, so scanning it blindly would fault.
+on once with `runtime_control_enable`, reboot the title, then `mem_search`,
+`mem_narrow`, `mem_read` / `mem_poke`, `mem_list`, `mem_reset` and `mem_cheat`
+(writes the survivors out as a `.psv`; nothing is applied automatically). The
+engine lives in `vita3k/app/src/memory_search.cpp` and only ever reads pages
+`is_valid_addr` vouches for - guest RAM is a 4 GiB host reservation of which
+very little is committed.
 
 **`runtime_poll_control_file` must be called from whichever loop is running.**
-Its call site was lost in the upstream merge, which silently made the control
-file - and every `runtime_action` in the MCP server - a no-op. It is now called
-from both `main_android.cpp` and `gui-qt/src/main_window.cpp`. If a runtime
-action ever stops working, check that first.`runtime_action` drives a *running* emulator — `save_state`, `load_state`,
-`undo_load_state`, `toggle_fast_forward`, `screenshot` — through the runtime
-control file. Enable it in `config.yml`:
-
-```yaml
-enable-runtime-control: true
-runtime-control-file: /path/to/vita3k-control.txt
-```
-
-or set `VITA3K_RUNTIME_CONTROL_FILE`. Without one, `runtime_action` tells you so
-rather than failing silently.
+Its call site was lost in an upstream merge once, which silently made the
+control file - and every `runtime_action` - a no-op. It is called from both
+`main_android.cpp` and `gui-qt/src/main_window.cpp`; if a runtime action ever
+stops working, check that first. `runtime_action` needs
+`enable-runtime-control: true` and `runtime-control-file: <path>` in
+`config.yml` (or `VITA3K_RUNTIME_CONTROL_FILE`); without one it says so rather
+than failing silently. The code paths and the hotkeys are described in
+`AGENTS.md` → Cheats And Runtime Hotkeys.
 
 ## The AYN Thor is shared
 
-Several agents work on emulators for this device at once, and there is one
-device. It is not yours for the duration of a task.
+Several agents work on emulators for this device at once, and the user picks it
+up and plays whenever they like. It is not yours for the duration of a task
+(`AGENTS.md` → ADB Thor Testing has the conventions).
 
-* **Expect to be interrupted.** Another agent will launch its own emulator,
-  and Android will background yours. A backgrounded emulator stops stepping,
-  so its log goes quiet and its last frame persists. That looks exactly like a
-  hang, and it is not one. Before calling anything a hang, check that your
-  activity is still `topResumedActivity` for the whole window you measured.
-* **Close the emulator when you are done with it** -
-  `adb shell am force-stop org.vita3k.emulator.debug`. Leaving it resident
+* **Expect to be interrupted.** Another app will take the foreground and
+  Android will background yours; a backgrounded emulator stops stepping, so its
+  log goes quiet and its last frame persists. That looks exactly like a hang
+  and is not one. Check `foreground` for the whole window you measured.
+* **Close the emulator when you are done** (`release`). Leaving it resident
   makes the next agent fight it for the foreground and the GPU.
-* **A busy device is not a reason to stop.** Most of the work here does not
-  need hardware: reading upstream, porting commits, comparing patches against
-  what upstream already fixed, building both targets, writing up findings.
-  Do that while you wait, and batch the on-device verification into one pass
-  at the end.
-* **Screenshots are of whatever is on top**, which may be someone else's app.
-  Check focus before reading a screenshot as evidence about Vita3K.
-* Do not force-stop, uninstall, or reconfigure the other emulators. They
-  belong to work in progress elsewhere.
+* **A busy device is not a reason to stop.** Read upstream, port, build both
+  targets, write up findings, and batch the on-device verification.
+* **Screenshots are of whatever is on top.** `capture` refuses when that is
+  not us.
+* Do not force-stop, uninstall, or reconfigure the other emulators.
 
 ## Runtime speed and the OSD
 
 Fast forward scales four clocks - kernel, audio, threadmgr and **the vblank**.
-That last one is the one that matters and the one that was missing: nearly every
-game blocks on `sceDisplayWaitVblankStart`, so `display.speed_percent` is what
-actually caps the frame rate. It used to be written and never read, which is why
-fast forward looked like it did nothing at all. If a speed change ever appears to
-have no effect again, check `vblank_sync_thread` in `vita3k/display/src/display.cpp`
-before anything else.
+Nearly every game blocks on `sceDisplayWaitVblankStart`, so
+`display.speed_percent` is what actually caps the frame rate; it used to be
+written and never read. If a speed change ever appears to have no effect, check
+`vblank_sync_thread` in `vita3k/display/src/display.cpp` first.
 
 The speed badge is rendered by `overlay::perf_overlay`, and `State::update_overlays`
-deliberately creates that overlay when fast forward is on *even if the performance
-overlay is disabled* - leaving a game silently running at 3x is worse than an
-unwanted glyph. Keep that behaviour if you touch the gating.
+deliberately creates that overlay when fast forward is on *even if the
+performance overlay is disabled* - a game silently running at 3x is worse than
+an unwanted glyph. Keep that behaviour.
 
-Controller input reaches the pause OSD through `Emulator.dispatchKeyEvent`, which
-remaps the pad onto what Compose understands (A -> DPAD_CENTER, B -> back) only
-while the menu is up, and swallows the rest so it cannot leak into the running
-game. Compose navigates on DPAD_* by itself; it does not know `KEYCODE_BUTTON_A`.
+Controller input reaches the pause OSD through `Emulator.dispatchKeyEvent`,
+which remaps the pad onto what Compose understands (A -> DPAD_CENTER, B -> back)
+only while the menu is up, and swallows the rest so it cannot leak into the
+running game.
 
 ## Things that will bite you
 
-* **`vfs::read_app_file` is a footgun for cartridges.** It resolves under
-  `ux0:app/<app path>/`, which is where an *installed* game lives - and a
-  virtual cartridge is never installed. Anything reading game content through
-  it silently gets nothing for every cartridge in the library. This has now
-  been fixed three separate times, in `module_parent.cpp` (module loading),
-  `_sceAppMgrLoadExec` (games that chain to a second executable, e.g.
-  Uncharted) and `load_app` (param.sfo, and with it SAVEDATA_MAX_SIZE,
-  ATTRIBUTE2 and APP_VER). The pattern to copy:
+* **Anything that resolves a game file under `ux0:app/<app path>/` is a footgun
+  for cartridges.** A cartridge is never installed there, so such a check
+  silently gets nothing for every cartridge in the library. Fixed four times so
+  far: `module_parent.cpp` (module loading), `_sceAppMgrLoadExec` (games that
+  chain to a second executable, e.g. Uncharted), `load_app` (param.sfo, and
+  with it SAVEDATA_MAX_SIZE, ATTRIBUTE2 and APP_VER) and `interface.cpp`'s
+  preload list, which decides whether `libc` and `libfios2` come from the game
+  or from vs0. That last one is how the Trails Evolution games ended up on a
+  black screen: they ship their own `libfios2`, the firmware one rejects their
+  `sceFiosInitialize` params (`Unsupported paramsSize (96, most recent is 116)`
+  via `sceClibPrintf`), no PSARC ever mounts, and every read fails as
+  `Cannot find device for path: /arc/...`. The pattern to copy:
 
   ```cpp
-  vfs::current_app_archive_mounted(emuenv.io)
-      ? vfs::read_current_app_file(buf, emuenv.io, emuenv.vita_fs_path, relative)
-      : vfs::read_app_file(buf, emuenv.vita_fs_path, emuenv.io.app_path, relative)
+  vfs::current_app_source_mounted(emuenv.io)
+      ? vfs::current_app_file_exists(emuenv.io, relative)   // or read_current_app_file
+      : fs::exists(emuenv.vita_fs_path / "ux0/app" / emuenv.io.app_path / relative)
   ```
 
-  `read_app_file` is still correct where the installed path is genuinely what
-  is wanted - `apps_list.cpp`'s `read_app_info` scans ux0:app on purpose, since
-  cartridges come from the scanner instead.
-
-  The fourth instance was `fs::exists(ux0/app/<path>/sce_module/...)` in
-  `interface.cpp`'s preload list, which decides whether `libc` and `libfios2`
-  come from the game or from vs0. For every cartridge it said "no", so games
-  always got the firmware modules. The Trails Evolution games ship their own
-  `libfios2`; the firmware one rejects their `sceFiosInitialize` params
-  (`Unsupported paramsSize (96, most recent is 116)` via `sceClibPrintf`), no
-  PSARC ever mounts, and FC sits on a black screen with every read failing as
-  `Cannot find device for path: /arc/...`. Use `app_bundles_module` there, and
-  grep for `"ux0/app"` before trusting any new path check.
+  `read_app_file` is still right where the installed path is genuinely what is
+  wanted - `apps_list.cpp`'s `read_app_info` scans ux0:app on purpose. Grep
+  for `"ux0/app"` before trusting any new path check.
 
 * **A game that opens `/arc/...` paths is using FIOS2 overlays**, not a broken
-  device table. The engine mounts `app0:/gamedata/data.psarc` and `data%d.psarc`
-  at `/arc%d` inside the LLE `libfios2` and layers `/arc` over them through
-  `sceFiosOverlayAddForProcess02` (HLE in `SceDriverUser/SceFios2User.cpp`,
-  backed by `create_overlay`/`resolve_path` in `io.cpp`). Reads that libfios2
-  serves from an archive never reach `sceIoOpen`; a raw `/arc/...` there means
-  libfios2 fell back to native IO because the file was in none of its archives.
-  In Trails 3rd those are benign probes (`map4/e1110.mc3` exists nowhere; the
-  map really is `map2/e1110.it3`), so check the PSARC manifest before blaming
-  IO. Overlay adds, removes and the first 48 resolves are logged at info level.
+  device table. The Trails engine mounts `app0:/gamedata/data.psarc` and
+  `data%d.psarc` at `/arc%d` inside the LLE `libfios2` and layers `/arc` over
+  them through `sceFiosOverlayAddForProcess02` (HLE in
+  `SceDriverUser/SceFios2User.cpp`, backed by `create_overlay`/`resolve_path`
+  in `io.cpp`). Reads that libfios2 serves from an archive never reach
+  `sceIoOpen`; a raw `/arc/...` there means libfios2 fell back to native IO
+  because the file was in none of its archives. In Trails 3rd those are benign
+  probes (`map4/e1110.mc3` exists nowhere; the map really is `map2/e1110.it3`),
+  so check the PSARC manifest before blaming IO. Overlay adds, removes and the
+  first 48 resolves are logged at info level.
 
 * **`disable-surface-sync` causes garbage geometry on Vulkan.** Upstream
   defaults it to true; Thor defaults it to false. With it on, and memory
   mapping enabled, `handle_transfer_copy` and `handle_transfer_downscale` skip
-  the Vulkan surface cache and do a CPU copy out of guest memory - which is
-  stale for any surface the GPU rendered and never wrote back. Chaos Rings III
-  shows this as coloured streaks and black blocks over its 3D title scenes,
-  and turning sync on visibly clears them. The performance cost has not been
-  measured; if a game needs the speed, the flag is still per-game.
+  the Vulkan surface cache and do a CPU copy out of guest memory - stale for
+  any surface the GPU rendered and never wrote back. Chaos Rings III shows this
+  as coloured streaks and black blocks over its 3D title scenes.
 * **Nothing heavy may run on the Android UI thread from the pause menu.** A
-  quickstate capture is hundreds of megabytes - Chaos Rings III is 373 MiB - and
-  calling it inline from a Compose `onClick` blocks input long enough for Android
-  to kill the app with an ANR. `EmulationSessionViewModel.runtimeAction` goes
-  through `viewModelScope` + `Dispatchers.IO` for exactly this reason; keep any
-  new runtime action on that path.
+  quickstate capture is hundreds of megabytes and calling it inline from a
+  Compose `onClick` blocks input long enough for an ANR.
+  `EmulationSessionViewModel.runtimeAction` goes through `viewModelScope` +
+  `Dispatchers.IO` for exactly this reason; keep any new runtime action there.
 * **Nothing that runs before SDL is initialised may use `fs_utils::read_data` on
   Android.** It routes through `SDL_IOFromFile` → `Android_JNI_FileOpen` and
   aborts the process with `CallStaticObjectMethod received NULL jclass`. Use
   `std::ifstream` for real filesystem paths. This crashed the cartridge scan.
-* **`android/assets`, not `android/app/assets`.** The app module's asset srcDir
-  points one level up. Getting this wrong ships an APK with no builtin shaders,
-  and the failure surfaces as `vk::Device::createGraphicsPipeline: ErrorUnknown`
-  from the *present* pipeline, which reads like a game crash.
-* **`io_deinit` must not unmount the current app archive.** Session setup calls
-  it, so unmounting there kills a cartridge mounted before boot.
-* **A green build is not a working build.** Both of the above compiled fine and
-  failed only on device. Install and launch before claiming something works.
+* **`android/assets`, not `android/app/assets`.** Getting this wrong ships an
+  APK with no builtin shaders, and the failure surfaces as
+  `vk::Device::createGraphicsPipeline: ErrorUnknown` from the *present*
+  pipeline, which reads like a game crash.
+* **`io_deinit` must not unmount the current app archive or folder.** Session
+  setup calls it, so unmounting there kills a cartridge mounted before boot.
+* **Declarations guarded by `#ifdef __ANDROID__` break the desktop build** when
+  shared code calls them - the runtime control file's touch-panel switch did.
+* **A green build is not a working build.** Install and launch before claiming
+  something works.
 
 ## The cartridge cache, and why a zip gets unpacked
 
@@ -328,36 +293,42 @@ A zip entry is a deflate stream, which cannot be read at an arbitrary offset,
 and a game seeks inside its PSARCs constantly. So `open_file` unpacks any
 archive member over 64 MiB once into
 `<vita>/cache/cartridge_archive/<TITLEID>/<archive key>/<relative path>` and
-serves it from there; the `.zip` itself stays untouched. Trails FC costs about
-2.8 GB of that on its first launch, SC and 3rd about 3.5 GB and 2.9 GB.
+serves it from there. Trails FC costs about 2.8 GB of that on its first launch,
+SC and 3rd about 3.5 GB and 2.9 GB. Nothing evicts it: on 2026-09-07 the Thor's
+internal storage was at 100% with 24.9 GB of cache for eleven titles.
 
-Nothing evicts it. On 2026-09-07 the Thor's internal storage was at 100% with
-24.9 GB of cache for eleven titles, plus 4.2 GB in a stale `ux0/cart` staging
-folder from before archives were mounted directly (now deleted). Settings ->
-Emulator -> **Cartridge Cache** lists the cache per title with sizes and free
-space and can delete one title or all of them; deleting is always safe. A game
-kept as an extracted folder on the SD card needs no cache at all. The ROMs'
-SD card (`/storage/2664-21DE`) had 92 GB free, so moving the cache there is
-the obvious next step if internal storage keeps filling up.
+Two answers, both shipped that day:
+
+* Settings → Emulator → **Cartridge Cache** lists the cache per title with
+  sizes and free space and deletes one title or all of them. Deleting only
+  costs that game a re-extraction on its next launch.
+* `python tools/unpack_cartridges.py [--delete] [--purge-cache]` converts the
+  zips on the card into folders, on the device, one archive at a time: unzip to
+  a temp folder, check every member's size against the listing, fold
+  `patch/`/`rePatch/` over the content root (keeping the game's own
+  `param.sfo`, since the scanner rejects a patch's `gp` category), park any
+  `addcont/` DLC under `Roms/psvita/addcont/<id>/`, and only then delete the
+  zip. `--dry-run` prints the plan. A folder needs no cache at all.
 
 ## Upstream
 
 `upstream/master` is fetched but the fork has diverged hard: the ImGui frontend
 was replaced by Qt, the renderer was rewritten around `FrameHost`, and config,
 lang and ngs all changed shape. Update checking is disabled on both frontends —
-upstream's releases are not an upgrade path for Thor, and the check only ever
-offered to replace it.
+upstream's releases are not an upgrade path for Thor.
 
 Since the big adoption, upstream merges are cheap: the 2026-09-07 merge of 16
-commits (kernel import resolution by library NID, staging-buffer reuse fix,
-`sceGxmFinish` validation, SELF segment-info reads, SDL 3.4.16) only conflicted
-on the three GitHub workflows Thor deleted (keep them deleted), the README
-download table (keep Thor's note) and the SDL submodule (take upstream's, then
-`git submodule update --init external/sdl`). Do it on an `upstream-sync-<date>`
-branch, build Android before committing, and fast-forward `master`.
+commits only conflicted on the three GitHub workflows Thor deleted (keep them
+deleted), the README download table (keep Thor's note) and the SDL submodule
+(take upstream's, then `git submodule update --init external/sdl`). Do it on an
+`upstream-sync-<date>` branch, build both targets before committing, and
+fast-forward `master`. The rules for acknowledging a rejected batch are in
+`AGENTS.md` → Source Control.
 
 Outstanding re-port work is tracked in SQLite:
 
 * `renderer-report-after-upstream-adoption` — 36 renderer commits, 3 applied
 * `quickstate-report-after-upstream-adoption` — done, kept for the API notes
 * `arm64-spin-backoff-rpcs3-port` — the RPCS3 ARM64 work
+* `trails-evolution-cartridge-fios` — FC fixed; the 3rd's black prologue map is
+  still an open question

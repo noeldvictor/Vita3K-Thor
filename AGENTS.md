@@ -130,7 +130,7 @@ python tools/debug_knowledge.py search "doa venus black terrain android 564cd0" 
 
 ## Build Notes
 
-- Local Windows Android builds need Java 21, Android SDK/NDK 27.3.13750724, and vcpkg with the arm64 Android Vita3K dependencies. The known-good local toolchain paths are:
+- Local Windows Android builds need Java 17 or newer, the Android SDK with the NDK that `android/app/build.gradle` pins (`29.0.14206865` as of 2026-09-07; `ANDROID_NDK_HOME` must point at it), and vcpkg with the arm64 Android Vita3K dependencies. The known-good local toolchain paths are:
 
 ```powershell
 $env:JAVA_HOME='C:\Users\leanerdesigner\Documents\SteamPortableTools\toolchains\jdk-21.0.11+10'
