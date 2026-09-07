@@ -590,6 +590,16 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
         }
     }
     const auto module_app_path{ emuenv.vita_fs_path / "ux0/app" / emuenv.io.app_path / "sce_module" };
+    // Thor: a virtual cartridge is never installed under ux0:app, so asking the
+    // host filesystem whether the app bundles a module always said no there and
+    // the firmware copy got preloaded instead. The Trails Evolution games ship
+    // their own libfios2 and the firmware one rejects their sceFiosInitialize
+    // params, so no PSARC ever mounts and the game sits on a black screen.
+    const auto app_bundles_module = [&](const std::string &module_name_file) {
+        if (vfs::current_app_archive_mounted(emuenv.io) || !emuenv.io.app0_host_path.empty())
+            return vfs::current_app_file_exists(emuenv.io, fs::path("sce_module") / module_name_file);
+        return fs::exists(module_app_path / module_name_file);
+    };
 
     std::vector<std::string> lib_load_list = {};
     // todo: check if module is imported
@@ -597,7 +607,7 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
         if ((process_preload_disabled & code) == 0) {
             if (is_lle_module(name, emuenv)) {
                 const auto module_name_file = fmt::format("{}.suprx", name);
-                if (load_from_app && fs::exists(module_app_path / module_name_file))
+                if (load_from_app && app_bundles_module(module_name_file))
                     lib_load_list.emplace_back(fmt::format("app0:sce_module/{}", module_name_file));
                 else if (fs::exists(emuenv.vita_fs_path / "vs0/sys/external" / module_name_file))
                     lib_load_list.emplace_back(fmt::format("vs0:sys/external/{}", module_name_file));
