@@ -77,4 +77,5 @@ int remove_dir(IOState &io, const char *dir, const fs::path &vita_fs_path, const
 
 // SceFios functions
 SceUID create_overlay(IOState &io, SceFiosProcessOverlay *fios_overlay);
+bool remove_overlay(IOState &io, SceUID overlay_id);
 std::string resolve_path(IOState &io, const char *input, const SceUInt32 min_order = 0, const SceUInt32 max_order = 0x7F);

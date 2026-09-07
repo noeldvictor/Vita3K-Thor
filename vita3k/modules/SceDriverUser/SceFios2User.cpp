@@ -17,7 +17,10 @@
 
 #include <module/module.h>
 
+#include <atomic>
+
 #include "io/functions.h"
+#include <io/io.h>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceFios2User);
@@ -54,9 +57,28 @@ EXPORT(int, sceFiosOverlayAddForProcess02, SceUID processId, SceFiosProcessOverl
     return SCE_FIOS_OK;
 }
 
-EXPORT(int, sceFiosOverlayGetInfoForProcess02) {
-    TRACY_FUNC(sceFiosOverlayGetInfoForProcess02);
-    return UNIMPLEMENTED();
+EXPORT(int, sceFiosOverlayGetInfoForProcess02, SceUID processId, SceFiosOverlayID id, SceFiosProcessOverlay *pOutOverlay) {
+    TRACY_FUNC(sceFiosOverlayGetInfoForProcess02, processId, id, pOutOverlay);
+    if (!pOutOverlay)
+        return RET_ERROR(SCE_ERROR_ERRNO_EINVAL);
+
+    const std::lock_guard<std::mutex> guard(emuenv.io.overlay_mutex);
+    for (const auto &overlay : emuenv.io.overlays) {
+        if (overlay.id != id)
+            continue;
+
+        memset(pOutOverlay, 0, sizeof(*pOutOverlay));
+        pOutOverlay->type = overlay.type;
+        pOutOverlay->order = overlay.order;
+        pOutOverlay->process_id = overlay.process_id;
+        strncpy(pOutOverlay->dst, overlay.dst.c_str(), sizeof(pOutOverlay->dst) - 1);
+        strncpy(pOutOverlay->src, overlay.src.c_str(), sizeof(pOutOverlay->src) - 1);
+        pOutOverlay->dst_size = static_cast<int16_t>(strlen(pOutOverlay->dst));
+        pOutOverlay->src_size = static_cast<int16_t>(strlen(pOutOverlay->src));
+        return SCE_FIOS_OK;
+    }
+
+    return RET_ERROR(SCE_ERROR_ERRNO_ENOENT);
 }
 
 EXPORT(int, sceFiosOverlayGetList02, SceUID processId, uint32_t minOrder, uint32_t maxOrder, SceFiosOverlayID *pOutIDs, SceUInt32 maxIDs, SceUInt32 *pActualIDs) {
@@ -96,9 +118,12 @@ EXPORT(int, sceFiosOverlayModifyForProcess02) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceFiosOverlayRemoveForProcess02) {
-    TRACY_FUNC(sceFiosOverlayRemoveForProcess02);
-    return UNIMPLEMENTED();
+EXPORT(int, sceFiosOverlayRemoveForProcess02, SceUID processId, SceFiosOverlayID id) {
+    TRACY_FUNC(sceFiosOverlayRemoveForProcess02, processId, id);
+    if (!remove_overlay(emuenv.io, id))
+        return RET_ERROR(SCE_ERROR_ERRNO_ENOENT);
+
+    return SCE_FIOS_OK;
 }
 
 EXPORT(int, sceFiosOverlayResolveSync02) {
@@ -109,6 +134,11 @@ EXPORT(int, sceFiosOverlayResolveSync02) {
 EXPORT(int, sceFiosOverlayResolveWithRangeSync02, SceUID processId, SceFiosOverlayResolveMode resolveFlag, const char *pInPath, char *pOutPath, SceUInt32 maxPath, SceUInt32 min_order, SceUInt32 max_order) {
     TRACY_FUNC(sceFiosOverlayResolveWithRangeSync02, processId, resolveFlag, pInPath, pOutPath, maxPath, min_order, max_order);
     const std::string resolved = resolve_path(emuenv.io, pInPath, min_order, max_order);
+    // Thor: the first resolutions show how the game's FIOS walks its overlays,
+    // which is the evidence that decided the Trails PSARC layering. Keep it cheap.
+    static std::atomic<int> logged_resolves{ 0 };
+    if (logged_resolves.fetch_add(1) < 48)
+        LOG_INFO("FIOS resolve flag={} order=[{}, {}] {} -> {}", fmt::underlying(resolveFlag), min_order, max_order, pInPath, resolved);
     strncpy(pOutPath, resolved.c_str(), maxPath);
 
     return SCE_FIOS_OK;

@@ -1610,9 +1610,24 @@ SceUID create_overlay(IOState &io, SceFiosProcessOverlay *fios_overlay) {
     while (overlay_index < io.overlays.size() && overlay.order < io.overlays[overlay_index].order)
         overlay_index++;
     auto res = overlay.id;
+    LOG_INFO("FIOS overlay {} added: type={} order={} dst={} src={}", res, fmt::underlying(overlay.type), overlay.order, overlay.dst, overlay.src);
     io.overlays.insert(io.overlays.begin() + overlay_index, std::move(overlay));
 
     return res;
+}
+
+bool remove_overlay(IOState &io, const SceUID overlay_id) {
+    std::lock_guard<std::mutex> lock(io.overlay_mutex);
+
+    const auto it = std::find_if(io.overlays.begin(), io.overlays.end(), [overlay_id](const FiosOverlay &overlay) {
+        return overlay.id == overlay_id;
+    });
+    if (it == io.overlays.end())
+        return false;
+
+    LOG_INFO("FIOS overlay {} removed: dst={} src={}", overlay_id, it->dst, it->src);
+    io.overlays.erase(it);
+    return true;
 }
 
 std::string resolve_path(IOState &io, const char *input, const SceUInt32 min_order, const SceUInt32 max_order) {
