@@ -31,12 +31,37 @@ class FileStats : public VitaStats {
     // Shared file pointer
     FilePtr wrapped_file;
     std::shared_ptr<ReadOnlyInMemFile> memory_file;
+    // Thor: see the windowed constructor.
+    bool windowed = false;
+    SceOff window_offset = 0;
+    SceOff window_size = 0;
+
+    SceOff host_tell() const;
+    bool host_seek(SceOff offset, int base) const;
 
 public:
     // Constructor used for files
     // Based on https://codereview.stackexchange.com/questions/4679/
     explicit FileStats(const char *vita, const std::string &t, const fs::path &file, const int open) {
         wrapped_file = create_shared_file(file, open);
+
+        file_info.vita_loc = vita;
+        file_info.translated = t;
+        file_info.sys_loc = file;
+        file_info.open_mode = open;
+        file_info.file_mode = SCE_SO_IFREG | SCE_SO_IROTH;
+        file_info.access_mode = SCE_S_IFREG;
+    }
+
+    // Thor: a read-only view of [window_offset, window_offset + window_size)
+    // inside a host file - a stored member of a zip cartridge, read in place.
+    explicit FileStats(const char *vita, const std::string &t, const fs::path &file, const int open, const SceOff window_offset, const SceOff window_size) {
+        wrapped_file = create_shared_file(file, SCE_O_RDONLY);
+        this->window_offset = window_offset;
+        this->window_size = window_size;
+        windowed = true;
+        if (wrapped_file)
+            seek(0, SCE_SEEK_SET);
 
         file_info.vita_loc = vita;
         file_info.translated = t;
@@ -63,7 +88,7 @@ public:
 
     // Check if the file is writable
     bool can_write_file() const {
-        if (memory_file)
+        if (memory_file || windowed)
             return false;
         if (!is_regular_file())
             return false;
@@ -73,6 +98,10 @@ public:
 
     bool is_memory_file() const {
         return memory_file != nullptr;
+    }
+
+    bool is_windowed() const {
+        return windowed;
     }
 
     SceOff size() const;
@@ -181,6 +210,11 @@ struct IOState {
             std::string archive_name;
             std::uint64_t size = 0;
             bool directory = false;
+            // Thor: a stored (method 0) member is read straight out of the zip
+            // at any offset, so it never needs the cartridge cache. The data
+            // offset is resolved from the local header on first open.
+            std::uint16_t method = 0;
+            std::uint64_t local_header_ofs = 0;
         };
 
         fs::path archive_path;

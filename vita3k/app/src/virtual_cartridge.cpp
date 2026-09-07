@@ -481,7 +481,7 @@ static uint64_t archive_unpack_bytes(mz_zip_archive &zip, const std::string &roo
         mz_zip_archive_file_stat file_stat;
         if (!mz_zip_reader_file_stat(&zip, i, &file_stat) || mz_zip_reader_is_file_a_directory(&zip, i))
             continue;
-        if (file_stat.m_uncomp_size <= vfs::archive_unpack_threshold)
+        if (file_stat.m_uncomp_size <= vfs::archive_unpack_threshold || file_stat.m_method == 0)
             continue;
         const auto name_lower = string_utils::tolower(normalize_archive_member_name(file_stat.m_filename));
         if (root_lower.empty() || name_lower.starts_with(root_lower + "/"))

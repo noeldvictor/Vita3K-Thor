@@ -26,6 +26,8 @@
 
 #include <io/state.h>
 
+#include <algorithm>
+
 static const uint32_t page_size = []() -> uint32_t {
 #ifdef _WIN32
     SYSTEM_INFO system_info = {};
@@ -55,7 +57,32 @@ SceOff FileStats::read(void *input_data, const int element_size, const SceSize e
     if (memory_file)
         return memory_file->read(input_data, element_size * element_count);
 
+    if (windowed) {
+        const SceOff remaining = window_offset + window_size - host_tell();
+        if (remaining <= 0)
+            return 0;
+        const SceOff wanted = static_cast<SceOff>(element_size) * element_count;
+        const SceOff allowed = std::min(wanted, remaining);
+        return fread(input_data, 1, static_cast<size_t>(allowed), wrapped_file.get()) / element_size;
+    }
+
     return fread(input_data, element_size, element_count, wrapped_file.get());
+}
+
+SceOff FileStats::host_tell() const {
+#ifdef _WIN32
+    return _ftelli64(wrapped_file.get());
+#else
+    return ftello(wrapped_file.get());
+#endif
+}
+
+bool FileStats::host_seek(const SceOff offset, const int base) const {
+#ifdef _WIN32
+    return _fseeki64(wrapped_file.get(), offset, base) == 0;
+#else
+    return fseeko(wrapped_file.get(), offset, base) == 0;
+#endif
 }
 
 SceOff FileStats::write(const void *data, const SceSize size, const int count) const {
@@ -66,7 +93,7 @@ SceOff FileStats::write(const void *data, const SceSize size, const int count) c
 }
 
 int FileStats::truncate(const SceSize size) const {
-    if (!wrapped_file)
+    if (!wrapped_file || windowed)
         return -1;
 
 #ifdef _WIN32
@@ -95,17 +122,31 @@ bool FileStats::seek(const SceOff offset, const SceIoSeekMode seek_mode) const {
         return false;
     }
 
-#ifdef _WIN32
     if (memory_file)
         return memory_file->seek(offset, seek_mode);
 
-    return _fseeki64(wrapped_file.get(), offset, base) == 0;
-#else
-    if (memory_file)
-        return memory_file->seek(offset, seek_mode);
+    if (windowed) {
+        SceOff target = 0;
+        switch (seek_mode) {
+        case SCE_SEEK_SET:
+            target = offset;
+            break;
+        case SCE_SEEK_CUR:
+            target = tell() + offset;
+            break;
+        case SCE_SEEK_END:
+            target = window_size + offset;
+            break;
+        default:
+            return false;
+        }
+        if (target < 0)
+            return false;
+        // Past-the-end positions are legal for a seek; reads there return 0.
+        return host_seek(window_offset + target, SEEK_SET);
+    }
 
-    return fseeko(wrapped_file.get(), offset, base) == 0;
-#endif
+    return host_seek(offset, base);
 }
 
 SceOff FileStats::tell() const {
@@ -115,16 +156,18 @@ SceOff FileStats::tell() const {
     if (memory_file)
         return memory_file->tell();
 
-#ifdef _WIN32
-    return _ftelli64(wrapped_file.get());
-#else
-    return ftello(wrapped_file.get());
-#endif
+    if (windowed)
+        return host_tell() - window_offset;
+
+    return host_tell();
 }
 
 SceOff FileStats::size() const {
     if (memory_file)
         return memory_file->size();
+
+    if (windowed)
+        return window_size;
 
     if (!wrapped_file)
         return 0;

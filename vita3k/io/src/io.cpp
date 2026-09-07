@@ -173,7 +173,7 @@ static void add_archive_directory(IOState::ArchiveMount &mount, const std::strin
     }
 }
 
-static bool add_archive_entry(IOState::ArchiveMount &mount, const std::string &relative_path, const std::string &archive_name, const std::uint64_t size, const bool is_dir, const bool allow_override) {
+static bool add_archive_entry(IOState::ArchiveMount &mount, const std::string &relative_path, const std::string &archive_name, const std::uint64_t size, const bool is_dir, const bool allow_override, const std::uint16_t method = 0, const std::uint64_t local_header_ofs = 0) {
     if (relative_path.empty())
         return false;
 
@@ -202,8 +202,43 @@ static bool add_archive_entry(IOState::ArchiveMount &mount, const std::string &r
         return false;
     }
 
-    mount.entries[relative_path] = { archive_name, size, false };
+    IOState::ArchiveMount::Entry entry;
+    entry.archive_name = archive_name;
+    entry.size = size;
+    entry.method = method;
+    entry.local_header_ofs = local_header_ofs;
+    mount.entries[relative_path] = std::move(entry);
     mount.lower_to_path[lower_path] = relative_path;
+    return true;
+}
+
+// Thor: where a stored member's bytes start. The central directory only says
+// where the local header is; the local header carries its own name and extra
+// field lengths, which can differ from the central copy, so read them.
+static bool resolve_archive_data_offset(const IOState::ArchiveMount &mount, const IOState::ArchiveMount::Entry &entry, std::uint64_t &data_ofs) {
+    FILE *archive_file = FOPEN(mount.archive_path.c_str(), "rb");
+    if (!archive_file)
+        return false;
+
+    std::uint8_t header[30] = {};
+    bool ok = false;
+#ifdef _WIN32
+    ok = _fseeki64(archive_file, static_cast<__int64>(entry.local_header_ofs), SEEK_SET) == 0;
+#else
+    ok = fseeko(archive_file, static_cast<off_t>(entry.local_header_ofs), SEEK_SET) == 0;
+#endif
+    ok = ok && fread(header, 1, sizeof(header), archive_file) == sizeof(header);
+    fclose(archive_file);
+
+    const std::uint32_t signature = header[0] | (header[1] << 8) | (header[2] << 16) | (static_cast<std::uint32_t>(header[3]) << 24);
+    if (!ok || signature != 0x04034b50) {
+        LOG_ERROR("Archive member {} in {} has no local header at {}", entry.archive_name, mount.archive_path, entry.local_header_ofs);
+        return false;
+    }
+
+    const std::uint16_t name_len = header[26] | (header[27] << 8);
+    const std::uint16_t extra_len = header[28] | (header[29] << 8);
+    data_ofs = entry.local_header_ofs + sizeof(header) + name_len + extra_len;
     return true;
 }
 
@@ -227,7 +262,7 @@ static size_t mount_archive_root_entries(mz_zip_archive &zip, IOState::ArchiveMo
 
         const auto relative_path = root_prefix.empty() ? normalized_archive_name : normalize_archive_path(normalized_archive_name.substr(root_prefix.size()));
         const bool is_dir = mz_zip_reader_is_file_a_directory(&zip, i);
-        if (add_archive_entry(mount, relative_path, archive_name, file_stat.m_uncomp_size, is_dir, allow_override))
+        if (add_archive_entry(mount, relative_path, archive_name, file_stat.m_uncomp_size, is_dir, allow_override, file_stat.m_method, file_stat.m_local_header_ofs))
             mounted_entries++;
     }
 
@@ -965,6 +1000,21 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
         }
 
         const auto normalized_path = device::construct_normalized_path(device, translated_path);
+        if (archive_entry->size > archive_memory_file_limit && archive_entry->method == 0) {
+            // Stored, not deflated: the bytes sit contiguously inside the zip,
+            // so serve them from there and skip the cartridge cache entirely.
+            std::uint64_t data_ofs = 0;
+            if (!vfs::resolve_archive_data_offset(io.app0_archive, *archive_entry, data_ofs))
+                return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
+
+            FileStats f{ path, normalized_path, io.app0_archive.archive_path, flags, static_cast<SceOff>(data_ofs), static_cast<SceOff>(archive_entry->size) };
+            const auto fd = io.next_fd++;
+            io.std_files.emplace(fd, f);
+
+            LOG_TRACE_IF(log_file_op, "{}: Opening stored archive member {} ({}) in place at {}, fd: {}", export_name, path, normalized_path, data_ofs, log_hex(fd));
+            return fd;
+        }
+
         if (archive_entry->size > archive_memory_file_limit) {
             const auto cache_path = vfs::archive_cache_path(vita_fs_path, io, archive_relative);
             if (cache_path.empty() || !vfs::extract_archive_file_to_cache(io.app0_archive, *archive_entry, cache_path))
