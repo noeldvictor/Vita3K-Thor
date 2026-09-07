@@ -322,8 +322,9 @@ What exists for it:
   delete the zip. Both tools take `--dry-run`.
 
 The Thor often shows up on adb twice (USB `c3ca0370` and Wi-Fi
-`192.168.1.5:5555`); set `ANDROID_SERIAL=c3ca0370` or every helper fails with
-"more than one device/emulator".
+`192.168.1.5:5555`). The MCP helpers pick the USB transport when several
+devices are attached and no serial was given; raw `adb` calls still need
+`ANDROID_SERIAL=c3ca0370` or `-s`.
 
 ## Upstream
 
