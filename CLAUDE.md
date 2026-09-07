@@ -132,6 +132,14 @@ useful for the Compose UI:
 * **There are two touch panels.** `touch_panel` reads and sets front/rear. A
   front-panel UI never sees a touch while the emulator is switched to the rear.
 
+Two Windows-side traps when calling the server's functions directly from
+Python rather than over MCP: Git Bash rewrites a leading `/storage/...` or
+`/sdcard/...` argument into `C:/Program Files/Git/storage/...` before adb sees
+it (set `MSYS_NO_PATHCONV=1`), and printing a Japanese game title from
+`python -c` dies with a cp1252 `UnicodeEncodeError` (set
+`PYTHONIOENCODING=utf-8`). Over MCP neither applies, because JSON escapes the
+text and no shell is involved.
+
 **Debug through the MCP server, not raw `adb`.** If a debugging step needs a
 bare `adb shell`, that is a missing tool - add it to `tools/mcp_server.py`
 rather than reaching around the server. Everything the server does is
@@ -266,6 +274,27 @@ game. Compose navigates on DPAD_* by itself; it does not know `KEYCODE_BUTTON_A`
   is wanted - `apps_list.cpp`'s `read_app_info` scans ux0:app on purpose, since
   cartridges come from the scanner instead.
 
+  The fourth instance was `fs::exists(ux0/app/<path>/sce_module/...)` in
+  `interface.cpp`'s preload list, which decides whether `libc` and `libfios2`
+  come from the game or from vs0. For every cartridge it said "no", so games
+  always got the firmware modules. The Trails Evolution games ship their own
+  `libfios2`; the firmware one rejects their `sceFiosInitialize` params
+  (`Unsupported paramsSize (96, most recent is 116)` via `sceClibPrintf`), no
+  PSARC ever mounts, and FC sits on a black screen with every read failing as
+  `Cannot find device for path: /arc/...`. Use `app_bundles_module` there, and
+  grep for `"ux0/app"` before trusting any new path check.
+
+* **A game that opens `/arc/...` paths is using FIOS2 overlays**, not a broken
+  device table. The engine mounts `app0:/gamedata/data.psarc` and `data%d.psarc`
+  at `/arc%d` inside the LLE `libfios2` and layers `/arc` over them through
+  `sceFiosOverlayAddForProcess02` (HLE in `SceDriverUser/SceFios2User.cpp`,
+  backed by `create_overlay`/`resolve_path` in `io.cpp`). Reads that libfios2
+  serves from an archive never reach `sceIoOpen`; a raw `/arc/...` there means
+  libfios2 fell back to native IO because the file was in none of its archives.
+  In Trails 3rd those are benign probes (`map4/e1110.mc3` exists nowhere; the
+  map really is `map2/e1110.it3`), so check the PSARC manifest before blaming
+  IO. Overlay adds, removes and the first 48 resolves are logged at info level.
+
 * **`disable-surface-sync` causes garbage geometry on Vulkan.** Upstream
   defaults it to true; Thor defaults it to false. With it on, and memory
   mapping enabled, `handle_transfer_copy` and `handle_transfer_downscale` skip
@@ -293,6 +322,24 @@ game. Compose navigates on DPAD_* by itself; it does not know `KEYCODE_BUTTON_A`
 * **A green build is not a working build.** Both of the above compiled fine and
   failed only on device. Install and launch before claiming something works.
 
+## The cartridge cache, and why a zip gets unpacked
+
+A zip entry is a deflate stream, which cannot be read at an arbitrary offset,
+and a game seeks inside its PSARCs constantly. So `open_file` unpacks any
+archive member over 64 MiB once into
+`<vita>/cache/cartridge_archive/<TITLEID>/<archive key>/<relative path>` and
+serves it from there; the `.zip` itself stays untouched. Trails FC costs about
+2.8 GB of that on its first launch, SC and 3rd about 3.5 GB and 2.9 GB.
+
+Nothing evicts it. On 2026-09-07 the Thor's internal storage was at 100% with
+24.9 GB of cache for eleven titles, plus 4.2 GB in a stale `ux0/cart` staging
+folder from before archives were mounted directly (now deleted). Settings ->
+Emulator -> **Cartridge Cache** lists the cache per title with sizes and free
+space and can delete one title or all of them; deleting is always safe. A game
+kept as an extracted folder on the SD card needs no cache at all. The ROMs'
+SD card (`/storage/2664-21DE`) had 92 GB free, so moving the cache there is
+the obvious next step if internal storage keeps filling up.
+
 ## Upstream
 
 `upstream/master` is fetched but the fork has diverged hard: the ImGui frontend
@@ -300,6 +347,14 @@ was replaced by Qt, the renderer was rewritten around `FrameHost`, and config,
 lang and ngs all changed shape. Update checking is disabled on both frontends —
 upstream's releases are not an upgrade path for Thor, and the check only ever
 offered to replace it.
+
+Since the big adoption, upstream merges are cheap: the 2026-09-07 merge of 16
+commits (kernel import resolution by library NID, staging-buffer reuse fix,
+`sceGxmFinish` validation, SELF segment-info reads, SDL 3.4.16) only conflicted
+on the three GitHub workflows Thor deleted (keep them deleted), the README
+download table (keep Thor's note) and the SDL submodule (take upstream's, then
+`git submodule update --init external/sdl`). Do it on an `upstream-sync-<date>`
+branch, build Android before committing, and fast-forward `master`.
 
 Outstanding re-port work is tracked in SQLite:
 
