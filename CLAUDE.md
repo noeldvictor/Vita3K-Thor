@@ -294,6 +294,22 @@ running game.
 * **A green build is not a working build.** Install and launch before claiming
   something works.
 
+## Known gaps, left on purpose (2026-09-07 review)
+
+* `_sceIoPread` is upstream's `UNIMPLEMENTED()`. No game in the library calls
+  it. Implement it the first time a log shows `Unimplemented _sceIoPread` for
+  a game that matters, and take the argument layout (64-bit offset on 32-bit
+  ARM, possibly an option struct like `_sceIoLseek`) from that game's call site
+  in Ghidra rather than guessing.
+* `resolve_archive_data_offset` re-reads a stored member's 30-byte local
+  header on every open. A few opens per boot; not worth caching.
+* Upstream's `FileStats::read` pre-touches every page of the requested buffer
+  (its guard against faults in write-protected guest pages), also for a short
+  windowed read. Harmless.
+* `tools/android/Packer.java` reads each file twice, once for the CRC a stored
+  entry must carry up front. 531 MB in 8 s on the Thor; a data descriptor
+  would need reader support too.
+
 ## The cartridge cache, and why a deflated zip gets unpacked
 
 A deflated zip entry cannot be read at an arbitrary offset, and a game seeks
