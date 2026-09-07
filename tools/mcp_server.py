@@ -82,8 +82,31 @@ def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 600,
     return f"exit={proc.returncode}\n{out.strip()}"
 
 
+_auto_serial: str | None = None
+
+
 def _device_args(serial: str | None) -> list[str]:
-    return ["-s", serial] if serial else []
+    """-s for the requested device, or for the one sane default when several are attached.
+
+    The Thor shows up twice once someone runs `adb tcpip` - USB and Wi-Fi - and
+    every unqualified adb call then fails with "more than one device/emulator".
+    Prefer the USB transport. ANDROID_SERIAL still wins when it is set, because
+    adb honours it on its own.
+    """
+    global _auto_serial
+    if serial:
+        return ["-s", serial]
+    if os.environ.get("ANDROID_SERIAL"):
+        return []
+    if _auto_serial is None:
+        try:
+            out = subprocess.run([_adb(), "devices"], capture_output=True, text=True, timeout=30).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        attached = [line.split()[0] for line in out.splitlines()[1:] if line.strip().endswith("device")]
+        usb = [s for s in attached if ":" not in s]
+        _auto_serial = (usb or attached)[0] if len(attached) > 1 else ""
+    return ["-s", _auto_serial] if _auto_serial else []
 
 
 # --------------------------------------------------------------------------

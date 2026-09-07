@@ -1008,6 +1008,10 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
                 return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
 
             FileStats f{ path, normalized_path, io.app0_archive.archive_path, flags, static_cast<SceOff>(data_ofs), static_cast<SceOff>(archive_entry->size) };
+            if (!f.get_file_pointer()) {
+                LOG_ERROR("Cannot open archive {} to read {} in place", io.app0_archive.archive_path, path);
+                return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
+            }
             const auto fd = io.next_fd++;
             io.std_files.emplace(fd, f);
 
