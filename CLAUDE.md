@@ -330,5 +330,5 @@ Outstanding re-port work is tracked in SQLite:
 * `renderer-report-after-upstream-adoption` — 36 renderer commits, 3 applied
 * `quickstate-report-after-upstream-adoption` — done, kept for the API notes
 * `arm64-spin-backoff-rpcs3-port` — the RPCS3 ARM64 work
-* `trails-evolution-cartridge-fios` — FC fixed; the 3rd's black prologue map is
-  still an open question
+* `trails-evolution-cartridge-fios` — FC fixed; the 3rd's black prologue map
+  turned out to be the same bug (it renders with the game's own libfios2)
