@@ -1659,6 +1659,12 @@ private fun EmulatorSettingsSection(
         }
     }
 
+    if (!isPerApp && allowStorageFolderManagement) {
+        // Thor: the unpacked-cartridge cache lives under the storage folder and
+        // nothing else ever showed it or trimmed it.
+        CartridgeCacheCard(storagePath = currentStoragePath, onShowHelp = onShowHelp)
+    }
+
     SettingsSectionCard(title = stringResource(R.string.settings_emulator_display_overlay), summary = null, help = null, onShowHelp = onShowHelp) {
         SettingsToggleRow(
             title = stringResource(R.string.settings_emulator_stretch_display),

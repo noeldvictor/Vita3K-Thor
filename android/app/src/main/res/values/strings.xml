@@ -638,6 +638,21 @@
     <string name="settings_emulator_ui_language_desc">Select the interface language used by the Android frontend.\nUse System Default to follow the operating system language.</string>
     <string name="settings_emulator_storage_folder">Emulated System Storage Folder</string>
     <string name="settings_emulator_storage_folder_desc">Change the location of the emulated system storage folder.\nIf you move to a different folder, move your existing data there manually.</string>
+    <string name="settings_cartridge_cache_title">Cartridge Cache</string>
+    <string name="settings_cartridge_cache_summary">Big files inside zip cartridges (PSARC archives, movies) are unpacked here once so games can read them directly. Deleting a game’s cache is safe: it is rebuilt the next time that game starts.</string>
+    <string name="settings_cartridge_cache_help">Zip cartridges are compressed, and a game reads its archives at arbitrary offsets, which a compressed zip entry cannot serve. So the first launch unpacks each large file into this cache and later launches reuse it.
+
+The cache is not a save. Deleting it costs one slower launch. Games stored as extracted folders on the SD card need no cache at all.</string>
+    <string name="settings_cartridge_cache_usage">%1$s used • %2$s free on this storage</string>
+    <string name="settings_cartridge_cache_entry_value">%1$s • %2$s • %3$s</string>
+    <string name="settings_cartridge_cache_empty">No cartridge caches yet.</string>
+    <string name="settings_cartridge_cache_refresh">Refresh</string>
+    <string name="settings_cartridge_cache_clear_all">Clear All</string>
+    <string name="settings_cartridge_cache_confirm_delete_title">Delete cartridge cache?</string>
+    <string name="settings_cartridge_cache_confirm_delete_message">%1$s (%2$s) will be unpacked again the next time it starts. Saves and settings are not touched.</string>
+    <string name="settings_cartridge_cache_confirm_clear_title">Clear every cartridge cache?</string>
+    <string name="settings_cartridge_cache_confirm_clear_message">%1$s will be freed. Each game unpacks its files again on its next launch. Saves and settings are not touched.</string>
+    <string name="settings_cartridge_cache_delete_failed">Could not delete the cache for %1$s.</string>
     <string name="settings_emulator_share_log">Share vita3k.log</string>
     <string name="settings_emulator_share_log_desc">Open Android’s share sheet for the current Vita3K log file so it can be sent to Discord or another app.</string>
     <string name="settings_emulator_storage_folder_resolve_failed">Failed to resolve the selected storage folder.</string>
