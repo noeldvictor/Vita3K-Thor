@@ -49,17 +49,26 @@ Put legally dumped games on the SD card under `Roms/psvita` (or
 in the app grid as virtual cartridges. Nothing is installed into the emulated
 `ux0:app`; a cartridge is mounted read-only for the session.
 
-Two forms work, and they are not equal:
+Three forms work, and they are not equal:
 
 | Form | What happens on launch |
 |---|---|
-| **Extracted folder** — `Roms/psvita/<Game>/sce_sys/param.sfo` | Mounted straight from the card. No cache, no first-launch wait. **Use this.** |
-| **`.zip` / `.vpk`** | Mounted through the archive reader, with `patch/` and `rePatch/` folders folded over the game. Any file over 64 MiB (PSARC archives, movies) is unpacked once into a cache on internal storage, because a compressed zip entry cannot be read at an offset. Trails in the Sky FC costs 2.8 GB of that. |
+| **Stored zip** (no compression: 7-Zip "Store", `zip -0`, or the packer below) | One file per game, easy to copy and move. Mounted through the archive reader and every file is read **in place** at any offset. No cache, no first-launch wait. **Use this.** |
+| **Extracted folder** — `Roms/psvita/<Game>/sce_sys/param.sfo` | Mounted straight from the card. No cache either, but nineteen folders are a chore to move. |
+| **Deflated zip** (the usual compressed zip) | Any file over 64 MiB (PSARC archives, movies) is unpacked once into a cache on internal storage, because a compressed entry cannot be read at an offset. Trails in the Sky FC costs 2.8 GB of that. The app grid warns with an amber `ZIP • unpacks 2.8 GB` badge. |
 
-If you already have zips on the card, `python tools/unpack_cartridges.py
---delete --purge-cache` turns them into folders on the device itself, checks
-every file against the zip listing, folds the patches in, and only then removes
-the zip and that game's cache. `--dry-run` shows the plan first.
+`patch/` and `rePatch/` folders inside a zip are folded over the game at read
+time. PSARC content is already compressed, so a stored zip is only a few
+percent larger than a deflated one.
+
+Two device-side converters ship in `tools/`, both verifying every file before
+they delete anything and both taking `--dry-run`:
+
+- `python tools/pack_cartridges.py --delete` packs game folders on the card
+  into stored zips, on the device (a tiny Java packer run through
+  `app_process`, no PC round-trip). This is how the library was migrated.
+- `python tools/unpack_cartridges.py --delete --purge-cache` does the reverse
+  for deflated zips that must become folders, folding the patches in.
 
 The cache is visible and manageable in **Settings → Emulator → Cartridge
 Cache**: size per game, free space, delete one or all. Deleting only costs that
@@ -73,9 +82,9 @@ does not decrypt games, bypass licenses, or replace proper dumping.
 These are the practical differences from upstream Vita3K Android.
 
 - **Cartridges, not installs**: zips, vpks and extracted folders launch from
-  the card. Translated and nonstandard archive layouts are recognised; game
-  icons and backgrounds are cached so the list does not rescan every archive at
-  startup.
+  the card; a stored zip is read in place with no cache. Translated and
+  nonstandard archive layouts are recognised; game icons and backgrounds are
+  cached so the list does not rescan every archive at startup.
 - **Cartridge cache manager** in Settings, as above.
 - **Library badges**: `E` for encrypted content that cannot boot, `C` for a
   game with matching VitaCheat files.
@@ -134,8 +143,9 @@ The short version of what is different under the hood:
   `patch`/`rePatch` overlays at read time; it never decrypts anything. A
   cartridge is never installed, so any code that looks for game files under
   `ux0:app` is wrong for it (that footgun has been fixed four times).
-- Large archive members are cached to app-local storage rather than inflated
-  into RAM.
+- Stored archive members are read in place through a windowed file handle;
+  deflated members over 64 MiB are cached to app-local storage rather than
+  inflated into RAM.
 - Fast-forward scales the kernel clock, the vblank, audio tempo and video
   pacing together.
 - Quickstates serialize CPU contexts, guest memory, allocator maps and named

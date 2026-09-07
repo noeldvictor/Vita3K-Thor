@@ -48,7 +48,8 @@ in Debug Knowledge Base and Experiment Discipline.
 Both commands, with the toolchain paths from `AGENTS.md` → Build Notes:
 
 ```
-# Windows (needs Qt 6.11+ at C:/Qt)
+# Windows (needs Qt 6.11+ at C:/Qt; the configure needs Qt6_ROOT)
+export Qt6_ROOT=
 cmake --preset windows-vs2022 -DVITA3K_ENABLE_QT_GUI=ON
 cmake --build build/windows-vs2022 --config RelWithDebInfo -- -m
 
@@ -74,17 +75,23 @@ broken for two weeks because a declaration was left Android-only.
 ## Running a game
 
 Thor's flow is virtual cartridges, not installs (`AGENTS.md` → Playing Without
-Install has the layout rules). Two kinds of cartridge exist and they are not
+Install has the layout rules). Three kinds of cartridge exist and they are not
 equal:
 
-* **An extracted folder** — `Roms/psvita/<Game>/sce_sys/param.sfo` on the SD
-  card. Mounted straight from the card, no cache, no first-launch wait. This
-  is the preferred form; `tools/unpack_cartridges.py` converts a card full of
-  zips into folders on the device itself (see "The cartridge cache" below).
-* **A `.zip`/`.vpk`** — mounted read-only through miniz, with `patch/<id>/`
-  and `rePatch/<id>/` folded over the content root at read time. Any member
-  over 64 MiB (PSARCs, movies) is unpacked once into the cartridge cache on
-  internal storage, because a deflated entry cannot be read at an offset.
+* **A stored zip** (method 0, no compression) — the user's preferred form:
+  one file per game. Mounted read-only through miniz, and every member over
+  64 MiB is served in place through a windowed `FileStats` onto the zip
+  (`open_file`, `resolve_archive_data_offset`). No cache. The library was
+  migrated to this with `tools/pack_cartridges.py` on 2026-09-07.
+* **An extracted folder** — `Roms/psvita/<Game>/sce_sys/param.sfo`. Mounted
+  straight from the card (`app0_host_path`), no cache either.
+* **A deflated zip** — same mount, but a deflated member over 64 MiB is
+  unpacked once into the cartridge cache on internal storage, because a
+  deflate stream cannot be read at an offset. The scanner sums those members
+  into `AppEntry::unpack_bytes` and the grid shows the amber badge.
+
+`patch/<id>/` and `rePatch/<id>/` inside a zip are folded over the content root
+at read time.
 
 Launching:
 
@@ -287,28 +294,36 @@ running game.
 * **A green build is not a working build.** Install and launch before claiming
   something works.
 
-## The cartridge cache, and why a zip gets unpacked
+## The cartridge cache, and why a deflated zip gets unpacked
 
-A zip entry is a deflate stream, which cannot be read at an arbitrary offset,
-and a game seeks inside its PSARCs constantly. So `open_file` unpacks any
-archive member over 64 MiB once into
+A deflated zip entry cannot be read at an arbitrary offset, and a game seeks
+inside its PSARCs constantly. So `open_file` unpacks any *deflated* member over
+64 MiB once into
 `<vita>/cache/cartridge_archive/<TITLEID>/<archive key>/<relative path>` and
-serves it from there. Trails FC costs about 2.8 GB of that on its first launch,
-SC and 3rd about 3.5 GB and 2.9 GB. Nothing evicts it: on 2026-09-07 the Thor's
-internal storage was at 100% with 24.9 GB of cache for eleven titles.
+serves it from there. Trails FC costs about 2.8 GB of that. Nothing evicts it:
+on 2026-09-07 the Thor's internal storage was at 100% with 24.9 GB of cache.
+A *stored* member is served in place and never touches the cache.
 
-Two answers, both shipped that day:
+What exists for it:
 
 * Settings → Emulator → **Cartridge Cache** lists the cache per title with
-  sizes and free space and deletes one title or all of them. Deleting only
-  costs that game a re-extraction on its next launch.
-* `python tools/unpack_cartridges.py [--delete] [--purge-cache]` converts the
-  zips on the card into folders, on the device, one archive at a time: unzip to
-  a temp folder, check every member's size against the listing, fold
-  `patch/`/`rePatch/` over the content root (keeping the game's own
-  `param.sfo`, since the scanner rejects a patch's `gp` category), park any
-  `addcont/` DLC under `Roms/psvita/addcont/<id>/`, and only then delete the
-  zip. `--dry-run` prints the plan. A folder needs no cache at all.
+  sizes and free space and deletes one title or all of them.
+* `python tools/pack_cartridges.py [--delete]` turns game folders on the card
+  into stored zips, on the device: `tools/android/Packer.java` (compiled to
+  `tools/android/packer.jar`, run through `app_process` with
+  `ANDROID_DATA=/data/local/tmp`) walks the folder and writes STORED members
+  with precomputed CRCs; the driver checks `unzip -t` and the member count
+  before deleting the folder. About a minute per game on UFS.
+* `python tools/unpack_cartridges.py [--delete] [--purge-cache]` is the
+  reverse for deflated zips: unzip to a temp folder, check every member's size
+  against the listing, fold `patch/`/`rePatch/` over the content root (keeping
+  the game's own `param.sfo`, since the scanner rejects a patch's `gp`
+  category), park `addcont/` DLC under `Roms/psvita/addcont/<id>/`, then
+  delete the zip. Both tools take `--dry-run`.
+
+The Thor often shows up on adb twice (USB `c3ca0370` and Wi-Fi
+`192.168.1.5:5555`); set `ANDROID_SERIAL=c3ca0370` or every helper fails with
+"more than one device/emulator".
 
 ## Upstream
 
