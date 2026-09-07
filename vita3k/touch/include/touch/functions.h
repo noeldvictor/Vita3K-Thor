@@ -17,6 +17,5 @@ int handle_touch_event(TouchState &state, SDL_TouchFingerEvent &finger);
 int toggle_touchscreen(TouchState &state);
 int touch_get(const SceUID thread_id, EmuEnvState &emuenv, const SceUInt32 &port, SceTouchData *pData, SceUInt32 count, bool is_peek);
 void touch_set_force_mode(TouchState &state, int port, bool mode);
-#ifdef __ANDROID__
+// Thor: the runtime control file switches panels on every platform, not just Android.
 void set_rear_touchscreen(TouchState &state, bool is_back);
-#endif
