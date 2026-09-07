@@ -14,5 +14,7 @@ data class NativeAppInfo(
     // installed, and carry badges for encrypted content and available cheats.
     val virtualCartridge: Boolean = false,
     val encryptedContent: Boolean = false,
-    val cheatsAvailable: Boolean = false
+    val cheatsAvailable: Boolean = false,
+    // Bytes a zip cartridge unpacks into the cartridge cache on first launch.
+    val unpackBytes: Long = 0
 )

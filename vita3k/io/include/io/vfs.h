@@ -27,6 +27,11 @@ namespace vfs {
 
 using FileBuffer = std::vector<SceUInt8>;
 
+// Thor: an archive member bigger than this is unpacked into the cartridge
+// cache on first open instead of being inflated into memory. The scanner uses
+// the same number to warn how much a zip will cost before it is launched.
+constexpr std::uint64_t archive_unpack_threshold = 64ull * 1024ull * 1024ull;
+
 bool read_file(VitaIoDevice device, FileBuffer &buf, const fs::path &vita_fs_path, const fs::path &vfs_file_path);
 bool read_app_file(FileBuffer &buf, const fs::path &vita_fs_path, const std::string &app_path, const fs::path &vfs_file_path);
 SceSize get_directory_used_size(const VitaIoDevice device, const std::string &vfs_path, const fs::path &vita_fs_path);

@@ -64,6 +64,9 @@ struct AppEntry {
     int64_t source_mtime = 0;
     std::string source_root;
     bool cheats_available = false;
+    // Bytes a zip cartridge will unpack into the cartridge cache on its first
+    // launch (members over vfs::archive_unpack_threshold). Zero for folders.
+    uint64_t unpack_bytes = 0;
 };
 
 struct AppTime {

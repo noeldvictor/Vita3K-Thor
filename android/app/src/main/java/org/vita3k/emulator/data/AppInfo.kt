@@ -40,7 +40,10 @@ data class AppInfo(
     // Thor: app files are PFS-encrypted, so this cannot boot as a cartridge.
     val encryptedContent: Boolean = false,
     // Thor: a VitaCheat .psv file was found for this title.
-    val cheatsAvailable: Boolean = false
+    val cheatsAvailable: Boolean = false,
+    // Thor: a zip cartridge unpacks this many bytes into the cartridge cache
+    // on its first launch; an extracted folder reports zero.
+    val unpackBytes: Long = 0
 ) {
     val iconFile: File?
         get() = iconPath?.takeIf { it.isNotEmpty() }?.let { File(it) }?.takeIf { it.exists() }

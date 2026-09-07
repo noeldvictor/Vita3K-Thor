@@ -72,7 +72,7 @@ constexpr bool log_file_op = true;
 constexpr bool log_file_read = false;
 constexpr bool log_file_seek = false;
 constexpr bool log_file_stat = false;
-constexpr std::uint64_t archive_memory_file_limit = 64ull * 1024ull * 1024ull;
+constexpr std::uint64_t archive_memory_file_limit = vfs::archive_unpack_threshold;
 
 namespace vfs {
 

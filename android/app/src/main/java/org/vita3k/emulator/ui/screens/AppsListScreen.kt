@@ -60,6 +60,7 @@ import coil.compose.AsyncImage
 import org.vita3k.emulator.R
 import org.vita3k.emulator.data.FirmwareInstallState
 import org.vita3k.emulator.data.AppInfo
+import org.vita3k.emulator.data.CartridgeCacheStore
 import org.vita3k.emulator.data.FirmwareComponent
 import org.vita3k.emulator.data.SortOption
 import org.vita3k.emulator.data.UpdateCheckResult
@@ -1390,6 +1391,15 @@ private fun AppStatusBadges(app: AppInfo) {
                 label = stringResource(R.string.apps_list_cheats_badge),
                 background = Color(0xFF2E7D52),
                 foreground = Color(0xFFEFFFF6)
+            )
+        }
+        // Thor: a zip cartridge unpacks its big files into internal storage on
+        // first launch; say how much before it happens.
+        if (app.virtualCartridge && app.unpackBytes > 0) {
+            ThorBadge(
+                label = stringResource(R.string.apps_list_unpack_badge, CartridgeCacheStore.formatBytes(app.unpackBytes)),
+                background = Color(0xFF8A5A00),
+                foreground = Color(0xFFFFF3DD)
             )
         }
     }

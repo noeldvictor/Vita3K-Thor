@@ -173,7 +173,8 @@ internal object AppRepository {
         playtime = native.playtime,
         virtualCartridge = native.virtualCartridge,
         encryptedContent = native.encryptedContent,
-        cheatsAvailable = native.cheatsAvailable
+        cheatsAvailable = native.cheatsAvailable,
+        unpackBytes = native.unpackBytes
     )
 
     private fun currentDisplayVersion(appVersion: String): String {

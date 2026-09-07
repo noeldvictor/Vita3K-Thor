@@ -66,6 +66,7 @@
     <string name="apps_list_custom_config_badge">CC</string>
     <string name="apps_list_encrypted_badge">E</string>
     <string name="apps_list_cheats_badge">C</string>
+    <string name="apps_list_unpack_badge">ZIP \u2022 unpacks %1$s</string>
     <string name="apps_list_empty_search">No apps match \"%1$s\"</string>
     <string name="apps_list_empty_missing_firmware">Missing firmware components: %1$s</string>
     <string name="apps_list_empty_firmware_title">Firmware Required</string>

@@ -28,6 +28,7 @@
 #include <config/state.h>
 #include <emuenv/state.h>
 #include <io/state.h>
+#include <io/vfs.h>
 #include <packages/sfo.h>
 #include <util/cheat_paths.h>
 #include <util/fs.h>
@@ -469,6 +470,26 @@ static std::optional<AppEntry> app_from_cartridge_directory(EmuEnvState &emuenv,
     return app;
 }
 
+// Thor: what a zip costs. Every member under the content root that the IO
+// layer would extract rather than inflate, summed, so the app grid can say
+// "unpacks 2.8 GB" before the user finds out from a full internal storage.
+static uint64_t archive_unpack_bytes(mz_zip_archive &zip, const std::string &root) {
+    const auto root_lower = string_utils::tolower(normalize_archive_member_name(root));
+    uint64_t total = 0;
+    const mz_uint num_files = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < num_files; i++) {
+        mz_zip_archive_file_stat file_stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &file_stat) || mz_zip_reader_is_file_a_directory(&zip, i))
+            continue;
+        if (file_stat.m_uncomp_size <= vfs::archive_unpack_threshold)
+            continue;
+        const auto name_lower = string_utils::tolower(normalize_archive_member_name(file_stat.m_filename));
+        if (root_lower.empty() || name_lower.starts_with(root_lower + "/"))
+            total += file_stat.m_uncomp_size;
+    }
+    return total;
+}
+
 static std::optional<AppEntry> app_from_cartridge_archive(EmuEnvState &emuenv, const fs::path &archive_path) {
     std::unique_ptr<FILE, int (*)(FILE *)> archive_file(FOPEN(archive_path.c_str(), "rb"), fclose);
     if (!archive_file)
@@ -486,6 +507,9 @@ static std::optional<AppEntry> app_from_cartridge_archive(EmuEnvState &emuenv, c
         auto app = app_from_param(emuenv, param_sfo, archive_path.generic_path(), root);
         if (app.has_value()) {
             app->encrypted_content = virtual_cartridge_archive_appears_encrypted(zip, root);
+            app->unpack_bytes = archive_unpack_bytes(zip, root);
+            if (app->unpack_bytes > 0)
+                LOG_INFO("Virtual cartridge {} [{}] will unpack {} MiB into the cartridge cache on its first launch; an extracted folder would not need that", app->title_id, archive_path, app->unpack_bytes / (1024 * 1024));
 
             vfs::FileBuffer icon;
             if (extract_archive_file_to_buffer(zip, root + "sce_sys/icon0.png", icon))
