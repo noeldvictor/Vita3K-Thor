@@ -49,7 +49,7 @@ Both commands, with the toolchain paths from `AGENTS.md` → Build Notes:
 
 ```
 # Windows (needs Qt 6.11+ at C:/Qt; the configure needs Qt6_ROOT)
-export Qt6_ROOT=
+export Qt6_ROOT=C:/Qt
 cmake --preset windows-vs2022 -DVITA3K_ENABLE_QT_GUI=ON
 cmake --build build/windows-vs2022 --config RelWithDebInfo -- -m
 
