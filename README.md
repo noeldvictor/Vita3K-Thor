@@ -15,7 +15,7 @@ a support project.
 
 > [!WARNING]
 > **Extremely unstable research build.** I am testing out stuff; don't waste
-> your time on it right now. The fork is vibe coded with AI assistance, on
+> your time on it right now. The fork is written with AI assistance, on
 > purpose and disclosed. If AI-assisted code, docs or generated assets bother
 > you, use upstream Vita3K or another fork.
 
@@ -127,22 +127,20 @@ These are the practical differences from upstream Vita3K Android.
 
 ## For developers
 
-Two documents run this repo:
+One document runs this repo. [`CLAUDE.md`](./CLAUDE.md) holds the writing
+standard, the rules (goals and scope, git conventions, the SQLite debug
+knowledge base and its anti-loop rules, input automation, build notes,
+cartridge and cheat rules, device etiquette, and what a "works" claim needs)
+and the working notes (build commands, how cartridges mount, the MCP server
+that drives the Thor, and the known failure causes). `AGENTS.md` only points
+to it.
 
-- [`AGENTS.md`](./AGENTS.md) is the rulebook: goals and scope, git conventions,
-  the SQLite debug knowledge base and its anti-loop rules, input automation,
-  build notes, cartridge and cheat rules, device etiquette, and what a "works"
-  claim needs.
-- [`CLAUDE.md`](./CLAUDE.md) is the map: build commands, how cartridges mount,
-  the MCP server that drives the Thor, and the traps that have already cost a
-  day each.
-
-The short version of what is different under the hood:
+The main differences from upstream Vita3K:
 
 - Cartridge mode mounts `app0:` against an archive or a folder and applies
   `patch`/`rePatch` overlays at read time; it never decrypts anything. A
   cartridge is never installed, so any code that looks for game files under
-  `ux0:app` is wrong for it (that footgun has been fixed four times).
+  `ux0:app` is wrong for it (that defect has been fixed four times).
 - Stored archive members are read in place through a windowed file handle;
   deflated members over 64 MiB are cached to app-local storage rather than
   inflated into RAM.
@@ -151,7 +149,7 @@ The short version of what is different under the hood:
 - Quickstates serialize CPU contexts, guest memory, allocator maps and named
   metadata sections for the kernel, GXM, IO, display, audio, codecs and NGS,
   with CRC-checked, temp-file-replaced saves and a fail-closed restore. The
-  full gate list lives in `AGENTS.md`.
+  full gate list is in `CLAUDE.md`.
 - `--thor-render-trace` adds GXM/Vulkan scene, draw, surface and texture
   upload logging for renderer debugging.
 - Thor-only behaviour stays behind settings, build flags or clearly named code
