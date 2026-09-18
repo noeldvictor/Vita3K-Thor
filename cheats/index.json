@@ -1,8 +1,8 @@
 {
  "schema": "vita3k-thor-cheat-index/1",
  "source": "cheats/db",
- "game_count": 677,
- "cheat_count": 7987,
+ "game_count": 678,
+ "cheat_count": 8008,
  "games": [
   {
    "title_id": "PCSA00008",
@@ -14498,6 +14498,41 @@
    "enabled_on_boot": 0,
    "file": "PCSG00461.psv",
    "cheat_count": 1,
+   "region_code": "JP"
+  },
+  {
+   "title_id": "PCSG00490",
+   "title": "Eiyuu Densetsu Sora no Kiseki The 3rd Evolution",
+   "region": "Japan",
+   "version": "1.01+All DLC's",
+   "type": "PKGj",
+   "author": "ネオ•グランゾン(NeoGranzon)",
+   "cheats": [
+    "Kevin Max Status",
+    "Max Experience",
+    "Max CP",
+    "Max EP",
+    "Rie Max Status",
+    "Inf.Sepith",
+    "Inf. Max Mira",
+    "Tita Max Status",
+    "Julia Max Status",
+    "Muller Max Status",
+    "Josette Max Status",
+    "Joshua Max Status",
+    "Klaudia Max Status",
+    "Olivier Max Status",
+    "Zin Max Status",
+    "Anelace Max Status",
+    "Scherazard Max Status",
+    "Agate Max Status",
+    "Estelle Max Status",
+    "Alan Max Status",
+    "Renne Max Status"
+   ],
+   "enabled_on_boot": 0,
+   "file": "PCSG00490.psv",
+   "cheat_count": 21,
    "region_code": "JP"
   },
   {

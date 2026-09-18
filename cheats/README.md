@@ -17,6 +17,14 @@
   author, and the cheat names. Frontends read this file instead of opening
   every `.psv`. Rebuild it after any change under `db/`.
 
+## Files added by hand
+
+These are not in the source repositories. Keep them when refreshing.
+
+- `db/PCSG00490.psv`: Sora no Kiseki the 3rd Evolution (Japanese 1.01 + DLC),
+  by NeoGranzon, from the GBAtemp VitaCheat/FinalCheat Database thread
+  (post 6454, 2021-12-02). Not verified on the English patch.
+
 ## Refreshing the database
 
 1. `.\tools\sync_vitacheat_db.ps1 -SkipPush` clones the source repository
