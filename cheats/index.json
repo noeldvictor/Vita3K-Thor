@@ -1,8 +1,8 @@
 {
  "schema": "vita3k-thor-cheat-index/1",
  "source": "cheats/db",
- "game_count": 680,
- "cheat_count": 8031,
+ "game_count": 681,
+ "cheat_count": 8045,
  "games": [
   {
    "title_id": "PCSA00008",
@@ -14533,6 +14533,34 @@
    "enabled_on_boot": 0,
    "file": "PCSG00461.psv",
    "cheat_count": 1,
+   "region_code": "JP"
+  },
+  {
+   "title_id": "PCSG00489",
+   "title": "Eiyuu Densetsu Sora no Kiseki SC Evolution",
+   "region": "Jap",
+   "version": "1.02",
+   "type": "NoNpDrm",
+   "author": "tomberyx",
+   "cheats": [
+    "Game Speed 2x",
+    "One Hit Kill [all Players]",
+    "Mega Defense [all Players]",
+    "max.HP [all Players]",
+    "inf.EP [all Players]",
+    "inf.CP [all Players]",
+    "max.Status [only Estelle]",
+    "max.Level [after Fight]",
+    "max.Level [all Players]",
+    "inf.max Mira",
+    "inf.max Sephit",
+    "Camera Birds-Eye",
+    "Camera Zoom-in",
+    "Change Player in Pos.2 [0-8]"
+   ],
+   "enabled_on_boot": 0,
+   "file": "PCSG00489.psv",
+   "cheat_count": 14,
    "region_code": "JP"
   },
   {

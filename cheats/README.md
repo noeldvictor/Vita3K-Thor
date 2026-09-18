@@ -29,6 +29,9 @@ These are not in the source repositories. Keep them when refreshing.
 - `db/PCSE00871.psv`: A.W. Phoenix Festa (USA 1.00), 21 module-relative
   cheats by tomberyx from the GBAtemp database thread; the author lists the
   same block for the EU and Japanese ids.
+- `db/PCSG00489.psv`: Sora no Kiseki SC Evolution (Japanese 1.02), 14
+  module-relative cheats by tomberyx from the GBAtemp database thread
+  (post 8013, 2023-01-25). Not verified on the English patch.
 
 ## Refreshing the database
 
