@@ -193,6 +193,16 @@ ignores), and there are two touch panels (`touch_panel` reads and sets
 front/rear; a front-panel UI never sees a touch while the emulator is switched
 to the rear).
 
+Driving the Compose UI from adb, learned on 2026-09-17: `uiautomator dump`
+returns "null root node" unless the screen is awake and our window has focus;
+a text field in landscape opens the full-screen IME, so send
+`KEYCODE_BACK` after `input text`; the pause menu opens with a short
+`KEYCODE_BACK` while the game is in front, and the Session tab needs one
+swipe up before the Cheats card is visible; the control-file action
+`open_osd` only flips the retired ImGui overlay state and does nothing for
+the Compose menu; input injected while the screen is off gets the app
+killed for an "Input dispatching timed out" ANR.
+
 Two Windows-side problems when calling the server's functions directly from
 Python rather than over MCP: Git Bash rewrites a leading `/storage/...` or
 `/sdcard/...` argument into `C:/Program Files/Git/storage/...` before adb sees
