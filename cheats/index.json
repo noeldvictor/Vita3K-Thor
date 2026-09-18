@@ -1,8 +1,8 @@
 {
  "schema": "vita3k-thor-cheat-index/1",
  "source": "cheats/db",
- "game_count": 679,
- "cheat_count": 8010,
+ "game_count": 680,
+ "cheat_count": 8031,
  "games": [
   {
    "title_id": "PCSA00008",
@@ -11246,6 +11246,41 @@
    "enabled_on_boot": 0,
    "file": "PCSE00865.psv",
    "cheat_count": 5,
+   "region_code": "US"
+  },
+  {
+   "title_id": "PCSE00871",
+   "title": "A.W. Phoenix Festa",
+   "region": "USA",
+   "version": "1.00",
+   "type": "NoNpDrm",
+   "author": "tomberyx",
+   "cheats": [
+    "One Hit Kill",
+    "Walk-Speed 3x",
+    "inf.HP",
+    "inf.Stamina",
+    "Hold X to Fly",
+    "[Enemies] Badge-Brocke [push Select]",
+    "Player-Size [Gigant] [push-Select]",
+    "Player-Size [Dwarf] [push-Select]",
+    "No Badge-Brocke",
+    "[Partner] Walk-Speed 3x",
+    "[Partner] Hold X to Fly",
+    "[Partner] inf.HP [push-Select]",
+    "[Partner] No Badge-Brocke",
+    "[Partner-Size] [Gigant] [push-Select]",
+    "[Enemies] Walk-Speed -3x [push-Select]",
+    "[Enemies] HP-Zero [push Select]",
+    "[Enemies] Hold O to Fly",
+    "[Enemies-Size] [Gigant] [push Select]",
+    "inf.max Money",
+    "inf.max Manadite",
+    "[Unlock] Full-Gallery"
+   ],
+   "enabled_on_boot": 0,
+   "file": "PCSE00871.psv",
+   "cheat_count": 21,
    "region_code": "US"
   },
   {

@@ -26,6 +26,9 @@ These are not in the source repositories. Keep them when refreshing.
   (post 6454, 2021-12-02). Not verified on the English patch.
 - `db/PCSH00250.psv`: Dead or Alive Xtreme 3 Venus (Asia 1.15), two money
   cheats by doax3glitcher, from ShumnoT/VitaCheatDatabase issue 40.
+- `db/PCSE00871.psv`: A.W. Phoenix Festa (USA 1.00), 21 module-relative
+  cheats by tomberyx from the GBAtemp database thread; the author lists the
+  same block for the EU and Japanese ids.
 
 ## Refreshing the database
 
