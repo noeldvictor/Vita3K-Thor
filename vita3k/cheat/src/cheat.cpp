@@ -19,7 +19,9 @@
 
 #include <mem/ptr.h>
 #include <mem/state.h>
+#include <util/cheat_paths.h>
 #include <util/log.h>
+#include <util/string_utils.h>
 
 #include <algorithm>
 
@@ -478,13 +480,7 @@ void unload(CheatState &state) {
     state.buttons.store(0, std::memory_order_relaxed);
 }
 
-bool load(CheatState &state, const fs::path &cheats_dir, const std::string &title_id) {
-    const auto path = find_cheat_file(cheats_dir, title_id);
-    if (path.empty()) {
-        LOG_DEBUG("No cheat file found for {} in {}", title_id, cheats_dir);
-        return false;
-    }
-
+bool load_file(CheatState &state, const fs::path &path, const std::string &title_id) {
     CheatFile file = parse_cheat_file(path, title_id);
     for (auto &cheat : file.cheats)
         cheat.enabled = cheat.enabled_on_boot;
@@ -493,6 +489,77 @@ bool load(CheatState &state, const fs::path &cheats_dir, const std::string &titl
     state.file = std::move(file);
 
     return !state.file.cheats.empty();
+}
+
+bool load(CheatState &state, const fs::path &cheats_dir, const std::string &title_id) {
+    const auto path = find_cheat_file(cheats_dir, title_id);
+    if (path.empty()) {
+        LOG_DEBUG("No cheat file found for {} in {}", title_id, cheats_dir);
+        return false;
+    }
+    return load_file(state, path, title_id);
+}
+
+// Thor: the places a title's cheat file may be, in the order they are searched.
+static fs::path find_cheat_file_anywhere(const fs::path &cheat_path, const fs::path &static_assets_path, const fs::path &shared_path, const fs::path &vita_fs_path, const std::string &title_id, bool &in_cheat_path) {
+    in_cheat_path = false;
+    if (title_id.empty())
+        return {};
+
+    // 1. The user's folder: a copy made earlier, or a file the user put there.
+    const fs::path user_file = find_cheat_file(cheat_path, title_id);
+    if (!user_file.empty()) {
+        in_cheat_path = true;
+        return user_file;
+    }
+
+    // 2. The Thor roots: `<shared>/cheats/db` (the database the APK extracts), the SD card
+    //    roots and `ux0:/vitacheat`.
+    if (const auto thor_file = cheat_paths::find_vitacheat_file(vita_fs_path, shared_path, vita_fs_path, title_id))
+        return *thor_file;
+
+    // 3. The copy of the repository database that the desktop build places next to the executable.
+    if (!static_assets_path.empty()) {
+        const std::string filename = title_id + ".psv";
+        for (const fs::path &candidate : { static_assets_path / "cheats" / "db" / filename, static_assets_path / "cheats" / filename }) {
+            boost::system::error_code error;
+            if (fs::exists(candidate, error) && !error)
+                return candidate;
+        }
+    }
+
+    return {};
+}
+
+bool has_cheat_file(const fs::path &cheat_path, const fs::path &static_assets_path, const fs::path &shared_path, const fs::path &vita_fs_path, const std::string &title_id) {
+    bool in_cheat_path = false;
+    return !find_cheat_file_anywhere(cheat_path, static_assets_path, shared_path, vita_fs_path, title_id, in_cheat_path).empty();
+}
+
+fs::path resolve_cheat_file(const fs::path &cheat_path_in, const fs::path &static_assets_path, const fs::path &shared_path, const fs::path &vita_fs_path, const std::string &title_id) {
+    // A frontend that did not set the user folder must not end up writing into the bundled copy.
+    const fs::path cheat_path = cheat_path_in.empty() ? shared_path / "cheats" / "" : cheat_path_in;
+    bool in_cheat_path = false;
+    const fs::path found = find_cheat_file_anywhere(cheat_path, static_assets_path, shared_path, vita_fs_path, title_id, in_cheat_path);
+    if (found.empty() || in_cheat_path)
+        return found;
+
+    // A combined database is read where it is. A per-title file is copied so that the on/off
+    // choices `save` writes back never touch the bundled database or the SD card.
+    const std::string extension = string_utils::tolower(fs_utils::path_to_utf8(found.extension()));
+    if (extension != ".psv" && extension != ".txt")
+        return found;
+
+    boost::system::error_code error;
+    fs::create_directories(cheat_path, error);
+    const fs::path copy = cheat_path / (title_id + extension);
+    error.clear();
+    if (!fs::copy_file(found, copy, fs::copy_options::overwrite_existing, error) || error) {
+        LOG_WARN("Could not copy the cheat file {} to {}: {}", found, copy, error.message());
+        return found;
+    }
+    LOG_INFO("Copied the cheat file of {} from {} to {}", title_id, found, copy);
+    return copy;
 }
 
 bool reload(CheatState &state, const fs::path &cheats_dir, const std::string &title_id, MemState &mem, const JitInvalidate &invalidate_jit) {

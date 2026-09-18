@@ -72,6 +72,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.vita3k.emulator.NativeLib
+import org.vita3k.emulator.ui.screens.CheatsSheet
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -607,6 +611,7 @@ private fun SessionTab(
             sessionViewModel = sessionViewModel
         )
         SpeedSection(sessionViewModel = sessionViewModel)
+        CheatsSection(sessionViewModel = sessionViewModel)
 
         CustomConfigSection(
             settingsLoaded = settingsLoaded,
@@ -1257,5 +1262,63 @@ private fun QuickStateSection(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+    }
+}
+
+/**
+ * Thor: cheats of the running title. The sheet switches them through the live engine, so
+ * a change takes effect on the next vblank.
+ */
+@Composable
+private fun CheatsSection(sessionViewModel: EmulationSessionViewModel) {
+    val titleId = sessionViewModel.uiState.titleId
+    var showSheet by remember { mutableStateOf(false) }
+    var counts by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+
+    LaunchedEffect(titleId, showSheet) {
+        counts = withContext(Dispatchers.IO) {
+            runCatching {
+                val cheats = NativeLib.getCheats(titleId)
+                if (cheats.isEmpty()) null else cheats.count { it.enabled } to cheats.size
+            }.getOrNull()
+        }
+    }
+
+    val current = counts
+    val status = if (current != null) {
+        stringResource(R.string.cheats_status_count, current.first, current.second)
+    } else {
+        stringResource(R.string.cheats_none_for_title)
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = stringResource(R.string.cheats_title),
+                style = MaterialTheme.typography.titleMedium
+            )
+            Text(
+                text = status,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            FilledTonalButton(
+                onClick = { showSheet = true },
+                enabled = titleId.isNotBlank(),
+                modifier = Modifier.fillMaxWidth()
+            ) { Text(stringResource(R.string.cheats_menu_manage)) }
+        }
+    }
+
+    if (showSheet) {
+        CheatsSheet(
+            titleId = titleId,
+            gameTitle = sessionViewModel.uiState.gameTitle,
+            live = true,
+            onDismiss = { showSheet = false }
+        )
     }
 }

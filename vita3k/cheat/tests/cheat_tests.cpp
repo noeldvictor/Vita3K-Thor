@@ -461,3 +461,52 @@ TEST_F(CheatTest, saving_rewrites_the_boot_markers_only) {
     EXPECT_EQ(saved.header, "PCSA00001 Test Game");
     EXPECT_EQ(saved.cheats[0].lines[0].first, 0x81000000u);
 }
+
+// Thor: the lookup that feeds the engine, the app list badge and the Android cheat sheet.
+TEST_F(CheatTest, resolve_copies_a_bundled_file_into_the_user_folder) {
+    const fs::path shared = directory / "shared";
+    const fs::path cheat_path = shared / "cheats";
+    const fs::path vita_fs = directory / "fs";
+    fs::create_directories(cheat_path / "db");
+    fs::create_directories(vita_fs);
+
+    const fs::path bundled = cheat_path / "db" / (title_id + ".psv");
+    {
+        std::ofstream stream(bundled.c_str(), std::ios::binary | std::ios::trunc);
+        stream << "# bundled\n_V1 One\n$0200 81000000 00000001\n";
+    }
+
+    // Nothing is in the user folder yet, so the bundled file is found and copied there.
+    const fs::path resolved = cheat::resolve_cheat_file(cheat_path, {}, shared, vita_fs, title_id);
+    EXPECT_EQ(resolved, cheat_path / (title_id + ".psv"));
+    EXPECT_TRUE(fs::exists(resolved));
+    EXPECT_TRUE(cheat::has_cheat_file(cheat_path, {}, shared, vita_fs, title_id));
+    EXPECT_FALSE(cheat::has_cheat_file(cheat_path, {}, shared, vita_fs, "PCSA09999"));
+
+    // Saving a choice changes the copy, never the bundled file, and the copy wins from then on.
+    cheat::CheatFile file = cheat::parse_cheat_file(resolved, title_id);
+    ASSERT_EQ(file.cheats.size(), 1u);
+    file.cheats[0].enabled = false;
+    ASSERT_TRUE(cheat::save_cheat_file(file));
+
+    EXPECT_EQ(cheat::resolve_cheat_file(cheat_path, {}, shared, vita_fs, title_id), resolved);
+    EXPECT_FALSE(cheat::parse_cheat_file(resolved, title_id).cheats[0].enabled_on_boot);
+    EXPECT_TRUE(cheat::parse_cheat_file(bundled, title_id).cheats[0].enabled_on_boot);
+}
+
+TEST_F(CheatTest, resolve_falls_back_to_the_desktop_static_assets) {
+    const fs::path shared = directory / "shared";
+    const fs::path cheat_path = shared / "cheats";
+    const fs::path vita_fs = directory / "fs";
+    const fs::path assets = directory / "assets";
+    fs::create_directories(assets / "cheats" / "db");
+    fs::create_directories(vita_fs);
+    {
+        std::ofstream stream((assets / "cheats" / "db" / (title_id + ".psv")).c_str(), std::ios::binary | std::ios::trunc);
+        stream << "_V0 Two\n$0200 81000000 00000002\n";
+    }
+
+    EXPECT_EQ(cheat::resolve_cheat_file(cheat_path, assets, shared, vita_fs, title_id), cheat_path / (title_id + ".psv"));
+    EXPECT_TRUE(fs::exists(cheat_path / (title_id + ".psv")));
+    EXPECT_TRUE(cheat::resolve_cheat_file(cheat_path, {}, shared, vita_fs, "PCSA09999").empty());
+}

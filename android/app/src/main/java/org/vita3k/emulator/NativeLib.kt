@@ -3,6 +3,7 @@ package org.vita3k.emulator
 import org.vita3k.emulator.data.EmulatorConfig
 import org.vita3k.emulator.data.InstallCallback
 import org.vita3k.emulator.data.NativeAppInfo
+import org.vita3k.emulator.data.NativeCheatInfo
 import org.vita3k.emulator.data.NativeTrophyCollection
 import org.vita3k.emulator.data.NativeUser
 
@@ -154,6 +155,24 @@ object NativeLib {
      * toggle_fast_forward, screenshot.
      */
     external fun runtimeAction(action: String): Boolean
+
+    // --- Cheats (Thor, native_cheats.cpp) ---
+    /** Cheats of a title: the live engine state while it runs, otherwise its cheat file. */
+    external fun getCheats(titleId: String): Array<NativeCheatInfo>
+
+    /** Turns one cheat on or off and writes the choice back to the title's cheat file. */
+    external fun setCheatEnabled(titleId: String, index: Int, enabled: Boolean): Boolean
+    external fun setAllCheatsEnabled(titleId: String, enabled: Boolean): Boolean
+
+    /** The `enable-cheats` master switch in config.yml. */
+    external fun getCheatsMasterEnabled(): Boolean
+    external fun setCheatsMasterEnabled(enabled: Boolean): Boolean
+
+    /** Re-reads the running title's cheat file. */
+    external fun reloadCheats(titleId: String): Boolean
+
+    /** The file the engine uses for the title, or an empty string. */
+    external fun getCheatFilePath(titleId: String): String
 
     /** Thor: human-readable status of quickstate slot 0 for the running title. */
     external fun quickStateStatus(): String

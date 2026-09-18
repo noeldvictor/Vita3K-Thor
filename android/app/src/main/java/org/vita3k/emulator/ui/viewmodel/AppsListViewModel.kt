@@ -18,6 +18,7 @@ import org.vita3k.emulator.R
 import org.vita3k.emulator.data.FirmwareInstallState
 import org.vita3k.emulator.data.AppInfo
 import org.vita3k.emulator.data.AppRepository
+import org.vita3k.emulator.data.CheatDatabase
 import org.vita3k.emulator.data.SortOption
 import org.vita3k.emulator.data.UpdateCheckResult
 import org.vita3k.emulator.data.UpdateCheckStatus
@@ -80,6 +81,9 @@ class AppsListViewModel(application: Application) : AndroidViewModel(application
         loading = true
         viewModelScope.launch {
             appVersion = AppRepository.getAppVersion()
+            // Thor: the bundled cheat database must be on disk before the native scan sets
+            // the cheat badges of the app list.
+            CheatDatabase.ensureExtracted(getApplication(), storagePath)
             val success = AppRepository.initialize(storagePath)
             initialized = success
             if (success) {

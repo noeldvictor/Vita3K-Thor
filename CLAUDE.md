@@ -69,6 +69,7 @@ are in Debug Knowledge Base and Experiment Discipline (Part 2).
 | `android/src/` | Thor's retired Android module, kept as a porting reference |
 | `android/assets/` | assets packaged into the APK — note this is **not** `android/app/assets` |
 | `tools/` | dev tooling: the MCP server, the knowledge base, the cartridge converter |
+| `cheats/` | the bundled FinalCheat/VitaCheat database (`db/`, 677 files), its `index.json` and README |
 | `docs/reference/arm/` | Arm ARM + Cortex SWOGs (PDFs gitignored) |
 | `reports/debug_knowledge.sqlite` | the canonical report store |
 
@@ -85,6 +86,9 @@ cmake --build build/windows-vs2022 --config RelWithDebInfo -- -m
 # Android (VCPKG_ROOT and ANDROID_NDK_HOME must be set in the same shell)
 export VCPKG_ROOT=~/Documents/SteamPortableTools/toolchains/vcpkg
 export ANDROID_NDK_HOME=~/AppData/Local/Android/Sdk/ndk/29.0.14206865
+# stage the bundled assets first; android/assets is ignored and packaged as it is
+mkdir -p android/assets/cheats/db && cp -r data lang vita3k/shaders-builtin android/assets/ \
+  && cp cheats/db/*.psv android/assets/cheats/db/ && cp cheats/index.json android/assets/cheats/
 cd android && ./gradlew assembleReldebug -Pandroid.injected.build.abi=arm64-v8a
 ```
 
@@ -318,6 +322,13 @@ running game.
   setup calls it, so unmounting there removes a cartridge that was mounted before boot.
 * **Declarations guarded by `#ifdef __ANDROID__` break the desktop build** when
   shared code calls them - the runtime control file's touch-panel switch did.
+* **Android does not run `app_init.cpp`'s `init_paths`.** The Compose app's
+  `native_bootstrap.cpp` builds its own `Root` paths and hands them to
+  `app::init`. A new root path added only to `init_paths` (the way upstream's
+  cheat PR added `cheat_path`) stays empty on Android, and any code that joins
+  a file name onto it writes into the working directory or, as the cheat
+  engine did on 2026-09-17, into the bundled database. Set new paths in both
+  places.
 * **A successful compile is not a working build.** Install and launch before claiming
   something works.
 
@@ -632,7 +643,7 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - On Android, archive startup should default to virtual cartridge mounting even if a caller forgets `--cartridge`; do not reintroduce install-first handling for ZIP/VPK game launches.
 - Android builds shallow-scan `/sdcard/roms/psvita`, `/sdcard/Roms/psvita`, `/storage/emulated/0/roms/psvita`, and `/storage/emulated/0/Roms/psvita` by default when `scan-virtual-cartridges` is enabled. The scanner should also discover removable SD card roots under `/storage/<card>/Roms/psvita`, `/storage/<card>/roms/psvita`, and common Emulation folder variants. Compatible `.zip`/`.vpk` archives in the root or one direct child folder, plus extracted direct child folders containing `sce_sys/param.sfo`, are listed as virtual cartridges in the app grid.
 - Virtual cartridge app entries are part of the normal app-list cache. Keep unchanged ZIP/VPK entries by source path, size, and mtime instead of re-opening every archive on startup, and cache archive icon/background assets under app-local cache storage. Invalidate when the source archive/param changes or the scan root no longer covers the source path.
-- Some cartridge/NoNpDrm-style ZIPs have readable `param.sfo` but PFS-encrypted app files. Detect these by checking app `eboot.bin` and `sce_sys/icon0.png` headers, show an `E` encrypted-content badge in the app list, and fail launch with a clear diagnostic instead of trying to run encrypted bytes. Do not add DRM, license, or key bypass code.
+- Some cartridge/NoNpDrm-style ZIPs have readable `param.sfo` but PFS-encrypted app files. Detect these by checking app `eboot.bin` and `sce_sys/icon0.png` headers, show an Encrypted badge in the app list, and fail launch with a clear diagnostic instead of trying to run encrypted bytes. Do not add DRM, license, or key bypass code.
 - Virtual cartridge app entries must launch directly, not through Live Area, because the content is not installed under `ux0/app`.
 - On device, the visible launcher path is `File` -> `Play ZIP as Cartridge`; select a `.zip` or `.vpk`, wait for the virtual cartridge cache to mount, then press `Start Cartridge`.
 - Android file/front-end launching is supported through `ACTION_VIEW` and `ACTION_SEND` for `.zip`/`.vpk`-style archive intents. The Android bridge converts the incoming file/content URI into `-a true --cartridge <path>`.
@@ -649,12 +660,15 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 ## Cheats And Runtime Hotkeys
 
 - Cheats are offline single-player only. Do not add online cheating, anti-cheat bypass, DRM bypass, license bypass, or commercial cheat pack redistribution.
-- VitaCheat `.psv` files can be detected by title ID from repo/user cheat roots such as `cheats/<TITLEID>.psv`, `cheats/db/<TITLEID>.psv`, shared `cheats/`, `ux0/vitacheat/db/`, and Android shared-storage/SD-card roots like `/storage/<card>/cheats/psvita`, `/storage/<card>/VitaCheat/db`, and `/storage/<card>/Roms/psvita/cheats`.
+- The cheat engine is upstream's `vita3k/cheat` module (Vita3K PR 4107, cherry-picked on 2026-09-17). It reads FinalCheat/VitaCheat `.psv` files as they are, runs the codes once per vblank from `display.cpp`, and handles code types `$0` write, `$3` pointer, `$4` serial, `$5` copy, `$7` pointer serial, `$8` pointer copy, `$A` ARM write (restored when the cheat is turned off), `$B` module-relative base, `$C` button condition and `$D` value condition. The parser and engine have googletest coverage in `vita3k/cheat/tests`.
+- File resolution (`cheat::resolve_cheat_file`), in order: 1. the user folder `cheat_path` (`<shared>/cheats`); 2. the Thor roots from `vita3k/util/src/cheat_paths.cpp` (`<shared>/cheats/db`, SD card roots such as `/storage/<card>/cheats/psvita/db`, `ux0:/vitacheat/db`); 3. `<static assets>/cheats/db` next to the desktop executable. A per-title file found outside the user folder is copied there first, so the on/off choices that `save` writes back (`_V1` means on at boot) never touch the bundled database or the SD card.
+- The bundled database reaches each platform differently. The desktop build copies `cheats/db` and `cheats/index.json` next to the executable in a CMake post-build step. The APK carries them under `assets/cheats`, staged from `cheats/` into `android/assets/cheats` before Gradle (see Building, Part 1); `CheatDatabase.ensureExtracted` copies the `.psv` files to `<storage>/cheats/db` on the first launch of each installed build, before the native app scan sets the Cheats badges.
+- `enable-cheats` in `config.yml` is the master switch; Thor's older `cheats-enabled` key was dropped. Off stops every cheat and restores the code the ARM writes replaced.
+- UI. Desktop: Manage > Cheats and the app list context menu open the Qt cheats dialog (toggle, save, reload, open file). Android: the top bar of the games grid has a Cheat catalog icon that opens `CheatCatalogScreen` (every database game grouped by title with region chips, search, region and in-library filters, expandable cheat names, an In library mark, and a Cheats button for library games); the long-press menu of a game with a cheat file has a Cheats entry; the Session tab of the pause menu has a Cheats card. All three open `CheatsSheet`: one switch per cheat, the master switch, All on, All off and Reload, through the JNI bridge `vita3k/android/jni/native_cheats.cpp`. While the title runs the switches act on the live engine; otherwise they edit the file and take effect at boot. Every change is saved at once.
 - The FinalCheat/VitaCheat database is committed under `cheats/db` (user decision of 2026-09-17; the source repositories publish no license file, and each file keeps its author header). Refresh it as `cheats/README.md` describes and rebuild `cheats/index.json` with `tools/build_cheat_index.py`. Do not add codes for online play.
 - `tools/sync_vitacheat_db.ps1` clones the source database into ignored `tmp/` and can push it to the Thor SD card. The committed copy under `cheats/db` is the one that ships.
-- Games with detected cheat files show a `C` badge in the app list.
-- Runtime cheat support is fail-closed and currently applies only enabled `_V1` VitaCheat writes: `$0000`, `$0100`, `$0200`, ARM/code writes `$A000`, `$A100`, `$A200`, level-1 pointer writes ending in `$3300`, plus simple `$B200` main-module segment-relative base selectors. Unsupported multi-level pointer, condition, block, and button-code formats are skipped and logged.
-- `tools/convert_vitacheat.py` converts VitaCheat `.psv` files into JSON metadata for auditing and future UI work. The emulator runtime still reads `.psv` directly.
+- Games with a cheat file show a Cheats badge in the app list (`cheat::has_cheat_file`, the same lookup without the copy).
+- `tools/convert_vitacheat.py` converts `.psv` files into JSON for review and reports the code lines outside a given subset. `tools/build_cheat_index.py` rebuilds `cheats/index.json`; run it after any change under `cheats/db`.
 - Runtime shortcuts reserved for Thor testing: `Select + R1` toggles the currently configured fast-forward speed, `Select + right-stick down` requests save state, and `Select + right-stick up` requests load state.
 - `fast-forward-speed-percent` defaults to 200 and is clamped from 101 to 1000 when toggled. The runtime OSD exposes Off, 2x, 3x, and 4x preset buttons; choosing 2x/3x/4x updates `fast-forward-speed-percent` so the `Select + R1` hotkey follows the selected preset. Fast-forward must update display/vblank pacing, kernel wait pacing, and guest clock APIs together; keep `emuenv.display.speed_percent` and `emuenv.kernel.speed_percent` in sync so vblank waits, `sceKernelDelayThread`, kernel timers, wait timeouts, `sceKernelGetProcessTime*`, `sceKernelGetSystemTimeWide`, libc time/gettimeofday, and RTC current tick do not stay at real-time speed.
 - SDL fast-forward audio must never raise SDL's stream frequency ratio above `1.0x`; that raises the pitch of the audio. Use FFmpeg `atempo` for pitch-preserving tempo changes when available, and otherwise fall back to normal-pitch buffer skipping with light crossfade instead of frequency-ratio speed-up or callback-local grain skipping.
@@ -685,7 +699,7 @@ Copy-Item -Recurse -Force vita3k/shaders-builtin android/assets
 - Keep the OSD readable over bright or glitchy game frames: dim the game behind it, use an opaque high-contrast panel, and size text/buttons for handheld viewing rather than desktop mouse precision.
 - Renderer Trace is a runtime diagnostic switch. When enabled it emits `ThorRenderTrace` logcat lines for Vulkan scene setup, the first 32 draws per scene, and texture configure/upload events. Include render target, color/depth surface addresses, formats, depth/stencil state, shader hashes, texture counts, texture address/format/type/stride/upload bytes, mapping mode, surface sync state, and driver flags.
 - For ADB-only render/crash investigations, launch with `--thor-render-trace` to enable the same renderer trace at startup, or use `tools/thor_adb_debug_capture.ps1 -GamePath <zip> -RenderTrace` to clear logcat, launch, and capture screenshot/logcat/crash-buffer/window/meminfo artifacts under ignored `tmp/`. Summarize durable findings into `reports/debug_knowledge.sqlite`.
-- The Cheats panel lists detected cheats for the current title, shows enabled/disabled state, allows toggling individual cheats, shows unsupported-code counts, and provides a reload-cheat-file action.
+- The Cheats card of the pause menu (Session tab) shows how many cheats are on for the running title and opens `CheatsSheet`, where each cheat has a switch, codes the engine does not understand are marked, and the file can be reloaded.
 - The status area shows title ID, current speed percentage, selected custom driver on Android, quickstate slot status, and whether a matching cheat file was loaded.
 - Keep the OSD usable with controller only: D-pad/left stick navigates, Cross/A confirms, Circle/B cancels, Back/Select closes. It should also work with touch/mouse when available. ImGui navigation must remain enabled, and the SDL backend must use real SDL3 gamepad instance IDs/player index instead of assuming gamepad index `0`.
 - Keep OSD rendering lightweight and in the existing ImGui path. Do not open the Vita Live Area or normal settings dialog just to perform runtime actions.

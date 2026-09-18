@@ -29,6 +29,7 @@ import org.vita3k.emulator.data.AppStorage
 import org.vita3k.emulator.data.AppInfo
 import org.vita3k.emulator.ui.screens.AppInfoSheet
 import org.vita3k.emulator.ui.screens.AppsListScreen
+import org.vita3k.emulator.ui.screens.CheatCatalogScreen
 import org.vita3k.emulator.ui.screens.InitialSetupScreen
 import org.vita3k.emulator.ui.screens.ArchiveInstallSourceDialog
 import org.vita3k.emulator.ui.screens.InstallBottomSheet
@@ -52,6 +53,7 @@ private const val ROUTE_APPS_LIST = "apps_list"
 private const val ROUTE_SETTINGS = "settings"
 private const val ROUTE_USER_MANAGEMENT = "users"
 private const val ROUTE_TROPHIES = "trophies"
+private const val ROUTE_CHEATS = "cheats"
 private const val ROUTE_CUSTOM_CONFIG = "settings/custom/{titleId}?appName={appName}"
 private const val ARG_TITLE_ID = "titleId"
 private const val ARG_APP_NAME = "appName"
@@ -313,7 +315,19 @@ fun AppNavigation(
                     navController.navigate(customConfigRoute(app.titleId, app.title)) {
                         launchSingleTop = true
                     }
+                },
+                onOpenCheatCatalog = {
+                    navController.navigate(ROUTE_CHEATS) {
+                        launchSingleTop = true
+                    }
                 }
+            )
+        }
+
+        composable(route = ROUTE_CHEATS) {
+            CheatCatalogScreen(
+                libraryApps = appsListViewModel.apps,
+                onBack = { navController.popBackStack() }
             )
         }
 

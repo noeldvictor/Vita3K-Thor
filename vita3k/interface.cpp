@@ -506,8 +506,11 @@ static void load_cheats(EmuEnvState &emuenv, const SceKernelModuleInfo &module_i
     }
     cheat::add_module(emuenv.cheat, main_module);
 
-    if (cheat::load(emuenv.cheat, emuenv.cheat_path, emuenv.io.title_id)) {
-        LOG_INFO("{} cheats are turned on for {}", cheat::enabled_cheat_count(emuenv.cheat), emuenv.io.title_id);
+    // Thor: the file may be in the bundled database, on the SD card or in ux0; a copy is made
+    // under cheat_path so that saved on/off choices never touch the bundled files.
+    const fs::path cheat_file = cheat::resolve_cheat_file(emuenv.cheat_path, emuenv.static_assets_path, emuenv.shared_path, emuenv.vita_fs_path, emuenv.io.title_id);
+    if (!cheat_file.empty() && cheat::load_file(emuenv.cheat, cheat_file, emuenv.io.title_id)) {
+        LOG_INFO("{} cheats are turned on for {} ({} in {})", cheat::enabled_cheat_count(emuenv.cheat), emuenv.io.title_id, emuenv.cheat.file.cheats.size(), cheat_file);
     }
 }
 

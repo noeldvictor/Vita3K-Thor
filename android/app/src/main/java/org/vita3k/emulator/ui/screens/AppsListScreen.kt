@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.EmojiEvents
 import androidx.compose.material.icons.filled.FilterList
@@ -112,13 +113,15 @@ fun AppsListScreen(
     onOpenTrophyManager: () -> Unit = {},
     onOpenUserManagement: () -> Unit = {},
     onOpenWelcomeScreen: () -> Unit = {},
-    onOpenCustomConfig: (AppInfo) -> Unit = {}
+    onOpenCustomConfig: (AppInfo) -> Unit = {},
+    onOpenCheatCatalog: () -> Unit = {}
 ) {
     var showSearchBar by remember { mutableStateOf(false) }
     var showFilterSheet by remember { mutableStateOf(false) }
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showAboutSheet by remember { mutableStateOf(false) }
     var selectedAppForActions by remember { mutableStateOf<AppInfo?>(null) }
+    var cheatsSheetApp by remember { mutableStateOf<AppInfo?>(null) }
     var actionTargetApp by remember { mutableStateOf<AppInfo?>(null) }
     var pendingAction by remember { mutableStateOf<AppAction?>(null) }
     var showBatchDeleteConfirm by remember { mutableStateOf(false) }
@@ -176,6 +179,9 @@ fun AppsListScreen(
                         } else {
                             IconButton(onClick = { showSearchBar = true }) {
                                 Icon(Icons.Default.Search, contentDescription = stringResource(R.string.apps_list_cd_search))
+                            }
+                            IconButton(onClick = onOpenCheatCatalog) {
+                                Icon(Icons.Default.AutoFixHigh, contentDescription = stringResource(R.string.cheats_cd_catalog))
                             }
                             IconButton(onClick = onOpenSettings) {
                                 Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.settings_cd_open))
@@ -332,7 +338,24 @@ fun AppsListScreen(
             onCustomConfig = {
                 selectedAppForActions = null
                 onOpenCustomConfig(app)
+            },
+            onCheats = if (app.cheatsAvailable) {
+                {
+                    selectedAppForActions = null
+                    cheatsSheetApp = app
+                }
+            } else {
+                null
             }
+        )
+    }
+
+    cheatsSheetApp?.let { app ->
+        CheatsSheet(
+            titleId = app.titleId,
+            gameTitle = app.title,
+            live = false,
+            onDismiss = { cheatsSheetApp = null }
         )
     }
 
@@ -1149,7 +1172,8 @@ private fun AppActionsDialog(
     onDismiss: () -> Unit,
     onActionSelected: (AppAction) -> Unit,
     onShowInfo: () -> Unit,
-    onCustomConfig: () -> Unit = {}
+    onCustomConfig: () -> Unit = {},
+    onCheats: (() -> Unit)? = null
 ) {
     var showDeleteSubmenu by remember { mutableStateOf(false) }
 
@@ -1219,6 +1243,21 @@ private fun AppActionsDialog(
             },
             onClick = { onCustomConfig() }
         )
+        // Cheats (Thor): only for titles that have a cheat file
+        if (onCheats != null) {
+            AppMenuRow(
+                label = stringResource(R.string.cheats_menu_manage),
+                icon = {
+                    Icon(
+                        Icons.Default.AutoFixHigh,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                },
+                onClick = { onCheats() }
+            )
+        }
 
         // Other actions (reset last played, etc.)
         otherActions.forEach { action ->
@@ -1377,8 +1416,8 @@ private fun AppStatusBadges(app: AppInfo) {
         if (app.hasCustomConfig) {
             CustomConfigBadge()
         }
-        // Thor: E marks a cartridge whose app files are encrypted and cannot
-        // boot; C marks a title with VitaCheat files available.
+        // Thor: "Encrypted" marks a cartridge whose app files are encrypted and
+        // cannot boot; "Cheats" marks a title that has a cheat file.
         if (app.encryptedContent) {
             ThorBadge(
                 label = stringResource(R.string.apps_list_encrypted_badge),

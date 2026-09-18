@@ -39,15 +39,33 @@ The runtime looks for `<TITLEID>.psv` in the roots listed in
   `/sdcard/cheats/psvita/<TITLEID>.psv`, `/storage/<card>/cheats/psvita/db/`,
   `/storage/<card>/VitaCheat/db/` and `/storage/<card>/Roms/psvita/cheats/`
 
-A game with a matching file shows the `C` badge in the app list.
+A game with a matching file shows the Cheats badge in the app list.
 
 ## Runtime
 
-The cheat engine is upstream Vita3K's `vita3k/cheat` module from pull
-request #4107, which reads these files as they are and runs the codes once
-per vblank. Until that port lands on `master`, a matching file only produces
-the `C` badge and no code is applied. `cheats-enabled` in the emulator
-config is the master switch.
+The cheat engine is upstream Vita3K's `vita3k/cheat` module (pull request
+#4107, cherry-picked on 2026-09-17). It reads these files as they are and
+runs the codes once per vblank. Code types `$0 $3 $4 $5 $7 $8 $A $B $C $D`
+are handled.
+
+Where the engine looks for a title's file, in order: the user folder
+(`<shared data>/cheats/<TITLEID>.psv`), the roots listed above (`db/`, the
+SD card, `ux0`), then `cheats/db` next to the desktop executable. A file
+found outside the user folder is copied there first. The on/off choices are
+saved into that copy as `_V1` markers, so the bundled files are never
+modified.
+
+`enable-cheats` in `config.yml` is the master switch.
+
+On desktop, Manage > Cheats or the app list context menu opens the cheat
+dialog. On Android, the games grid has a Cheat catalog icon (every game in
+the database, search and filters, an In library mark), the long-press menu
+of a game with cheats has a Cheats entry, and the pause menu has a Cheats
+card. Changes take effect at once while the game runs and at the next boot
+otherwise.
+
+On Android the `.psv` files ship inside the APK under `assets/cheats` and
+are extracted to `<storage>/cheats/db` on the first launch of each build.
 
 ## Tools
 

@@ -64,8 +64,8 @@
     <string name="apps_list_sort_last_played">Last Played</string>
     <string name="apps_list_sort_compatibility">Compatibility</string>
     <string name="apps_list_custom_config_badge">CC</string>
-    <string name="apps_list_encrypted_badge">E</string>
-    <string name="apps_list_cheats_badge">C</string>
+    <string name="apps_list_encrypted_badge">Encrypted</string>
+    <string name="apps_list_cheats_badge">Cheats</string>
     <string name="apps_list_unpack_badge">ZIP \u2022 unpacks %1$s</string>
     <string name="apps_list_empty_search">No apps match \"%1$s\"</string>
     <string name="apps_list_empty_missing_firmware">Missing firmware components: %1$s</string>
@@ -784,4 +784,32 @@ The cache is not a save. Deleting it costs one slower launch. Games stored as ex
     <string name="trophy_detail_earned_label">Earned</string>
     <string name="trophy_detail_description_label">Details</string>
     <string name="trophy_not_yet_earned">Not yet earned</string>
+
+    <!-- Thor: cheats -->
+    <string name="cheats_title">Cheats</string>
+    <string name="cheats_cd_catalog">Cheat catalog</string>
+    <string name="cheats_catalog_title">Cheat catalog</string>
+    <string name="cheats_menu_manage">Cheats</string>
+    <string name="cheats_master_switch">Enable cheats</string>
+    <string name="cheats_master_hint">Master switch. Off stops every cheat and restores the code the ARM writes replaced.</string>
+    <string name="cheats_all_on">All on</string>
+    <string name="cheats_all_off">All off</string>
+    <string name="cheats_reload">Reload file</string>
+    <string name="cheats_none_for_title">No cheat file for this title.</string>
+    <string name="cheats_live">running, changes apply at once</string>
+    <string name="cheats_offline">not running, changes apply at the next boot</string>
+    <string name="cheats_broken">Not understood by the engine</string>
+    <string name="cheats_status_count">%1$d of %2$d on</string>
+    <string name="cheats_file">File: %1$s</string>
+    <string name="cheats_search_hint">Search games or title ids</string>
+    <string name="cheats_region_all">All</string>
+    <string name="cheats_in_library">In library</string>
+    <string name="cheats_in_library_only">In library only</string>
+    <string name="cheats_catalog_summary">%1$d games, %2$d cheats</string>
+    <string name="cheats_count">%1$d cheats</string>
+    <string name="cheats_catalog_empty">No game matches.</string>
+    <string name="cheats_catalog_missing">This build carries no cheat index.</string>
+    <string name="cheats_version">Version %1$s</string>
+    <string name="cheats_author">Codes by %1$s</string>
+    <string name="cheats_toggle_failed">Could not write the cheat file.</string>
 </resources>

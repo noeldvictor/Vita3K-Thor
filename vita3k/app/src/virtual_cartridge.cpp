@@ -30,6 +30,7 @@
 #include <io/state.h>
 #include <io/vfs.h>
 #include <packages/sfo.h>
+#include <cheat/functions.h>
 #include <util/cheat_paths.h>
 #include <util/fs.h>
 #include <util/log.h>
@@ -191,7 +192,7 @@ static bool is_game_card_category(const std::string &category) {
 }
 
 static bool has_cheats_for_title(const EmuEnvState &emuenv, const std::string &title_id) {
-    return cheat_paths::has_vitacheat_file(emuenv.vita_fs_path, emuenv.shared_path, emuenv.vita_fs_path, title_id);
+    return cheat::has_cheat_file(emuenv.cheat_path, emuenv.static_assets_path, emuenv.shared_path, emuenv.vita_fs_path, title_id);
 }
 
 static std::vector<std::string> get_archive_content_roots_for_scan(mz_zip_archive &zip) {

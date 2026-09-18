@@ -34,6 +34,16 @@ using JitInvalidate = std::function<void(uint32_t address, size_t size)>;
 void unload(CheatState &state);
 
 bool load(CheatState &state, const fs::path &cheats_dir, const std::string &title_id);
+bool load_file(CheatState &state, const fs::path &file, const std::string &title_id);
+
+// Thor: a title's cheat file can be in the user's folder (`cheat_path`), in the bundled
+// database (`<static assets>/cheats/db` on desktop, `<shared>/cheats/db` once the APK
+// extracted it on Android), on an SD card root or in `ux0:/vitacheat`. `resolve_cheat_file`
+// looks in that order and copies a per-title file found outside `cheat_path` into
+// `cheat_path`, so the on/off choices written by `save` never touch the bundled copy.
+fs::path resolve_cheat_file(const fs::path &cheat_path, const fs::path &static_assets_path, const fs::path &shared_path, const fs::path &vita_fs_path, const std::string &title_id);
+// The same search without the copy; the app list badge uses it.
+bool has_cheat_file(const fs::path &cheat_path, const fs::path &static_assets_path, const fs::path &shared_path, const fs::path &vita_fs_path, const std::string &title_id);
 
 bool reload(CheatState &state, const fs::path &cheats_dir, const std::string &title_id, MemState &mem, const JitInvalidate &invalidate_jit);
 

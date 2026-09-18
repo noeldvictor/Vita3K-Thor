@@ -177,7 +177,7 @@ void CheatsDialog::reload() {
         m_file = cheat::snapshot(emuenv.cheat);
     } else {
         m_file = {};
-        const auto path = cheat::find_cheat_file(emuenv.cheat_path, m_title_id);
+        const auto path = cheat::resolve_cheat_file(emuenv.cheat_path, emuenv.static_assets_path, emuenv.shared_path, emuenv.vita_fs_path, m_title_id);
         if (!path.empty()) {
             m_file = cheat::parse_cheat_file(path, m_title_id);
             for (auto &cheat : m_file.cheats)

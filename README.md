@@ -74,7 +74,7 @@ The cache is visible and manageable in **Settings → Emulator → Cartridge
 Cache**: size per game, free space, delete one or all. Deleting only costs that
 game a re-extraction on its next launch.
 
-Encrypted (PFS) content is detected and refused with an `E` badge. This fork
+Encrypted (PFS) content is detected and refused with an Encrypted badge. This fork
 does not decrypt games, bypass licenses, or replace proper dumping.
 
 ## Features for normal users
