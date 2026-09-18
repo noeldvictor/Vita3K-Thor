@@ -1,0 +1,15 @@
+# ID: PCSH00250
+# Title: Dead or Alive Xtreme 3 Venus
+# Region: ASA
+# Version: 1.15
+# Type: NoNpDrm
+# Code Author: doax3glitcher
+# Source: https://doax3glitcher.tumblr.com/ via https://github.com/ShumnoT/VitaCheatDatabase/issues/40 (SiTWulf, 2018-11-30)
+
+_V0 GIRLS MAX MONEY
+$3201 84C8E850 00000040
+$3300 00000000 0016E360
+
+_V0 OWNER MAX MONEY
+$3201 84C8E854 00000040
+$3300 00000000 0016E360

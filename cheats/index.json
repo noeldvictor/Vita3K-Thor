@@ -1,8 +1,8 @@
 {
  "schema": "vita3k-thor-cheat-index/1",
  "source": "cheats/db",
- "game_count": 678,
- "cheat_count": 8008,
+ "game_count": 679,
+ "cheat_count": 8010,
  "games": [
   {
    "title_id": "PCSA00008",
@@ -16897,6 +16897,22 @@
    "enabled_on_boot": 0,
    "file": "PCSH00242.psv",
    "cheat_count": 13,
+   "region_code": "ASIA"
+  },
+  {
+   "title_id": "PCSH00250",
+   "title": "Dead or Alive Xtreme 3 Venus",
+   "region": "ASA",
+   "version": "1.15",
+   "type": "NoNpDrm",
+   "author": "doax3glitcher",
+   "cheats": [
+    "GIRLS MAX MONEY",
+    "OWNER MAX MONEY"
+   ],
+   "enabled_on_boot": 0,
+   "file": "PCSH00250.psv",
+   "cheat_count": 2,
    "region_code": "ASIA"
   },
   {
